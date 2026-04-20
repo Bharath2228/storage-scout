@@ -10,7 +10,7 @@ Built with **Python + PyQt6**
 
 | Feature | Description |
 |---|---|
-| **Deep Folder Scanning** | Recursively scans any local or network path in a background thread — the UI stays responsive during long scans |
+| **Deep Folder Scanning** | Recursively scans any local or network path in a background thread — the **Re-scan** button toggles to **Stop** to cancel mid-way |
 | **Status Classification** | Every folder and file is classified as **Active**, **Inactive**, or **Empty** based on last-modified timestamps |
 | **Smart Filters** | Filter by status (All / Active / Inactive / Empty), date range, or "older than N months" |
 | **Checkbox Selection** | Select individual files or tick a parent folder to auto-select everything inside it |

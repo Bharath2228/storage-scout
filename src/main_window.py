@@ -429,15 +429,22 @@ class MainWindow(QMainWindow):
             self.txt_path.setText(os.path.normpath(folder))
 
     def start_scan(self):
+        # If currently scanning, this button acts as a Stop button
+        if self.scanner_thread and self.scanner_thread.isRunning():
+            self.scanner_thread.cancel()
+            self.lbl_status.setText("Stopping scan…")
+            self.btn_rescan.setEnabled(False)
+            return
+
         path = self.txt_path.text().strip()
         if not path or not os.path.exists(path):
             path = os.getcwd()
             self.txt_path.setText(path)
+        
         self.lbl_status.setText("Scanning…")
-        self.btn_rescan.setEnabled(False)
-        if self.scanner_thread and self.scanner_thread.isRunning():
-            self.scanner_thread.cancel()
-            self.scanner_thread.wait()
+        self.btn_rescan.setText("⏹  Stop")
+        self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;") # temporary stop style
+        
         self.scanner_thread = ScannerThread(path, stale_months=self.fp.slider.value())
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_progress.connect(self._on_progress)
@@ -449,8 +456,14 @@ class MainWindow(QMainWindow):
 
     def _on_scan_done(self, root_node):
         self.btn_rescan.setEnabled(True)
+        self.btn_rescan.setText("⟳  Re-scan")
+        self.btn_rescan.setStyleSheet("") # reset style
+        
         if not root_node:
-            self.lbl_status.setText("Scan failed or folder is empty.")
+            if self.scanner_thread and self.scanner_thread.is_cancelled:
+                self.lbl_status.setText("Scan stopped by user.")
+            else:
+                self.lbl_status.setText("Scan failed or folder is empty.")
             return
         self.tree_model = WatchdogTreeModel(root_node)
         self.proxy_model.setSourceModel(self.tree_model)

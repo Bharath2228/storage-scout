@@ -80,6 +80,8 @@ class ScannerThread(QThread):
                 
                 if is_dir:
                     child_node = self._scan_directory(item_path)
+                    if self.is_cancelled:
+                        return None
                     if child_node:
                         node['children'].append(child_node)
                         total_size += child_node['size']
