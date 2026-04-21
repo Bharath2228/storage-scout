@@ -109,10 +109,13 @@ class WatchdogTreeModel(QAbstractItemModel):
             return item.itemData
             
         elif role == Qt.ItemDataRole.TextAlignmentRole:
-            if index.column() in [3, 4]: # Age and Size aligned right
-                return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            elif index.column() in [5, 6]: # Status and Action centered
+            col = index.column()
+            if col == 0:  # Name / path: left-align for readability
+                return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            if col in (1, 2, 5, 6):  # Type, Last modified, Status, Action: center
                 return Qt.AlignmentFlag.AlignCenter
+            if col in (3, 4):  # Age and Size: right-align numeric values
+                return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 
         return None
 
