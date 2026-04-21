@@ -25,7 +25,9 @@ class ScannerThread(QThread):
             return
             
         root_node = self._scan_directory(self.start_path)
-        if not self.is_cancelled:
+        if self.is_cancelled:
+            self.scan_finished.emit(None)
+        else:
             self.scan_finished.emit(root_node)
             
     def cancel(self):
@@ -48,12 +50,11 @@ class ScannerThread(QThread):
             return None
             
         try:
-            items = os.listdir(path)
+            # Using scandir as a context manager is recommended
+            iterator = os.scandir(path)
         except PermissionError:
             return node
-            
-        if not items:
-            node['status'] = 'Empty'
+        except Exception:
             return node
             
         total_size = 0
@@ -64,58 +65,61 @@ class ScannerThread(QThread):
         current_time = datetime.now().timestamp()
         stale_threshold = self.stale_months * 30 * 24 * 3600 # rough approximation
         
-        for item in items:
-            if self.is_cancelled:
-                return None
-                
-            item_path = os.path.join(path, item)
-            current_time_emit = datetime.now().timestamp()
-            if current_time_emit - self.last_emit_time > 0.05: # emit roughly every 50ms
-                self.scan_progress.emit(item_path)
-                self.last_emit_time = current_time_emit
-                
-            try:
-                item_stat = os.stat(item_path)
-                is_dir = os.path.isdir(item_path)
-                
-                if is_dir:
-                    child_node = self._scan_directory(item_path)
-                    if self.is_cancelled:
-                        return None
-                    if child_node:
-                        node['children'].append(child_node)
-                        total_size += child_node['size']
-                        if child_node['last_modified'] > latest_mod_time:
-                            latest_mod_time = child_node['last_modified']
-                        if child_node['status'] != 'Empty':
-                            has_files = True
-                        if child_node['status'] == 'Active':
-                            all_stale = False
-                else:
-                    has_files = True
-                    mod_time = item_stat.st_mtime
-                    size = item_stat.st_size
-                    total_size += size
+        try:
+            for entry in iterator:
+                if self.is_cancelled:
+                    return None
                     
-                    if mod_time > latest_mod_time:
-                        latest_mod_time = mod_time
+                item_path = entry.path
+                current_time_emit = datetime.now().timestamp()
+                if current_time_emit - self.last_emit_time > 0.05: # emit roughly every 50ms
+                    self.scan_progress.emit(item_path)
+                    self.last_emit_time = current_time_emit
+                    
+                try:
+                    is_dir = entry.is_dir()
+                    
+                    if is_dir:
+                        child_node = self._scan_directory(item_path)
+                        if self.is_cancelled:
+                            return None
+                        if child_node:
+                            node['children'].append(child_node)
+                            total_size += child_node['size']
+                            if child_node['last_modified'] > latest_mod_time:
+                                latest_mod_time = child_node['last_modified']
+                            if child_node['status'] != 'Empty':
+                                has_files = True
+                            if child_node['status'] == 'Active':
+                                all_stale = False
+                    else:
+                        has_files = True
+                        item_stat = entry.stat()
+                        mod_time = item_stat.st_mtime
+                        size = item_stat.st_size
+                        total_size += size
                         
-                    is_stale = (current_time - mod_time) > stale_threshold
-                    if not is_stale:
-                        all_stale = False
-                        
-                    child_node = {
-                        'name': item,
-                        'path': item_path,
-                        'is_dir': False,
-                        'size': size,
-                        'last_modified': mod_time,
-                        'status': 'Inactive' if is_stale else 'Active',
-                        'children': []
-                    }
-                    node['children'].append(child_node)
-            except Exception:
-                continue
+                        if mod_time > latest_mod_time:
+                            latest_mod_time = mod_time
+                            
+                        is_stale = (current_time - mod_time) > stale_threshold
+                        if not is_stale:
+                            all_stale = False
+                            
+                        child_node = {
+                            'name': entry.name,
+                            'path': item_path,
+                            'is_dir': False,
+                            'size': size,
+                            'last_modified': mod_time,
+                            'status': 'Inactive' if is_stale else 'Active',
+                            'children': []
+                        }
+                        node['children'].append(child_node)
+                except Exception:
+                    continue
+        finally:
+            iterator.close()
                 
         node['size'] = total_size
         if latest_mod_time > 0:

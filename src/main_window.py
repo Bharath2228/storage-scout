@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QMenu, QSizePolicy, QFrame
 )
-from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer
+from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel
@@ -72,6 +72,19 @@ class ActionDelegate(QStyledItemDelegate):
 # Filter Panel (standalone widget)
 # ────────────────────────────────────────────────────────────────────────────
 
+class AnyDateEdit(QDateEdit):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setCalendarPopup(True)
+        self.calendarWidget().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj == self.calendarWidget() and event.type() == QEvent.Type.Show:
+            if self.date() == self.minimumDate():
+                current_date = QDate.currentDate()
+                self.calendarWidget().setCurrentPage(current_date.year(), current_date.month())
+        return super().eventFilter(obj, event)
+
 class FilterPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,13 +121,13 @@ class FilterPanel(QFrame):
         self._date_from_active = False
         self._date_to_active   = False
 
-        self.date_from = QDateEdit()
+        self.date_from = AnyDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDisplayFormat("dd/MM/yyyy")
         self.date_from.setSpecialValueText("Any")
         self.date_from.setDate(self.date_from.minimumDate())   # shows "Any"
 
-        self.date_to = QDateEdit()
+        self.date_to = AnyDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDisplayFormat("dd/MM/yyyy")
         self.date_to.setSpecialValueText("Any")
