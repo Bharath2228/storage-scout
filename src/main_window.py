@@ -23,10 +23,11 @@ from .scanner import ScannerThread
 class StatusDelegate(QStyledItemDelegate):
     # (text_color, bg_color, border_color)
     _COLORS = {
-        'Empty':    (QColor(0xb0, 0x1c, 0x1c), QColor(0xff, 0xeb, 0xe9), QColor(0xf8, 0x51, 0x49)),
-        'Inactive': (QColor(0x7d, 0x4e, 0x00), QColor(0xff, 0xf8, 0xc5), QColor(0xd2, 0x9c, 0x22)),
-        'Active':   (QColor(0x1a, 0x7f, 0x37), QColor(0xda, 0xfb, 0xe1), QColor(0x2d, 0xa4, 0x4e)),
-        'Context':  (QColor(0x6e, 0x40, 0xc9), QColor(0xf5, 0xf0, 0xff), QColor(0xab, 0x7d, 0xff)),
+        'Empty':    (QColor("#991b1b"), QColor("#fef2f2"), QColor("#fee2e2")), # Danger Red
+        'Inactive': (QColor("#92400e"), QColor("#fffbeb"), QColor("#fef3c7")), # Warning Amber
+        'Pending':  (QColor("#92400e"), QColor("#fffbeb"), QColor("#fef3c7")), # Warning Amber
+        'Active':   (QColor("#065f46"), QColor("#f0fdf4"), QColor("#d1fae5")), # Success Emerald
+        'Context':  (QColor("#1e40af"), QColor("#eff6ff"), QColor("#dbeafe")), # Info Blue
     }
 
     def paint(self, painter, option, index):
@@ -43,12 +44,22 @@ class StatusDelegate(QStyledItemDelegate):
         painter.setBrush(QBrush(bg_color))
         painter.setPen(QPen(border_color, 1))
         painter.drawRoundedRect(pill, 11, 11)
+        
+        # Colored dot
+        dot_size = 6
+        dot_rect = QRect(pill.left() + 8, pill.top() + (pill.height() - dot_size) // 2, dot_size, dot_size)
+        painter.setBrush(QBrush(text_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(dot_rect)
+        
         f = painter.font()
         f.setBold(True)
-        f.setPointSize(9)
+        f.setPointSize(8)
         painter.setFont(f)
         painter.setPen(text_color)
-        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, status)
+        
+        text_rect = QRect(pill.left() + 18, pill.top(), pill.width() - 18, pill.height())
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, status)
         painter.restore()
 
 
@@ -63,18 +74,26 @@ class ActionDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if "queued" in text:
-            painter.setPen(QPen(QColor(0xcf, 0x22, 0x2e)))
-            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ queued")
+            # Draw red badge for queued items
+            painter.setBrush(QBrush(QColor("#fef2f2")))
+            painter.setPen(QPen(QColor("#ef4444"), 1))
+            painter.drawRoundedRect(btn, 6, 6)
+            f = painter.font()
+            f.setBold(True)
+            f.setPointSize(8)
+            painter.setFont(f)
+            painter.setPen(QColor("#ef4444"))
+            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ Queued")
         else:
-            # Light blue pill for "Open"
-            painter.setBrush(QBrush(QColor(0xdd, 0xea, 0xfb)))
-            painter.setPen(QPen(QColor(0x09, 0x69, 0xda), 1))
-            painter.drawRoundedRect(btn, 12, 12)
+            # Modern Outline Button for "Open"
+            painter.setBrush(QBrush(QColor("#eff6ff")))
+            painter.setPen(QPen(QColor("#2563eb"), 1.5))
+            painter.drawRoundedRect(btn, 6, 6)
             f = painter.font()
             f.setBold(True)
             f.setPointSize(9)
             painter.setFont(f)
-            painter.setPen(QColor(0x09, 0x69, 0xda))
+            painter.setPen(QColor("#2563eb"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
@@ -107,15 +126,19 @@ class FilterPanel(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("filterPanel")
+        self.setObjectName("sidebar")
         self.setVisible(False)
+        self.setFixedWidth(280)
 
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(24, 16, 24, 16)
-        outer.setSpacing(24)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 16, 0, 16)
+        outer.setSpacing(4)
 
         # ── Section 1: Display Mode ──────────────────────────────────────────
-        sec1 = self._make_section("DISPLAY MODE")
+        lbl_display = QLabel("DISPLAY MODE")
+        lbl_display.setObjectName("sectionHeader")
+        outer.addWidget(lbl_display)
+
         self.rb_all      = QRadioButton("Show all")
         self.rb_inactive = QRadioButton("Inactive only")
         self.rb_empty    = QRadioButton("Empty only")
@@ -123,20 +146,23 @@ class FilterPanel(QFrame):
         self.bg = QButtonGroup()
         for rb in [self.rb_all, self.rb_inactive, self.rb_empty]:
             self.bg.addButton(rb)
-            sec1.addWidget(rb)
+            outer.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
-        sec1.addStretch()
-        outer.addLayout(sec1)
+        
+        outer.addSpacing(16)
+        outer.addWidget(self._hline())
 
-        outer.addWidget(self._vline())
+
 
         # ── Section 2: Date Range ────────────────────────────────────────────
-        sec2 = self._make_section("DATE RANGE")
+        lbl_date = QLabel("DATE RANGE")
+        lbl_date.setObjectName("sectionHeader")
+        outer.addWidget(lbl_date)
+
         self.date_from = AnyDateEdit()
         self.date_from.setDisplayFormat("dd/MM/yyyy")
         self.date_from.setSpecialValueText("Any")
         self.date_from.setDate(self.date_from.minimumDate())
-        # Make date widgets wider to improve spacing
         self.date_from.setMinimumWidth(150)
 
         self.date_to = AnyDateEdit()
@@ -148,68 +174,68 @@ class FilterPanel(QFrame):
         self.date_to.setCursor(Qt.CursorShape.PointingHandCursor)
 
         for lbl_text, widget in [("From", self.date_from), ("To", self.date_to)]:
-            row = QHBoxLayout()
-            row.setSpacing(12)
+            box = QWidget()
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(16, 4, 16, 4)
+            box_layout.setSpacing(4)
             l = QLabel(lbl_text)
-            l.setFixedWidth(40)
             l.setObjectName("mutedLabel")
-            row.addWidget(l)
-            row.addWidget(widget)
-            sec2.addLayout(row)
+            box_layout.addWidget(l)
+            box_layout.addWidget(widget)
+            outer.addWidget(box)
 
-        self.btn_clear_dates = QPushButton("Clear")
+        btn_box = QWidget()
+        btn_layout = QHBoxLayout(btn_box)
+        btn_layout.setContentsMargins(16, 0, 16, 0)
+        self.btn_clear_dates = QPushButton("Clear dates")
         self.btn_clear_dates.setObjectName("linkBtn")
         self.btn_clear_dates.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear_dates.clicked.connect(self._clear_dates)
-        sec2.addWidget(self.btn_clear_dates)
-        sec2.addStretch()
-        outer.addLayout(sec2)
+        btn_layout.addWidget(self.btn_clear_dates)
+        btn_layout.addStretch()
+        outer.addWidget(btn_box)
 
-        outer.addWidget(self._vline())
+        outer.addSpacing(16)
+        outer.addWidget(self._hline())
 
         # ── Section 3: Stale Threshold ───────────────────────────────────────
-        # Custom header row: "AGE THRESHOLD"  [3m pill]  "Older than 3 months"
+        lbl_age = QLabel("AGE THRESHOLD")
+        lbl_age.setObjectName("sectionHeader")
+        outer.addWidget(lbl_age)
+
+        age_box = QWidget()
+        age_layout = QVBoxLayout(age_box)
+        age_layout.setContentsMargins(16, 4, 16, 4)
+        age_layout.setSpacing(8)
+
         age_hdr = QHBoxLayout()
         age_hdr.setSpacing(6)
-        age_hdr_lbl = QLabel("AGE THRESHOLD")
-        age_hdr_lbl.setObjectName("sectionLabel")
         self.lbl_pill = QLabel()
         self.lbl_pill.setObjectName("agePill")
         self.lbl_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_pill.setFixedHeight(20)
         self.lbl_val = QLabel()
         self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        age_hdr.addWidget(age_hdr_lbl)
         age_hdr.addWidget(self.lbl_pill)
-        age_hdr.addSpacing(2)
         age_hdr.addWidget(self.lbl_val)
         age_hdr.addStretch()
-        sec3 = QVBoxLayout()
-        sec3.setContentsMargins(0, 0, 0, 0)
-        sec3.setSpacing(8)
-        sec3.addLayout(age_hdr)
+        age_layout.addLayout(age_hdr)
         
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
         self.slider.setValue(self.AGE_FILTER_DISABLED)
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider.setTickInterval(1)
-        self.slider.setMinimumWidth(180)
-        self.slider.setMaximumWidth(260)
-        self.slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.slider.valueChanged.connect(self._update_age_label)
         self.slider.valueChanged.connect(self._sync_manual_age_from_slider)
-
-        sec3.addWidget(self.slider)
+        age_layout.addWidget(self.slider)
 
         self.age_input = QSpinBox()
         self.age_input.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
         self.age_input.setValue(self.AGE_FILTER_DISABLED)
         self.age_input.setSuffix(" months")
-        self.age_input.setMinimumWidth(120)
         self.age_input.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.age_input.setToolTip("Manual age filter (months). 0 means Any age.")
         self.age_input.valueChanged.connect(self._sync_slider_from_manual_age)
 
         bot_row = QHBoxLayout()
@@ -219,28 +245,29 @@ class FilterPanel(QFrame):
         bot_row.addWidget(lbl_manual)
         bot_row.addWidget(self.age_input)
         bot_row.addStretch()
-        sec3.addLayout(bot_row)
+        age_layout.addLayout(bot_row)
+        outer.addWidget(age_box)
 
         self._update_age_label(self.slider.value())
-
-        sec3.addStretch()
-        outer.addLayout(sec3)
-
         outer.addStretch()
 
         # ── Section 4: Actions ───────────────────────────────────────────────
-        sec4 = QVBoxLayout()
-        sec4.setSpacing(8)
-        sec4.addStretch()
-        self.btn_reset = QPushButton("↺  Reset")
-        self.btn_reset.setObjectName("resetBtn")
+        action_box = QWidget()
+        action_layout = QVBoxLayout(action_box)
+        action_layout.setContentsMargins(16, 16, 16, 16)
+        action_layout.setSpacing(10)
+        
+        self.btn_reset = QPushButton("↺  Reset all filters")
+        self.btn_reset.setObjectName("ghostBtn")
+        self.btn_reset.setToolTip("Reset all filters to their default values")
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_close = QPushButton("✕  Close")
+        self.btn_close = QPushButton("Close sidebar")
         self.btn_close.setObjectName("filterCloseBtn")
+        self.btn_close.setToolTip("Hide the filter sidebar")
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        sec4.addWidget(self.btn_reset)
-        sec4.addWidget(self.btn_close)
-        outer.addLayout(sec4)
+        action_layout.addWidget(self.btn_reset)
+        action_layout.addWidget(self.btn_close)
+        outer.addWidget(action_box)
 
     def _clear_dates(self):
         """Reset both date pickers back to 'Any'."""
@@ -249,24 +276,29 @@ class FilterPanel(QFrame):
 
     def _update_age_label(self, value):
         if value == self.AGE_FILTER_DISABLED:
-            self.lbl_val.setText("Any age")
-            self.lbl_pill.hide()
-            return
-            
-        self.lbl_pill.show()
-        self.lbl_pill.setText(f"  {value}m  ")
-        
-        years = value // 12
-        months = value % 12
-        
-        if years > 0 and months > 0:
-            text = f"Older than {years}y {months}m"
-        elif years > 0:
-            text = f"Older than {years}y"
+            self.lbl_pill.setText("Off")
+            self.lbl_pill.setStyleSheet("background-color: #64748b; color: white;")
+            self.lbl_val.setText("Age filtering is disabled")
         else:
-            text = f"Older than {months}m"
+            self.lbl_pill.setText(f"{value}m")
+            self.lbl_pill.setStyleSheet("background-color: #2563eb; color: white;")
             
-        self.lbl_val.setText(text)
+            years = value // 12
+            months = value % 12
+            if years > 0 and months > 0:
+                text = f"Older than {years}y {months}m"
+            elif years > 0:
+                text = f"Older than {years}y"
+            else:
+                text = f"Older than {value} month{'s' if value > 1 else ''}"
+            self.lbl_val.setText(text)
+
+    def _hline(self):
+        f = QFrame()
+        f.setFrameShape(QFrame.Shape.HLine)
+        f.setObjectName("sidebarDivider")
+        f.setFixedHeight(1)
+        return f
 
     def _sync_manual_age_from_slider(self, value):
         blocker = QSignalBlocker(self.age_input)
@@ -379,7 +411,7 @@ class MainWindow(QMainWindow):
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
         tb.setContentsMargins(16, 12, 16, 12)
-        tb.setSpacing(10)
+        tb.setSpacing(12)
 
         lbl = QLabel("IBMS Watchdog")
         lbl.setObjectName("appTitle")
@@ -399,6 +431,7 @@ class MainWindow(QMainWindow):
 
         self.btn_rescan = QPushButton("⟳  Re-scan")
         self.btn_rescan.setObjectName("primaryBtn")
+        self.btn_rescan.setToolTip("Start scanning the selected folder path")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
@@ -408,12 +441,14 @@ class MainWindow(QMainWindow):
         self.btn_filter = QPushButton("⚙  Filters")
         self.btn_filter.setObjectName("filterBtn")
         self.btn_filter.setCheckable(True)
+        self.btn_filter.setToolTip("Toggle filter sidebar (Alt+F)")
         self.btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_filter.clicked.connect(self._toggle_filters)
         tb.addWidget(self.btn_filter)
 
         self.btn_expand = QPushButton("Expand All")
         self.btn_expand.setCheckable(True)
+        self.btn_expand.setToolTip("Expand or collapse all folders in the view")
         self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_expand.clicked.connect(self._toggle_expand)
 
@@ -436,34 +471,44 @@ class MainWindow(QMainWindow):
 
         vbox.addWidget(topbar)
 
-        # ── Filter panel (instant show/hide) ──────────────────────────────────
+        # ── Main Content Area (Sidebar + Content) ──────────────────────────────
+        main_area = QHBoxLayout()
+        main_area.setContentsMargins(0, 0, 0, 0)
+        main_area.setSpacing(0)
+
+        # ── Left Sidebar (Filters) ───────────────────────────────────────────
         self.fp = FilterPanel()
         self.fp.btn_close.clicked.connect(self._toggle_filters)
         self.fp.btn_reset.clicked.connect(self._reset_filters)
-        # Dynamic filtering: when user changes any filter control, clear selections
-        # and re-apply filters so view and selection remain consistent.
+        # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
         self.fp.date_from.dateChanged.connect(lambda _d: self._on_filter_changed())
         self.fp.date_to.dateChanged.connect(lambda _d: self._on_filter_changed())
-        # Age controls: debounced — restarting the timer on every tick so the
-        # filter only fires once the user finishes moving the slider/spinner.
+        # Age controls: debounced
         self.fp.slider.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.age_input.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.btn_clear_dates.clicked.connect(lambda: self._on_filter_changed())
         self._apply_default_browse_preset(apply_now=False)
-        vbox.addWidget(self.fp)
+        main_area.addWidget(self.fp)
+
+        # ── Right Content Area ────────────────────────────────────────────────
+        self.right_content = QWidget()
+        self.right_content.setObjectName("contentArea")
+        right_v = QVBoxLayout(self.right_content)
+        right_v.setContentsMargins(24, 24, 24, 24)
+        right_v.setSpacing(16)
 
         # ── Controls row (above tree): expand / select all) ────────────────
         self.controls_bar = QWidget()
         controls_layout = QHBoxLayout(self.controls_bar)
-        controls_layout.setContentsMargins(12, 6, 12, 6)
-        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(12)
         controls_layout.addWidget(self.btn_expand)
         self.btn_select_all = QPushButton("Select All")
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_all.clicked.connect(self._select_all)
         controls_layout.addWidget(self.btn_select_all)
-        # Quick-select buttons for status-based selection
+        
         self.btn_select_inactive = QPushButton("Select All Inactive")
         self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_inactive.clicked.connect(self._select_inactive)
@@ -476,8 +521,8 @@ class MainWindow(QMainWindow):
         self.btn_select_empty.setEnabled(False)
         controls_layout.addWidget(self.btn_select_empty)
         controls_layout.addStretch()
-        self.controls_bar.setVisible(False)  # hidden until data is loaded
-        vbox.addWidget(self.controls_bar)
+        self.controls_bar.setVisible(False)
+        right_v.addWidget(self.controls_bar)
 
         # ── Empty state + Tree wrapped in a stacked widget ───────────────────
         self.content_stack = QStackedWidget()
@@ -521,8 +566,8 @@ class MainWindow(QMainWindow):
         self.tree = QTreeView()
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.tree.setAlternatingRowColors(True)
-        # Disable sorting — columns should not be sortable by the user
-        self.tree.setSortingEnabled(False)
+        # Enable sorting
+        self.tree.setSortingEnabled(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(False)
         self.tree.setMouseTracking(True)
@@ -536,17 +581,15 @@ class MainWindow(QMainWindow):
         self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         self.tree.viewport().installEventFilter(self)
         self.tree.header().setCursor(Qt.CursorShape.ArrowCursor)
-        # Prevent the user from rearranging columns and keep layout stable
         hdr = self.tree.header()
         hdr.setSectionsMovable(False)
         hdr.setStretchLastSection(False)
-        # Make headers non-clickable and hide sort indicator so sorting can't be triggered
-        hdr.setSectionsClickable(False)
+        hdr.setSectionsClickable(True)
         try:
-            hdr.setSortIndicatorShown(False)
+            hdr.setSortIndicatorShown(True)
+            hdr.setSortIndicator(3, Qt.SortOrder.DescendingOrder) # Default sort by Age
         except Exception:
             pass
-        # Center header labels for all columns
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Page 2: No results (filter produced zero matches)
@@ -586,8 +629,9 @@ class MainWindow(QMainWindow):
 
         # ── Wrap content_stack in container so we can overlay the floating button ─
         self.tree_container = QWidget()
+        self.tree_container.setObjectName("tableCard")
         tc_layout = QVBoxLayout(self.tree_container)
-        tc_layout.setContentsMargins(0, 0, 0, 0)
+        tc_layout.setContentsMargins(1, 1, 1, 1) # Internal border gap
         tc_layout.setSpacing(0)
         tc_layout.addWidget(self.content_stack)
 
@@ -607,7 +651,10 @@ class MainWindow(QMainWindow):
         self.tree.verticalScrollBar().valueChanged.connect(self._on_tree_scroll)
         self.tree_container.installEventFilter(self)
 
-        vbox.addWidget(self.tree_container, 1)
+        right_v.addWidget(self.tree_container, 1)
+        main_area.addWidget(self.right_content, 1)
+
+        vbox.addLayout(main_area, 1)
 
         # ── Status bar ────────────────────────────────────────────────────────
         sb = QWidget()
@@ -680,9 +727,28 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _toggle_filters(self):
-        visible = not self.fp.isVisible()
-        self.fp.setVisible(visible)
-        self.btn_filter.setChecked(visible)
+        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+        
+        is_visible = self.fp.isVisible()
+        target_width = 280 if not is_visible else 0
+        
+        # Ensure it's ready for animation
+        if not is_visible:
+            self.fp.setVisible(True)
+            self.fp.setMinimumWidth(0)
+            self.fp.setMaximumWidth(0)
+            
+        self.sidebar_anim = QPropertyAnimation(self.fp, b"maximumWidth")
+        self.sidebar_anim.setDuration(250)
+        self.sidebar_anim.setStartValue(self.fp.width())
+        self.sidebar_anim.setEndValue(target_width)
+        self.sidebar_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        
+        if is_visible:
+            self.sidebar_anim.finished.connect(lambda: self.fp.setVisible(False))
+            
+        self.sidebar_anim.start()
+        self.btn_filter.setChecked(not is_visible)
 
     def _apply_filters(self):
         # Determine status filter from radio buttons

@@ -127,13 +127,12 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col in (3, 4):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
-        if role == Qt.ItemDataRole.FontRole and index.column() == 0:
-            item_data = item.itemData
-            if item_data.get('is_dir', False):
-                from PyQt6.QtGui import QFont
-                f = QFont()
-                f.setBold(True)
-                return f
+        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
+            from PyQt6.QtGui import QIcon
+            is_dir = item.itemData.get('is_dir', False)
+            if is_dir:
+                return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
+            return QIcon.fromTheme("text-x-generic", QIcon.fromTheme("document-new"))
 
         return None
 
@@ -241,7 +240,24 @@ class WatchdogTreeModel(QAbstractItemModel):
 class WatchdogFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setRecursiveFilteringEnabled(True)
+        self.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._reset()
+
+    def lessThan(self, left, right):
+        left_data = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
+        right_data = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
+        
+        col = left.column()
+        # Sort by Size (column 4)
+        if col == 4:
+            return left_data.get('size', 0) < right_data.get('size', 0)
+        # Sort by Age / Last Modified (column 3 or 2)
+        if col in (2, 3):
+            return left_data.get('last_modified', 0) < right_data.get('last_modified', 0)
+            
+        return super().lessThan(left, right)
 
     def _reset(self):
         self.empty_only = False
