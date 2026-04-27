@@ -369,6 +369,24 @@ def apply_theme(app, theme_name="dark"):
             padding: 7px 14px 5px 14px;
         }}
 
+        QPushButton#deleteBtn {{
+            background-color: transparent;
+            color: #dc2626;
+            border: 1.5px solid #fecaca;
+            border-radius: 6px;
+            padding: 10px 18px;
+            font-weight: 500;
+        }}
+        QPushButton#deleteBtn:hover {{
+            background-color: #fef2f2;
+            border-color: #dc2626;
+        }}
+        QPushButton#deleteBtn:disabled {{
+            color: {text_muted};
+            border-color: {border};
+            background-color: transparent;
+        }}
+
         /* ── Sidebar actions ─────────────────────────────────────────────── */
         QPushButton#closeSidebar {{
             background-color: transparent;

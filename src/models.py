@@ -81,13 +81,19 @@ class WatchdogTreeModel(QAbstractItemModel):
         self.rootItem = TreeItem({'name': 'Root'})
         self._setupModelData(root_data, self.rootItem)
 
-    def _setupModelData(self, data_node, parent):
-        if not data_node:
+    def _setupModelData(self, root_data, root_item):
+        if not root_data:
             return
-        for child_data in data_node.get('children', []):
-            child_item = TreeItem(child_data, parent)
-            parent.appendChild(child_item)
-            self._setupModelData(child_data, child_item)
+        # Iterative setup to avoid recursion limits
+        stack = [(root_data, root_item)]
+        while stack:
+            data_node, parent_item = stack.pop()
+            for child_data in data_node.get('children', []):
+                child_item = TreeItem(child_data, parent_item)
+                parent_item.appendChild(child_item)
+                if child_data.get('children'):
+                    stack.append((child_data, child_item))
+
 
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
@@ -147,33 +153,40 @@ class WatchdogTreeModel(QAbstractItemModel):
         if not index.isValid():
             return
         state = Qt.CheckState(state)
-        self._set_check_state_recursive(index, state, explicit=explicit)
-        self._update_ancestor_states(index.parent())
+        
+        self.layoutAboutToBeChanged.emit()
+        try:
+            self._set_check_state_recursive(index, state, explicit=explicit)
+            self._update_ancestor_states(index.parent())
+        finally:
+            self.layoutChanged.emit()
 
-    def _set_check_state_recursive(self, index, state, explicit=False):
-        item = index.internalPointer()
-        if item.checkState == state and item.explicitlyChecked == (explicit and state == Qt.CheckState.Checked):
-            if item.childCount() == 0:
-                return
+    def _set_check_state_recursive(self, start_index, state, explicit=False):
+        # Iterative implementation to avoid recursion and signal storms
+        stack = [(start_index, explicit)]
+        while stack:
+            index, is_explicit = stack.pop()
+            item = index.internalPointer()
+            
+            explicit_checked = bool(is_explicit) and state == Qt.CheckState.Checked
+            if item.checkState != state or item.explicitlyChecked != explicit_checked:
+                item.checkState = state
+                item.explicitlyChecked = explicit_checked
+                # We don't emit dataChanged here; layoutChanged at the end handles it
+                
+            for row in range(item.childCount()):
+                stack.append((self.index(row, 0, index), False))
 
-        self._update_item_check_state(index, state, explicit=explicit)
-
-        for row in range(item.childCount()):
-            child_idx = self.index(row, 0, index)
-            self._set_check_state_recursive(child_idx, state, explicit=False)
 
     def _update_item_check_state(self, index, state, explicit=False):
+        # This is now only used for single-item updates from ancestors
         item = index.internalPointer()
         explicit_checked = bool(explicit) and state == Qt.CheckState.Checked
         if item.checkState == state and item.explicitlyChecked == explicit_checked:
             return
-
         item.checkState = state
         item.explicitlyChecked = explicit_checked
-        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
 
-        action_index = self.index(index.row(), 6, index.parent())
-        self.dataChanged.emit(action_index, action_index, [Qt.ItemDataRole.DisplayRole])
 
     def _update_ancestor_states(self, index):
         while index.isValid():
@@ -341,20 +354,23 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         source_model = self.sourceModel()
         if source_model is None:
             return False
-
-        idx = source_model.index(source_row, 0, source_parent)
-        item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
-        if not item_data:
-            return False
-
-        if self._matches(item_data):
-            return True
-
-        if item_data.get('is_dir'):
-            for row in range(source_model.rowCount(idx)):
-                if self._accepts(row, idx):
-                    return True
+        
+        start_idx = source_model.index(source_row, 0, source_parent)
+        # Iterative search for matching child to avoid deep recursion
+        stack = [start_idx]
+        while stack:
+            idx = stack.pop()
+            item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
+            if not item_data: continue
+            
+            if self._matches(item_data):
+                return True
+                
+            if item_data.get('is_dir'):
+                for row in range(source_model.rowCount(idx)):
+                    stack.append(source_model.index(row, 0, idx))
         return False
+
 
     def _matches(self, item_data):
         status = item_data.get('status', '')

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMenu, QSizePolicy, QFrame
 )
 from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush
+from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel
 from .scanner import ScannerThread
@@ -442,6 +442,11 @@ class MainWindow(QMainWindow):
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.txt_path.setMinimumWidth(240)
         self.txt_path.setPlaceholderText("Enter or browse a folder path…")
+        
+        # Add folder icon to the left of the path input
+        path_icon = QIcon.fromTheme("folder-open", QIcon.fromTheme("folder"))
+        self.txt_path.addAction(path_icon, QLineEdit.ActionPosition.LeadingPosition)
+
         btn_browse = QPushButton("📂  Browse")
         btn_browse.setObjectName("primaryBtn")
         btn_browse.setToolTip("Browse folder")
@@ -485,7 +490,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(btn_export)
 
         self.btn_delete = QPushButton("🗑  Delete Selected")
-        self.btn_delete.setObjectName("ghostBtn")
+        self.btn_delete.setObjectName("deleteBtn")
         self.btn_delete.setToolTip("Permanently delete selected items")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.clicked.connect(self._delete_selected)
@@ -603,7 +608,6 @@ class MainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self._context_menu)
         self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         self.tree.viewport().installEventFilter(self)
-        self.tree.header().setCursor(Qt.CursorShape.ArrowCursor)
         hdr = self.tree.header()
         hdr.setSectionsMovable(False)
         hdr.setStretchLastSection(False)
@@ -657,15 +661,7 @@ class MainWindow(QMainWindow):
         tc_layout.setContentsMargins(1, 1, 1, 1) # Internal border gap
         tc_layout.setSpacing(0)
         tc_layout.addWidget(self.content_stack)
-        
-        # Apply subtle shadow for depth
-        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-        from PyQt6.QtGui import QColor
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(15)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 30))
-        self.tree_container.setGraphicsEffect(shadow)
+
 
         # Floating scroll-to-top button (child of tree_container for z-order)
         self.btn_scroll_top = QPushButton("↑")
@@ -994,15 +990,15 @@ class MainWindow(QMainWindow):
             return []
 
         checked_indices = []
-
-        def walk(parent=QModelIndex()):
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
             for row in range(self.tree_model.rowCount(parent)):
                 index = self.tree_model.index(row, 0, parent)
                 if self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
                     checked_indices.append(index)
-                walk(index)
-
-        walk()
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
         return checked_indices
 
     def _prune_paths(self, paths):
@@ -1045,50 +1041,45 @@ class MainWindow(QMainWindow):
         if not target_paths:
             return [], 0, 0
 
+        # Build path map iteratively
         path_to_index = {}
-
-        def map_paths(parent=QModelIndex()):
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
             for row in range(self.tree_model.rowCount(parent)):
                 index = self.tree_model.index(row, 0, parent)
                 item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
                 if item_data and item_data.get('path'):
                     path_to_index[item_data['path']] = index
-                map_paths(index)
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
 
-        def count_subtree(index):
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-            if not item_data:
-                return 0, 0
+        def count_subtree_iterative(root_index):
+            f_count = d_count = 0
+            s = [root_index]
+            while s:
+                curr = s.pop()
+                d = self.tree_model.data(curr, Qt.ItemDataRole.UserRole)
+                if not d: continue
+                if d.get('is_dir'): d_count += 1
+                else: f_count += 1
+                for r in range(self.tree_model.rowCount(curr)):
+                    s.append(self.tree_model.index(r, 0, curr))
+            return d_count, f_count
 
-            folder_count = 1 if item_data.get('is_dir', False) else 0
-            file_count = 0 if item_data.get('is_dir', False) else 1
-
-            for row in range(self.tree_model.rowCount(index)):
-                child_index = self.tree_model.index(row, 0, index)
-                child_folders, child_files = count_subtree(child_index)
-                folder_count += child_folders
-                file_count += child_files
-
-            return folder_count, file_count
-
-        map_paths()
-
-        folder_count = 0
-        file_count = 0
+        total_folders = 0
+        total_files = 0
         for path in target_paths:
-            index = path_to_index.get(path)
-            if index is None:
-                # Fallback for edge cases where path disappeared from current model
-                if os.path.isdir(path):
-                    folder_count += 1
-                else:
-                    file_count += 1
-                continue
-            folders, files = count_subtree(index)
-            folder_count += folders
-            file_count += files
+            idx = path_to_index.get(path)
+            if idx and idx.isValid():
+                fld, fil = count_subtree_iterative(idx)
+                total_folders += fld
+                total_files += fil
+            else:
+                if os.path.isdir(path): total_folders += 1
+                else: total_files += 1
 
-        return target_paths, folder_count, file_count
+        return target_paths, total_folders, total_files
 
     def _select_by_status(self, status):
         if not self.tree_model:
@@ -1218,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"Scan complete — {n} top-level items")
         self._update_chips(root_node)
         self.tree_model.dataChanged.connect(self._on_checked)
+        self.tree_model.layoutChanged.connect(lambda: self.recount_timer.start(80))
         self._do_recount()
 
     def _update_chips(self, root_node):
@@ -1252,8 +1244,8 @@ class MainWindow(QMainWindow):
     # Selection count (debounced)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _on_checked(self, tl, br, roles):
-        if Qt.ItemDataRole.CheckStateRole in roles:
+    def _on_checked(self, tl=None, br=None, roles=None):
+        if roles is None or Qt.ItemDataRole.CheckStateRole in roles:
             self.recount_timer.start(80)
 
     def _do_recount(self):
