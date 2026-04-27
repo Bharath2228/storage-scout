@@ -297,6 +297,20 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             if role == Qt.ItemDataRole.ToolTipRole:
                 return "Visible because a child item matches the current filters."
 
+        # Dynamic status for 'Show all' mode based on age slider
+        if self.status_filter is None and role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
+            item_data = self.sourceModel().data(source_index, Qt.ItemDataRole.UserRole)
+            if item_data:
+                status = item_data.get('status', '')
+                if status != 'Empty' and self.older_than_cutoff_ts is not None:
+                    ts = item_data.get('last_modified', 0)
+                    if ts > 0:
+                        if ts <= self.older_than_cutoff_ts:
+                            return 'Inactive'
+                        else:
+                            return 'Active'
+                return status
+
         return super().data(index, role)
 
     def _accepts(self, source_row, source_parent):
@@ -341,6 +355,8 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         if self.date_to_ts is not None and ts > self.date_to_ts:
             return False
         if self.older_than_cutoff_ts is not None and ts > self.older_than_cutoff_ts:
-            return False
+            # If "Show all" is checked (status_filter is None), don't hide items based on age
+            if self.status_filter is not None:
+                return False
 
         return True
