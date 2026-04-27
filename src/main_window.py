@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QRadioButton, QSlider, QDateEdit, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
-    QSpinBox,
+    QSpinBox, QAbstractItemView,
     QMenu, QSizePolicy, QFrame
 )
 from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker
@@ -455,8 +455,8 @@ class MainWindow(QMainWindow):
         controls_layout.addStretch()
         vbox.addWidget(controls)
 
-        # ── Tree ──────────────────────────────────────────────────────────────
         self.tree = QTreeView()
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.tree.setAlternatingRowColors(True)
         # Disable sorting — columns should not be sortable by the user
         self.tree.setSortingEnabled(False)

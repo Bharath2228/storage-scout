@@ -4,23 +4,24 @@ def apply_theme(app, theme_name="dark"):
     base_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
     # Single-theme application: keep only dark mode.
     base_style = ""
-    bg_main = "#0d1117"
-    bg_sec = "#161b22"
-    bg_hover = "#21262d"
-    border = "#2b313a"
-    text = "#c9d1d9"
-    text_muted = "#8b949e"
-    accent = "#58a6ff"
-    chip_red = "#f85149"
-    chip_yellow = "#e3b341"
-    chip_green = "#3fb950"
-    chip_red_bg = "#3d1817"
-    chip_yellow_bg = "#3d2a10"
-    chip_green_bg = "#164b35"
+    bg_main = "#ffffff"
+    bg_sec = "#f6f8fa"
+    bg_hover = "#f3f4f6"
+    border = "#d0d7de"
+    text = "#24292f"
+    text_muted = "#57606a"
+    accent = "#0969da"
+    chip_red = "#cf222e"
+    chip_yellow = "#9a6700"
+    chip_green = "#1a7f37"
+    chip_red_bg = "#ffebe9"
+    chip_yellow_bg = "#fff8c5"
+    chip_green_bg = "#dafbe1"
 
     custom_style = f"""
         * {{ font-family: "Segoe UI", "Inter", sans-serif; font-size: 13px; }}
         QMainWindow {{ background-color: {bg_main}; }}
+        QLabel {{ color: {text}; }}
         QWidget#topbar {{
             background-color: {bg_sec};
             border-bottom: 1px solid {border};
@@ -45,9 +46,27 @@ def apply_theme(app, theme_name="dark"):
             border: none; outline: none;
             color: {text};
         }}
-        QTreeView::item {{ padding: 7px 4px; border-bottom: 1px solid {border}; }}
+        QTreeView::item {{ padding: 7px 4px; border: none; }}
+        QTreeView::item:hover {{ background-color: {bg_hover}; color: {text}; }}
         QTreeView::item:selected {{ background-color: {accent}; color: #fff; }}
-        QTreeView::item:hover {{ background-color: #1f2a39; }}
+        QTreeView::item:selected:hover {{ background-color: #0353a4; color: #fff; }}
+        
+        QTreeView::indicator {{
+            width: 14px;
+            height: 14px;
+            border: 1px solid {text_muted};
+            border-radius: 3px;
+            background-color: {bg_main};
+        }}
+        QTreeView::indicator:hover {{
+            border-color: {text};
+            background-color: {bg_hover};
+        }}
+        QTreeView::indicator:checked {{
+            background-color: {accent};
+            border-color: {accent};
+            image: url({base_dir}/check.svg);
+        }}
         
         QHeaderView::section {{
             background-color: {bg_sec};
@@ -91,13 +110,13 @@ def apply_theme(app, theme_name="dark"):
             font-weight: 600;
         }}
         QPushButton#primaryBtn:hover {{
-            background-color: #79b8ff;
-            border-color: #79b8ff;
-            color: #0d1117;
+            background-color: #0353a4;
+            border-color: #0353a4;
+            color: #ffffff;
         }}
         QPushButton#primaryBtn:pressed {{
-            background-color: #3b82d6;
-            border-color: #3b82d6;
+            background-color: #023e7d;
+            border-color: #023e7d;
             color: #ffffff;
         }}
         QPushButton#ghostBtn {{
@@ -134,18 +153,18 @@ def apply_theme(app, theme_name="dark"):
 
         /* ── Delete button ───────────────────────────────────────────────── */
         QPushButton#deleteBtn {{
-            color: #f85149;
+            color: {chip_red};
             font-weight: bold;
-            border-color: #da3633;
+            border-color: {chip_red};
         }}
         QPushButton#deleteBtn:hover {{
-            background-color: #da3633;
-            border-color: #f85149;
+            background-color: {chip_red};
+            border-color: {chip_red};
             color: white;
         }}
         QPushButton#deleteBtn:pressed {{
-            background-color: #b91c1c;
-            border-color: #da3633;
+            background-color: #a40e26;
+            border-color: #a40e26;
             color: white;
             padding: 7px 14px 5px 14px;
         }}
@@ -252,12 +271,12 @@ def apply_theme(app, theme_name="dark"):
             width: 16px;
             height: 16px;
             border-radius: 8px;
-            border: 2px solid #9fb3c8;
+            border: 2px solid {text_muted};
             background-color: transparent;
         }}
         QRadioButton::indicator:hover {{
-            border-color: #c2d2e2;
-            background-color: #1b2431;
+            border-color: {text};
+            background-color: {bg_hover};
         }}
         QRadioButton::indicator:checked {{
             border: 2px solid {accent};
