@@ -132,7 +132,7 @@ def apply_theme(app, theme_name="dark"):
         QCheckBox::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
-            image: url({base_dir}/check.svg);
+            image: url({base_dir}/assets/check.svg);
         }}
 
         
@@ -204,7 +204,7 @@ def apply_theme(app, theme_name="dark"):
         QTreeView::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
-            image: url({base_dir}/check.svg);
+            image: url({base_dir}/assets/check.svg);
         }}
 
         QTreeView::branch {{
@@ -338,11 +338,11 @@ def apply_theme(app, theme_name="dark"):
         }}
         QSpinBox::up-arrow {{
             width: 10px; height: 6px;
-            image: url({base_dir}/up_arrow.svg);
+            image: url({base_dir}/assets/up_arrow.svg);
         }}
         QSpinBox::down-arrow {{
             width: 10px; height: 6px;
-            image: url({base_dir}/down_arrow.svg);
+            image: url({base_dir}/assets/down_arrow.svg);
         }}
 
         /* ── Base button — tactile feedback ─────────────────────────────── */
@@ -570,7 +570,7 @@ def apply_theme(app, theme_name="dark"):
             padding: 6px 8px;
             font-size: 9pt;
             text-align: left;
-            qproperty-icon: url({base_dir}/x-circle.svg);
+            qproperty-icon: url({base_dir}/assets/x-circle.svg);
             qproperty-iconSize: 14px 14px;
         }}
         
@@ -743,7 +743,7 @@ def apply_theme(app, theme_name="dark"):
         
         QComboBox#dateRangeInput::down-arrow,
         QDateEdit#dateRangeInput::down-arrow {{
-            image: url({base_dir}/calendar.svg);
+            image: url({base_dir}/assets/calendar.svg);
             width: 16px;
             height: 16px;
         }}
