@@ -35,7 +35,7 @@ def apply_theme(app, theme_name="dark"):
             border-bottom: 1px solid {border};
         }}
         QWidget#sidebar {{
-            background-color: {bg_sec};
+            background-color: #fafbfc;
             border-right: 1px solid {border};
         }}
         
@@ -50,24 +50,33 @@ def apply_theme(app, theme_name="dark"):
         }}
         
         QFrame#sidebarDivider {{
-            background-color: {border};
+            background-color: #e2e8f0;
             max-height: 1px;
+            margin: 8px 16px;
+        }}
+        
+        QWidget#displayModeSection,
+        QWidget#dateRangeSection,
+        QWidget#ageThresholdSection {{
+            margin-bottom: 8px;
         }}
         
         QLabel#sectionHeader {{
-            font-size: 14px;
-            font-weight: 700;
-            color: {text};
-            padding: 12px 16px 8px 16px;
-            background-color: transparent;
+            background-color: {bg_hover};
+            padding: 8px 16px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #334155;
+            margin-top: 8px;
+            border-left: 3px solid {accent};
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }}
         
         QCheckBox, QRadioButton {{
-            padding: 6px 16px;
+            padding: 10px 16px;
             spacing: 10px;
-            color: {text_muted};
+            color: #475569;
             font-weight: 500;
         }}
         
@@ -77,30 +86,44 @@ def apply_theme(app, theme_name="dark"):
             color: {text};
         }}
         
-        QCheckBox::indicator, QRadioButton::indicator {{
+        QCheckBox::indicator {{
             width: 18px;
             height: 18px;
             border-radius: 4px;
             border: 2px solid #cbd5e1;
             background-color: {bg_main};
         }}
-        
-        QRadioButton::indicator {{
-            border-radius: 9px;
-        }}
-        
-        QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+        QCheckBox::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
             image: url({base_dir}/check.svg);
         }}
+        
+        QRadioButton::indicator {{
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            border: 2px solid #cbd5e1;
+            background-color: {bg_main};
+        }}
+        QRadioButton::indicator:checked {{
+            border: 6px solid {accent};
+            background-color: white;
+        }}
+        QRadioButton::indicator:hover {{
+            border-color: #94a3b8;
+        }}
 
         QWidget#statusbar {{
-            background-color: transparent;
-            border-top: none;
+            background-color: {bg_sec};
+            border-top: 1px solid {border};
             color: {text_muted};
         }}
         QLabel#statusLabel {{ color: {text_muted}; }}
+        QLabel#statusSeparator {{
+            color: #cbd5e1;
+            padding: 0 8px;
+        }}
         
         QLabel#chipEmpty {{ 
             background-color: {chip_green_bg}; 
@@ -288,8 +311,9 @@ def apply_theme(app, theme_name="dark"):
         }}
         QPushButton#primaryBtn {{
             background-color: {accent};
-            color: #ffffff;
-            border: none;
+            color: white;
+            border: 1px solid {accent};
+            border-bottom: 3px solid #1d4ed8;
             border-radius: 6px;
             padding: 8px 16px;
             font-weight: 600;
@@ -299,6 +323,8 @@ def apply_theme(app, theme_name="dark"):
         }}
         QPushButton#primaryBtn:pressed {{
             background-color: #1e40af;
+            border-bottom-width: 1px;
+            padding: 9px 16px 7px 16px;
         }}
         
         QPushButton#ghostBtn {{
@@ -341,6 +367,20 @@ def apply_theme(app, theme_name="dark"):
             border-bottom-width: 1px;
             color: white;
             padding: 7px 14px 5px 14px;
+        }}
+
+        /* ── Sidebar actions ─────────────────────────────────────────────── */
+        QPushButton#closeSidebar {{
+            background-color: transparent;
+            border: none;
+            color: {text_muted};
+            padding: 12px;
+            font-size: 14px;
+            text-align: center;
+        }}
+        QPushButton#closeSidebar:hover {{
+            background-color: {bg_hover};
+            color: {text};
         }}
 
         /* ── Delete button ───────────────────────────────────────────────── */
@@ -413,9 +453,11 @@ def apply_theme(app, theme_name="dark"):
             color: {accent};
             font-size: 12px;
             padding: 0;
+            text-align: left;
         }}
         QPushButton#linkBtn:hover {{
-            color: {accent};
+            color: #1d4ed8;
+            text-decoration: underline;
         }}
         QPushButton#linkBtn:pressed {{
             color: {text};
@@ -446,28 +488,27 @@ def apply_theme(app, theme_name="dark"):
             background-color: {bg_main};
         }}
         QLabel#emptyIcon {{
-            font-size: 48px;
-            padding-bottom: 4px;
+            font-size: 64px;
+            padding: 20px;
+            qproperty-alignment: AlignCenter;
         }}
         QLabel#emptyTitle {{
             font-size: 21px; /* ~16pt Header */
-            font-weight: 800;
+            font-weight: 600;
             color: {text};
-            padding-bottom: 2px;
         }}
         QLabel#emptySub {{
-            font-size: 13px; /* Body */
+            font-size: 12px; /* ~9pt Body */
             color: {text_muted};
-            line-height: 1.5;
         }}
 
         QLabel#agePill {{
-            background-color: #0969da;
-            color: #ffffff;
+            background-color: {accent};
+            color: white;
             border-radius: 10px;
-            font-weight: bold;
+            padding: 4px 10px;
             font-size: 11px;
-            padding: 0px 7px;
+            font-weight: 600;
         }}
 
         QLabel#statusLabel {{
@@ -505,15 +546,53 @@ def apply_theme(app, theme_name="dark"):
             background-color: {accent};
         }}
         
-        QSlider {{ }}
+        QSlider {{ background: transparent; }}
         QSlider::groove:horizontal {{
-            background: {border}; height: 4px; border-radius: 2px;
+            border: none;
+            height: 6px;
+            background: #e2e8f0;
+            border-radius: 3px;
         }}
         QSlider::handle:horizontal {{
-            background: {accent}; width: 14px; height: 14px;
-            margin: -5px 0; border-radius: 7px;
+            background: {accent};
+            border: 2px solid white;
+            width: 18px;
+            height: 18px;
+            margin: -6px 0;
+            border-radius: 9px;
         }}
-        QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 2px; }}
+        QSlider::handle:horizontal:hover {{
+            background: #1d4ed8;
+            width: 20px;
+            height: 20px;
+            margin: -7px 0;
+            border-radius: 10px;
+        }}
+        QSlider::sub-page:horizontal {{
+            background: {accent};
+            border-radius: 3px;
+        }}
+        
+        QSpinBox {{
+            border: 1.5px solid {border};
+            border-radius: 6px;
+            padding: 6px 10px;
+            background-color: {bg_main};
+            font-size: 12px;
+            color: {text};
+        }}
+        QSpinBox:focus {{
+            border-color: {accent};
+        }}
+        QSpinBox::up-button, QSpinBox::down-button {{
+            width: 20px;
+            border: none;
+            background-color: {bg_sec};
+        }}
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background-color: {bg_hover};
+        }}
+
         
         QDateEdit {{
             background-color: {bg_main};
@@ -525,20 +604,17 @@ def apply_theme(app, theme_name="dark"):
         QDateEdit::drop-down {{ border: none; }}
         
         QComboBox {{
-            border: 1px solid {border};
+            border: 1.5px solid {border};
             border-radius: 6px;
             padding: 8px 12px;
             background-color: {bg_main};
-            color: {text};
-            min-width: 120px;
+            color: #334155;
+            font-size: 12px;
+            min-height: 24px;
         }}
-        QComboBox:hover {{
-            border-color: #cbd5e1;
-        }}
-        QComboBox::drop-down {{
-            border: none;
-            width: 30px;
-        }}
+        QComboBox:hover {{ border-color: #cbd5e1; }}
+        QComboBox:focus {{ border-color: {accent}; }}
+        QComboBox::drop-down {{ border: none; width: 30px; }}
         /* ── Scrollbars ──────────────────────────────────────────────────── */
         QScrollBar:vertical {{
             border: none;
@@ -577,10 +653,12 @@ def apply_theme(app, theme_name="dark"):
         }}
         
         QComboBox QAbstractItemView {{
-            background-color: {bg_main};
             border: 1px solid {border};
-            selection-background-color: {accent};
-            color: {text};
+            border-radius: 6px;
+            background-color: {bg_main};
+            selection-background-color: #eff6ff;
+            selection-color: #1e293b;
+            padding: 4px;
         }}
         
         QCalendarWidget {{ background-color: {bg_sec}; color: {text}; }}

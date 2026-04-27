@@ -135,9 +135,15 @@ class FilterPanel(QFrame):
         outer.setSpacing(4)
 
         # ── Section 1: Display Mode ──────────────────────────────────────────
+        display_section = QWidget()
+        display_section.setObjectName("displayModeSection")
+        display_layout = QVBoxLayout(display_section)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.setSpacing(4)
+
         lbl_display = QLabel("DISPLAY MODE")
         lbl_display.setObjectName("sectionHeader")
-        outer.addWidget(lbl_display)
+        display_layout.addWidget(lbl_display)
 
         self.rb_all      = QRadioButton("Show all")
         self.rb_inactive = QRadioButton("Inactive only")
@@ -146,18 +152,24 @@ class FilterPanel(QFrame):
         self.bg = QButtonGroup()
         for rb in [self.rb_all, self.rb_inactive, self.rb_empty]:
             self.bg.addButton(rb)
-            outer.addWidget(rb)
+            display_layout.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        outer.addSpacing(16)
+        outer.addWidget(display_section)
         outer.addWidget(self._hline())
 
 
 
         # ── Section 2: Date Range ────────────────────────────────────────────
+        date_section = QWidget()
+        date_section.setObjectName("dateRangeSection")
+        date_layout = QVBoxLayout(date_section)
+        date_layout.setContentsMargins(0, 0, 0, 0)
+        date_layout.setSpacing(4)
+
         lbl_date = QLabel("DATE RANGE")
         lbl_date.setObjectName("sectionHeader")
-        outer.addWidget(lbl_date)
+        date_layout.addWidget(lbl_date)
 
         self.date_from = AnyDateEdit()
         self.date_from.setDisplayFormat("dd/MM/yyyy")
@@ -182,7 +194,7 @@ class FilterPanel(QFrame):
             l.setObjectName("mutedLabel")
             box_layout.addWidget(l)
             box_layout.addWidget(widget)
-            outer.addWidget(box)
+            date_layout.addWidget(box)
 
         btn_box = QWidget()
         btn_layout = QHBoxLayout(btn_box)
@@ -193,15 +205,21 @@ class FilterPanel(QFrame):
         self.btn_clear_dates.clicked.connect(self._clear_dates)
         btn_layout.addWidget(self.btn_clear_dates)
         btn_layout.addStretch()
-        outer.addWidget(btn_box)
-
-        outer.addSpacing(16)
+        date_layout.addWidget(btn_box)
+        
+        outer.addWidget(date_section)
         outer.addWidget(self._hline())
 
         # ── Section 3: Stale Threshold ───────────────────────────────────────
+        age_section = QWidget()
+        age_section.setObjectName("ageThresholdSection")
+        age_outer_layout = QVBoxLayout(age_section)
+        age_outer_layout.setContentsMargins(0, 0, 0, 0)
+        age_outer_layout.setSpacing(4)
+
         lbl_age = QLabel("AGE THRESHOLD")
         lbl_age.setObjectName("sectionHeader")
-        outer.addWidget(lbl_age)
+        age_outer_layout.addWidget(lbl_age)
 
         age_box = QWidget()
         age_layout = QVBoxLayout(age_box)
@@ -246,7 +264,9 @@ class FilterPanel(QFrame):
         bot_row.addWidget(self.age_input)
         bot_row.addStretch()
         age_layout.addLayout(bot_row)
-        outer.addWidget(age_box)
+        age_outer_layout.addWidget(age_box)
+        
+        outer.addWidget(age_section)
 
         self._update_age_label(self.slider.value())
         outer.addStretch()
@@ -258,11 +278,11 @@ class FilterPanel(QFrame):
         action_layout.setSpacing(10)
         
         self.btn_reset = QPushButton("↺  Reset all filters")
-        self.btn_reset.setObjectName("ghostBtn")
+        self.btn_reset.setObjectName("resetBtn")
         self.btn_reset.setToolTip("Reset all filters to their default values")
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close = QPushButton("Close sidebar")
-        self.btn_close.setObjectName("filterCloseBtn")
+        self.btn_close.setObjectName("closeSidebar")
         self.btn_close.setToolTip("Hide the filter sidebar")
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         action_layout.addWidget(self.btn_reset)
@@ -423,6 +443,7 @@ class MainWindow(QMainWindow):
         self.txt_path.setMinimumWidth(240)
         self.txt_path.setPlaceholderText("Enter or browse a folder path…")
         btn_browse = QPushButton("📂  Browse")
+        btn_browse.setObjectName("primaryBtn")
         btn_browse.setToolTip("Browse folder")
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse)
@@ -439,7 +460,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._vbar())
 
         self.btn_filter = QPushButton("⚙  Filters")
-        self.btn_filter.setObjectName("filterBtn")
+        self.btn_filter.setObjectName("ghostBtn")
         self.btn_filter.setCheckable(True)
         self.btn_filter.setToolTip("Toggle filter sidebar (Alt+F)")
         self.btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -457,13 +478,15 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._vbar())
 
         btn_export = QPushButton("📊  Export CSV")
-        btn_export.setObjectName("ghostBtn")
+        btn_export.setObjectName("primaryBtn")
+        btn_export.setToolTip("Export the current view to CSV")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.clicked.connect(self._export_csv)
         tb.addWidget(btn_export)
 
         self.btn_delete = QPushButton("🗑  Delete Selected")
-        self.btn_delete.setObjectName("deleteBtn")
+        self.btn_delete.setObjectName("ghostBtn")
+        self.btn_delete.setToolTip("Permanently delete selected items")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_delete.setEnabled(False)
@@ -548,7 +571,7 @@ class MainWindow(QMainWindow):
         sub_lbl.setWordWrap(True)
         sub_lbl.setMaximumWidth(420)
 
-        btn_browse_cta = QPushButton("  Browse folder…")
+        btn_browse_cta = QPushButton("📂  Browse folder...")
         btn_browse_cta.setObjectName("primaryBtn")
         btn_browse_cta.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse_cta.setFixedWidth(180)
@@ -634,6 +657,15 @@ class MainWindow(QMainWindow):
         tc_layout.setContentsMargins(1, 1, 1, 1) # Internal border gap
         tc_layout.setSpacing(0)
         tc_layout.addWidget(self.content_stack)
+        
+        # Apply subtle shadow for depth
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        from PyQt6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(15)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        self.tree_container.setGraphicsEffect(shadow)
 
         # Floating scroll-to-top button (child of tree_container for z-order)
         self.btn_scroll_top = QPushButton("↑")
@@ -667,15 +699,28 @@ class MainWindow(QMainWindow):
         self.lbl_status.setObjectName("statusLabel")
         sbl.addWidget(self.lbl_status)
         sbl.addStretch()
+        
         self.chip_empty = self._chip("Empty: 0", "chipEmpty")
         self.chip_inactive_folders = self._chip("Inactive folders: 0", "chipInactive")
         self.chip_inactive_files = self._chip("Inactive files: 0", "chipInactive")
         self.chip_space = self._chip("Reclaimable: —", "chipSpace")
-        for c in [self.chip_empty, self.chip_inactive_folders, self.chip_inactive_files, self.chip_space]:
-            sbl.addWidget(c)
+        
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_empty)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_inactive_folders)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_inactive_files)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_space)
         vbox.addWidget(sb)
 
         # Do NOT auto-start scan — let the user enter a path first
+
+    def _sep(self):
+        l = QLabel("|")
+        l.setObjectName("statusSeparator")
+        return l
 
     def _vbar(self):
         f = QFrame()
