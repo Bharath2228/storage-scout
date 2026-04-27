@@ -1,40 +1,19 @@
-import qdarktheme
-
 def apply_theme(app, theme_name="dark"):
-    if theme_name == "dark":
-        base_style = qdarktheme.load_stylesheet(theme_name)
-    else:
-        base_style = ""  # Use only custom styles for light theme
-    
-    if theme_name == "dark":
-        bg_main = "#0d1117"
-        bg_sec = "#161b22"
-        bg_hover = "#21262d"
-        border = "#30363d"
-        text = "#c9d1d9"
-        text_muted = "#8b949e"
-        accent = "#58a6ff"
-        chip_red = "#f85149"
-        chip_yellow = "#e3b341"
-        chip_green = "#3fb950"
-        chip_red_bg = "#3d1817"
-        chip_yellow_bg = "#3d2a10"
-        chip_green_bg = "#164b35"
-    else:
-        # Light theme colors
-        bg_main = "#ffffff"
-        bg_sec = "#f6f8fa"
-        bg_hover = "#eaeef2"
-        border = "#d0d7de"
-        text = "#24292f"
-        text_muted = "#57606a"
-        accent = "#0969da"
-        chip_red = "#cf222e"
-        chip_yellow = "#9a6700"
-        chip_green = "#1a7f37"
-        chip_red_bg = "#ffebee"
-        chip_yellow_bg = "#fff8e1"
-        chip_green_bg = "#e8f5e9"
+    # Single-theme application: keep only dark mode.
+    base_style = ""
+    bg_main = "#0d1117"
+    bg_sec = "#161b22"
+    bg_hover = "#21262d"
+    border = "#2b313a"
+    text = "#c9d1d9"
+    text_muted = "#8b949e"
+    accent = "#58a6ff"
+    chip_red = "#f85149"
+    chip_yellow = "#e3b341"
+    chip_green = "#3fb950"
+    chip_red_bg = "#3d1817"
+    chip_yellow_bg = "#3d2a10"
+    chip_green_bg = "#164b35"
 
     custom_style = f"""
         * {{ font-family: "Segoe UI", "Inter", sans-serif; font-size: 13px; }}
@@ -63,9 +42,9 @@ def apply_theme(app, theme_name="dark"):
             border: none; outline: none;
             color: {text};
         }}
-        QTreeView::item {{ padding: 7px 4px; border-bottom: 1px solid {bg_hover}; }}
+        QTreeView::item {{ padding: 7px 4px; border-bottom: 1px solid {border}; }}
         QTreeView::item:selected {{ background-color: {accent}; color: #fff; }}
-        QTreeView::item:hover {{ background-color: {bg_hover}; }}
+        QTreeView::item:hover {{ background-color: #1f2a39; }}
         
         QHeaderView::section {{
             background-color: {bg_sec};
@@ -101,6 +80,32 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
             border-color: {border};
             background-color: {bg_main};
+        }}
+        QPushButton#primaryBtn {{
+            background-color: {accent};
+            border-color: {accent};
+            color: #ffffff;
+            font-weight: 600;
+        }}
+        QPushButton#primaryBtn:hover {{
+            background-color: #79b8ff;
+            border-color: #79b8ff;
+            color: #0d1117;
+        }}
+        QPushButton#primaryBtn:pressed {{
+            background-color: #3b82d6;
+            border-color: #3b82d6;
+            color: #ffffff;
+        }}
+        QPushButton#ghostBtn {{
+            background-color: transparent;
+            color: {text_muted};
+            border-color: {border};
+        }}
+        QPushButton#ghostBtn:hover {{
+            background-color: {bg_hover};
+            color: {text};
+            border-color: {text_muted};
         }}
 
         /* ── Filter toggle ───────────────────────────────────────────────── */
@@ -140,25 +145,6 @@ def apply_theme(app, theme_name="dark"):
             border-color: #da3633;
             color: white;
             padding: 7px 14px 5px 14px;
-        }}
-
-        /* ── Round theme-toggle ──────────────────────────────────────────── */
-        QPushButton#themeBtn {{
-            border-radius: 15px;
-            padding: 0;
-            min-width: 30px; min-height: 30px;
-            max-width: 30px; max-height: 30px;
-            font-size: 15px;
-            border: 1px solid {border};
-        }}
-        QPushButton#themeBtn:hover {{
-            border-color: {accent};
-            color: {accent};
-            background-color: {bg_sec};
-        }}
-        QPushButton#themeBtn:pressed {{
-            background-color: {bg_main};
-            border-color: {accent};
         }}
 
         /* ── Apply (accent-filled) ───────────────────────────────────────── */
@@ -257,7 +243,21 @@ def apply_theme(app, theme_name="dark"):
         QLineEdit:focus {{ border-color: {accent}; }}
         
         QRadioButton {{ color: {text}; spacing: 6px; }}
-        QRadioButton::indicator {{ width: 14px; height: 14px; }}
+        QRadioButton::indicator {{
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            border: 2px solid #9fb3c8;
+            background-color: transparent;
+        }}
+        QRadioButton::indicator:hover {{
+            border-color: #c2d2e2;
+            background-color: #1b2431;
+        }}
+        QRadioButton::indicator:checked {{
+            border: 2px solid {accent};
+            background-color: {accent};
+        }}
         
         QSlider {{ }}
         QSlider::groove:horizontal {{
@@ -277,6 +277,14 @@ def apply_theme(app, theme_name="dark"):
             color: {text};
         }}
         QDateEdit::drop-down {{ border: none; }}
+        QSpinBox {{
+            background-color: {bg_main};
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 4px 8px;
+            color: {text};
+        }}
+        QSpinBox:focus {{ border-color: {accent}; }}
         QCalendarWidget {{ background-color: {bg_sec}; color: {text}; }}
     """
     app.setStyleSheet(base_style + custom_style)

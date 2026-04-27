@@ -6,9 +6,10 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QRadioButton, QSlider, QDateEdit, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
+    QSpinBox,
     QMenu, QSizePolicy, QFrame
 )
-from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent
+from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel
@@ -24,6 +25,7 @@ class StatusDelegate(QStyledItemDelegate):
         'Empty':    QColor(248, 81, 73),
         'Inactive': QColor(210, 153, 34),
         'Active':   QColor(46, 160, 67),
+        'Context':  QColor(163, 113, 247),
     }
 
     def paint(self, painter, option, index):
@@ -89,6 +91,11 @@ class AnyDateEdit(QDateEdit):
         return super().eventFilter(obj, event)
 
 class FilterPanel(QFrame):
+    DEFAULT_STALE_MONTHS = 3
+    AGE_FILTER_DISABLED = 0
+    MAX_STALE_MONTHS = 120
+    DEFAULT_STATUS_FILTER = "Inactive"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("filterPanel")
@@ -142,11 +149,11 @@ class FilterPanel(QFrame):
             row.addWidget(widget)
             sec2.addLayout(row)
 
-        btn_clear_dates = QPushButton("Clear")
-        btn_clear_dates.setObjectName("linkBtn")
-        btn_clear_dates.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_clear_dates.clicked.connect(self._clear_dates)
-        sec2.addWidget(btn_clear_dates)
+        self.btn_clear_dates = QPushButton("Clear")
+        self.btn_clear_dates.setObjectName("linkBtn")
+        self.btn_clear_dates.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_dates.clicked.connect(self._clear_dates)
+        sec2.addWidget(self.btn_clear_dates)
         sec2.addStretch()
         outer.addLayout(sec2)
 
@@ -155,24 +162,35 @@ class FilterPanel(QFrame):
         # ── Section 3: Stale Threshold ───────────────────────────────────────
         sec3 = self._make_section("AGE THRESHOLD")
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(1, 12)
-        self.slider.setValue(3)
+        self.slider.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
+        self.slider.setValue(self.AGE_FILTER_DISABLED)
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider.setTickInterval(1)
         self.slider.setMinimumWidth(180)
         self.slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self.lbl_val = QLabel("Older than 3 months")
+        self.lbl_val = QLabel()
         self.lbl_val.setObjectName("sliderLabel")
         self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        def _on_slider(v):
-            self.lbl_val.setText(f"Older than {v} months")
-
-        self.slider.valueChanged.connect(_on_slider)
+        self._update_age_label(self.slider.value())
+        self.slider.valueChanged.connect(self._update_age_label)
+        self.slider.valueChanged.connect(self._sync_manual_age_from_slider)
         self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.age_input = QSpinBox()
+        self.age_input.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
+        self.age_input.setValue(self.AGE_FILTER_DISABLED)
+        self.age_input.setSuffix(" mo")
+        self.age_input.setMinimumWidth(86)
+        self.age_input.setToolTip("Manual age filter (months). 0 means Any age.")
+        self.age_input.valueChanged.connect(self._sync_slider_from_manual_age)
+
         sec3.addWidget(self.lbl_val)
-        sec3.addWidget(self.slider)
+        age_row = QHBoxLayout()
+        age_row.setSpacing(8)
+        age_row.addWidget(self.slider)
+        age_row.addWidget(self.age_input)
+        sec3.addLayout(age_row)
         sec3.addStretch()
         outer.addLayout(sec3)
 
@@ -197,26 +215,56 @@ class FilterPanel(QFrame):
         self.date_from.setDate(self.date_from.minimumDate())
         self.date_to.setDate(self.date_to.minimumDate())
 
-    def get_date_from_ts(self):
-        """Returns timestamp or None if set to 'Any'."""
-        d = self.date_from.date()
-        if d == self.date_from.minimumDate():
-            return None
-        return int(d.startOfDay().toSecsSinceEpoch())
+    def _update_age_label(self, value):
+        if value == self.AGE_FILTER_DISABLED:
+            self.lbl_val.setText("Any age")
+            return
+        suffix = "" if value == 1 else "s"
+        self.lbl_val.setText(f"Older than {value} month{suffix}")
 
-    def get_date_to_ts(self):
-        """Returns timestamp or None if set to 'Any'."""
-        d = self.date_to.date()
-        if d == self.date_to.minimumDate():
-            return None
-        return int(d.endOfDay().toSecsSinceEpoch())
+    def _sync_manual_age_from_slider(self, value):
+        blocker = QSignalBlocker(self.age_input)
+        self.age_input.setValue(value)
+        del blocker
+
+    def _sync_slider_from_manual_age(self, value):
+        blocker = QSignalBlocker(self.slider)
+        self.slider.setValue(value)
+        del blocker
+
+    def get_date_range_ts(self):
+        from_date = self.date_from.date()
+        to_date = self.date_to.date()
+        minimum_date = self.date_from.minimumDate()
+
+        if from_date != minimum_date and to_date != minimum_date and from_date > to_date:
+            from_blocker = QSignalBlocker(self.date_from)
+            to_blocker = QSignalBlocker(self.date_to)
+            self.date_from.setDate(to_date)
+            self.date_to.setDate(from_date)
+            del from_blocker
+            del to_blocker
+            from_date, to_date = to_date, from_date
+
+        date_from_ts = None if from_date == minimum_date else int(from_date.startOfDay().toSecsSinceEpoch())
+        date_to_ts = None if to_date == minimum_date else int(to_date.endOfDay().toSecsSinceEpoch())
+        return date_from_ts, date_to_ts
 
     def get_older_than_secs(self):
         """Returns seconds threshold or None if slider is at minimum (show all)."""
         v = self.slider.value()
-        if v == 0:   # 0 = minimum = no filter
+        if v == self.AGE_FILTER_DISABLED:
             return None
         return v * 30 * 24 * 3600  # months → seconds (approximate)
+
+    def get_stale_months_for_scan(self):
+        value = self.slider.value()
+        return value if value > 0 else self.DEFAULT_STALE_MONTHS
+
+    def apply_default_browse_preset(self):
+        self.rb_inactive.setChecked(True)
+        self._clear_dates()
+        self.slider.setValue(self.DEFAULT_STALE_MONTHS)
 
     # helpers
     def _make_section(self, title):
@@ -249,7 +297,6 @@ class MainWindow(QMainWindow):
         self.scanner_thread = None
         self.tree_model     = None
         self.proxy_model    = WatchdogFilterProxyModel()
-        self._current_theme = "light"
 
         self.recount_timer = QTimer(self)
         self.recount_timer.setSingleShot(True)
@@ -293,6 +340,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(btn_browse)
 
         self.btn_rescan = QPushButton("Re-scan")
+        self.btn_rescan.setObjectName("primaryBtn")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
@@ -312,6 +360,7 @@ class MainWindow(QMainWindow):
         self.btn_expand.clicked.connect(self._toggle_expand)
 
         btn_export = QPushButton("Export CSV")
+        btn_export.setObjectName("ghostBtn")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.clicked.connect(self._export_csv)
         tb.addWidget(btn_export)
@@ -320,19 +369,10 @@ class MainWindow(QMainWindow):
         self.btn_delete.setObjectName("deleteBtn")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.clicked.connect(self._delete_selected)
+        self.btn_delete.setEnabled(False)
         tb.addWidget(self.btn_delete)
 
         tb.addStretch()
-
-        # Round theme toggle button — top-right corner
-        self.btn_theme = QPushButton()
-        self.btn_theme.setObjectName("themeBtn")
-        self.btn_theme.setFixedSize(30, 30)
-        self.btn_theme.setToolTip("Toggle light / dark theme")
-        self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_theme.clicked.connect(self._toggle_theme)
-        self._update_theme_icon()
-        tb.addWidget(self.btn_theme)
 
         vbox.addWidget(topbar)
 
@@ -340,6 +380,14 @@ class MainWindow(QMainWindow):
         self.fp = FilterPanel()
         self.fp.btn_apply.clicked.connect(self._apply_filters)
         self.fp.btn_reset.clicked.connect(self._reset_filters)
+        # Dynamic filtering: when user changes any filter control, clear selections
+        # and re-apply filters so view and selection remain consistent.
+        self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
+        self.fp.date_from.dateChanged.connect(lambda _d: self._on_filter_changed())
+        self.fp.date_to.dateChanged.connect(lambda _d: self._on_filter_changed())
+        self.fp.slider.valueChanged.connect(lambda _v: self._on_filter_changed())
+        self.fp.btn_clear_dates.clicked.connect(lambda: self._on_filter_changed())
+        self._apply_default_browse_preset(apply_now=False)
         vbox.addWidget(self.fp)
 
         # ── Controls row (above tree): expand / select all) ────────────────
@@ -352,6 +400,18 @@ class MainWindow(QMainWindow):
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_all.clicked.connect(self._select_all)
         controls_layout.addWidget(self.btn_select_all)
+        # Quick-select buttons for status-based selection
+        self.btn_select_inactive = QPushButton("Select All Inactive")
+        self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select_inactive.clicked.connect(self._select_inactive)
+        self.btn_select_inactive.setEnabled(False)
+        controls_layout.addWidget(self.btn_select_inactive)
+
+        self.btn_select_empty = QPushButton("Select All Empty")
+        self.btn_select_empty.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select_empty.clicked.connect(self._select_empty)
+        self.btn_select_empty.setEnabled(False)
+        controls_layout.addWidget(self.btn_select_empty)
         controls_layout.addStretch()
         vbox.addWidget(controls)
 
@@ -362,14 +422,17 @@ class MainWindow(QMainWindow):
         self.tree.setSortingEnabled(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(False)
+        self.tree.setMouseTracking(True)
+        self.tree.viewport().setMouseTracking(True)
         self.tree.setItemDelegateForColumn(5, StatusDelegate(self.tree))
         self.tree.setItemDelegateForColumn(6, ActionDelegate(self.tree))
         self.tree.clicked.connect(self._on_click)
         self.tree.doubleClicked.connect(self._on_double_click)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
-        self.tree.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tree.header().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        self.tree.viewport().installEventFilter(self)
+        self.tree.header().setCursor(Qt.CursorShape.ArrowCursor)
         # Prevent the user from rearranging columns and keep layout stable
         hdr = self.tree.header()
         hdr.setSectionsMovable(False)
@@ -395,10 +458,11 @@ class MainWindow(QMainWindow):
         self.lbl_status.setObjectName("statusLabel")
         sbl.addWidget(self.lbl_status)
         sbl.addStretch()
-        self.chip_empty    = self._chip("Empty: 0",        "chipEmpty")
-        self.chip_inactive = self._chip("Inactive: 0",     "chipInactive")
-        self.chip_space    = self._chip("Reclaimable: —",  "chipSpace")
-        for c in [self.chip_empty, self.chip_inactive, self.chip_space]:
+        self.chip_empty = self._chip("Empty: 0", "chipEmpty")
+        self.chip_inactive_folders = self._chip("Inactive folders: 0", "chipInactive")
+        self.chip_inactive_files = self._chip("Inactive files: 0", "chipInactive")
+        self.chip_space = self._chip("Reclaimable: —", "chipSpace")
+        for c in [self.chip_empty, self.chip_inactive_folders, self.chip_inactive_files, self.chip_space]:
             sbl.addWidget(c)
         vbox.addWidget(sb)
 
@@ -417,15 +481,14 @@ class MainWindow(QMainWindow):
         l.setObjectName(obj_name)
         return l
 
-    def _update_theme_icon(self):
-        # Use plain text symbols — no emoji
-        self.btn_theme.setText("\u2600" if self._current_theme == "dark" else "\u263D")
-
-    def _toggle_theme(self):
-        from src.theme import apply_theme
-        self._current_theme = "light" if self._current_theme == "dark" else "dark"
-        apply_theme(QApplication.instance(), self._current_theme)
-        self._update_theme_icon()
+    def eventFilter(self, obj, event):
+        if hasattr(self, 'tree') and obj == self.tree.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+                self._update_tree_cursor(self.tree.indexAt(pos))
+            elif event.type() == QEvent.Type.Leave:
+                self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        return super().eventFilter(obj, event)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Filter panel
@@ -447,55 +510,312 @@ class MainWindow(QMainWindow):
         else:
             status_filter = None   # All
 
+        date_from_ts, date_to_ts = self.fp.get_date_range_ts()
         self.proxy_model.set_filters(
             empty_only=False,       # now handled by status_filter
-            date_from_ts=self.fp.get_date_from_ts(),
-            date_to_ts=self.fp.get_date_to_ts(),
+            date_from_ts=date_from_ts,
+            date_to_ts=date_to_ts,
             older_than_secs=self.fp.get_older_than_secs(),
             status_filter=status_filter,
         )
+        # Always expand while filtering so all matched branches are visible.
+        self._set_expand_state(self._has_visible_rows())
+        self._refresh_selection_buttons()
+        self._do_recount()
         # Do not close panel automatically; wait for the user to toggle the filter button.
 
+    def _apply_default_browse_preset(self, apply_now=True):
+        blockers = [
+            QSignalBlocker(self.fp.bg),
+            QSignalBlocker(self.fp.date_from),
+            QSignalBlocker(self.fp.date_to),
+            QSignalBlocker(self.fp.slider),
+            QSignalBlocker(self.fp.btn_clear_dates),
+        ]
+        try:
+            self.fp.apply_default_browse_preset()
+        finally:
+            del blockers
+
+        if apply_now:
+            self._clear_all_checks()
+            self._apply_filters()
+
     def _reset_filters(self):
-        self.fp.rb_all.setChecked(True)
-        self.fp._clear_dates()
-        self.fp.slider.setValue(3)   # default to 3 months
-        self._apply_filters()
+        self._apply_default_browse_preset()
 
     def _toggle_expand(self, checked):
-        if checked:
+        self._set_expand_state(checked)
+
+    def _has_visible_rows(self):
+        if not self.proxy_model:
+            return False
+        return self.proxy_model.rowCount(QModelIndex()) > 0
+
+    def _set_expand_state(self, expanded):
+        if not hasattr(self, 'tree'):
+            return
+
+        if expanded:
             self.tree.expandAll()
-            self.btn_expand.setText("⬍  Collapse All")
         else:
             self.tree.collapseAll()
-            self.btn_expand.setText("⬍  Expand All")
+
+        if hasattr(self, 'btn_expand'):
+            blocker = QSignalBlocker(self.btn_expand)
+            self.btn_expand.setChecked(expanded)
+            self.btn_expand.setText("⬍  Collapse All" if expanded else "⬍  Expand All")
+            self.btn_expand.setEnabled(self._has_visible_rows())
+            del blocker
 
     def _select_all(self):
         if not self.tree_model:
             return
-        # Determine if we should check or uncheck: if any item unchecked -> check all
-        any_unchecked = False
-        def find_unchecked(parent=QModelIndex()):
-            nonlocal any_unchecked
-            for r in range(self.tree_model.rowCount(parent)):
-                idx = self.tree_model.index(r, 0, parent)
-                if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != Qt.CheckState.Checked:
-                    any_unchecked = True
-                    return
-                find_unchecked(idx)
-        find_unchecked()
+        indices = self._collect_bulk_target_indices()
+        if not indices:
+            self._refresh_selection_buttons()
+            return
 
-        target_state = Qt.CheckState.Checked if any_unchecked else Qt.CheckState.Unchecked
-
-        def set_all(parent=QModelIndex()):
-            for r in range(self.tree_model.rowCount(parent)):
-                idx = self.tree_model.index(r, 0, parent)
-                self.tree_model.set_check_state(idx, target_state)
-                set_all(idx)
-        set_all()
-        # Update select button text and recount
-        self.btn_select_all.setText("Unselect All" if target_state == Qt.CheckState.Checked else "Select All")
+        target_state = (
+            Qt.CheckState.Unchecked
+            if self._are_all_indices_checked(indices)
+            else Qt.CheckState.Checked
+        )
+        if target_state == Qt.CheckState.Checked:
+            self._clear_all_checks()
+        self._set_indices_checked(indices, target_state)
         self._do_recount()
+
+    def _clear_all_checks(self):
+        if not self.tree_model:
+            return
+        def clear(parent=QModelIndex()):
+            for r in range(self.tree_model.rowCount(parent)):
+                idx = self.tree_model.index(r, 0, parent)
+                if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != Qt.CheckState.Unchecked:
+                    self.tree_model.set_check_state(idx, Qt.CheckState.Unchecked)
+                clear(idx)
+        clear()
+        self._do_recount()
+
+    def _on_filter_changed(self):
+        # User manually changed a filter control — clear selections and apply
+        self._clear_all_checks()
+        self._apply_filters()
+
+    def _collect_bulk_target_indices(self, status=None):
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            return []
+
+        targets = []
+        seen_paths = set()
+        exact_only = self.proxy_model.has_active_filters() or status is not None
+        include_non_empty_directories = not exact_only
+
+        def walk(parent=QModelIndex()):
+            for row in range(self.proxy_model.rowCount(parent)):
+                proxy_index = self.proxy_model.index(row, 0, parent)
+                source_index = self.proxy_model.mapToSource(proxy_index)
+                item_data = self.tree_model.data(source_index, Qt.ItemDataRole.UserRole)
+                if item_data:
+                    path = item_data.get('path')
+                    is_exact_match = self.proxy_model.matches_source_index(source_index)
+                    is_non_empty_dir = item_data.get('is_dir', False) and self.tree_model.rowCount(source_index) > 0
+                    if (
+                        path and path not in seen_paths
+                        and (status is None or item_data.get('status') == status)
+                        and (not exact_only or is_exact_match)
+                        and (include_non_empty_directories or not is_non_empty_dir)
+                    ):
+                        seen_paths.add(path)
+                        targets.append(source_index)
+                if self.proxy_model.hasChildren(proxy_index):
+                    walk(proxy_index)
+
+        walk()
+        return targets
+
+    def _are_all_indices_checked(self, indices):
+        return bool(indices) and all(
+            self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
+            for index in indices
+        )
+
+    def _set_indices_checked(self, indices, state):
+        for index in indices:
+            if self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) != state:
+                self.tree_model.set_check_state(index, state, explicit=True)
+
+    def _set_status_filter(self, status):
+        if status == 'Inactive' and not self.fp.rb_inactive.isChecked():
+            self.fp.rb_inactive.setChecked(True)
+            return True
+        if status == 'Empty' and not self.fp.rb_empty.isChecked():
+            self.fp.rb_empty.setChecked(True)
+            return True
+        if status == 'Active' and not self.fp.rb_active.isChecked():
+            self.fp.rb_active.setChecked(True)
+            return True
+        if status is None and not self.fp.rb_all.isChecked():
+            self.fp.rb_all.setChecked(True)
+            return True
+        return False
+
+    def _refresh_selection_buttons(self):
+        if not hasattr(self, 'btn_select_all'):
+            return
+
+        all_targets = self._collect_bulk_target_indices()
+        inactive_targets = self._collect_bulk_target_indices(status='Inactive')
+        empty_targets = self._collect_bulk_target_indices(status='Empty')
+
+        self.btn_select_all.setEnabled(bool(all_targets))
+        self.btn_select_all.setText(
+            "Deselect All" if self._are_all_indices_checked(all_targets) else "Select All"
+        )
+
+        self.btn_select_inactive.setEnabled(bool(inactive_targets))
+        self.btn_select_inactive.setText(
+            "Deselect All Inactive"
+            if self._are_all_indices_checked(inactive_targets)
+            else "Select All Inactive"
+        )
+
+        self.btn_select_empty.setEnabled(bool(empty_targets))
+        self.btn_select_empty.setText(
+            "Deselect All Empty"
+            if self._are_all_indices_checked(empty_targets)
+            else "Select All Empty"
+        )
+
+    def _collect_checked_source_indices(self):
+        if not self.tree_model:
+            return []
+
+        checked_indices = []
+
+        def walk(parent=QModelIndex()):
+            for row in range(self.tree_model.rowCount(parent)):
+                index = self.tree_model.index(row, 0, parent)
+                if self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
+                    checked_indices.append(index)
+                walk(index)
+
+        walk()
+        return checked_indices
+
+    def _prune_paths(self, paths):
+        pruned_paths = []
+        selected_roots = []
+        for path in sorted(paths, key=lambda value: (len(os.path.normpath(value)), value.lower())):
+            normalized = os.path.normcase(os.path.normpath(path))
+            if any(
+                normalized == root or normalized.startswith(root + os.sep)
+                for root in selected_roots
+            ):
+                continue
+            selected_roots.append(normalized)
+            pruned_paths.append(path)
+        return pruned_paths
+
+    def _checked_delete_paths(self):
+        if not self.tree_model:
+            return []
+
+        paths = []
+        for index in self._collect_checked_source_indices():
+            if (
+                self.proxy_model.sourceModel() is self.tree_model
+                and self.proxy_model.is_context_only(index)
+                and not self.tree_model.is_explicitly_checked(index)
+            ):
+                continue
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+            if item_data and item_data.get('path'):
+                paths.append(item_data['path'])
+        return self._prune_paths(paths)
+
+    def _checked_delete_summary(self):
+        """Return delete targets and effective folder/file totals."""
+        if not self.tree_model:
+            return [], 0, 0
+
+        target_paths = self._checked_delete_paths()
+        if not target_paths:
+            return [], 0, 0
+
+        path_to_index = {}
+
+        def map_paths(parent=QModelIndex()):
+            for row in range(self.tree_model.rowCount(parent)):
+                index = self.tree_model.index(row, 0, parent)
+                item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+                if item_data and item_data.get('path'):
+                    path_to_index[item_data['path']] = index
+                map_paths(index)
+
+        def count_subtree(index):
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+            if not item_data:
+                return 0, 0
+
+            folder_count = 1 if item_data.get('is_dir', False) else 0
+            file_count = 0 if item_data.get('is_dir', False) else 1
+
+            for row in range(self.tree_model.rowCount(index)):
+                child_index = self.tree_model.index(row, 0, index)
+                child_folders, child_files = count_subtree(child_index)
+                folder_count += child_folders
+                file_count += child_files
+
+            return folder_count, file_count
+
+        map_paths()
+
+        folder_count = 0
+        file_count = 0
+        for path in target_paths:
+            index = path_to_index.get(path)
+            if index is None:
+                # Fallback for edge cases where path disappeared from current model
+                if os.path.isdir(path):
+                    folder_count += 1
+                else:
+                    file_count += 1
+                continue
+            folders, files = count_subtree(index)
+            folder_count += folders
+            file_count += files
+
+        return target_paths, folder_count, file_count
+
+    def _select_by_status(self, status):
+        if not self.tree_model:
+            return
+
+        if self._set_status_filter(status):
+            self._apply_filters()
+
+        indices = self._collect_bulk_target_indices(status=status)
+        if not indices:
+            self._refresh_selection_buttons()
+            return
+
+        target_state = (
+            Qt.CheckState.Unchecked
+            if self._are_all_indices_checked(indices)
+            else Qt.CheckState.Checked
+        )
+        if target_state == Qt.CheckState.Checked:
+            self._clear_all_checks()
+        self._set_indices_checked(indices, target_state)
+        self._do_recount()
+
+    def _select_inactive(self):
+        self._select_by_status('Inactive')
+
+    def _select_empty(self):
+        self._select_by_status('Empty')
 
     # ──────────────────────────────────────────────────────────────────────────
     # Scan
@@ -513,6 +833,7 @@ class MainWindow(QMainWindow):
                 self.txt_path.setText(folder.replace("/", "\\"))
             else:
                 self.txt_path.setText(os.path.normpath(folder))
+            self._apply_default_browse_preset()
             # Automatically start a scan once the user has selected a folder
             self.start_scan()
 
@@ -551,7 +872,7 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("⏹  Stop")
         self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;") # temporary stop style
         
-        self.scanner_thread = ScannerThread(path, stale_months=self.fp.slider.value())
+        self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_progress.connect(self._on_progress)
         self.scanner_thread.start()
@@ -570,6 +891,7 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText("Scan stopped by user.")
             else:
                 self.lbl_status.setText("Scan failed or folder is empty.")
+            self._set_expand_state(False)
             return
         self.tree_model = WatchdogTreeModel(root_node)
         self.proxy_model.setSourceModel(self.tree_model)
@@ -580,45 +902,32 @@ class MainWindow(QMainWindow):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         # Set sensible initial widths; column 0 stretches but give it an initial baseline
         self.tree.setColumnWidth(0, 420)
-        self.tree.setColumnWidth(1, 80)
-        self.tree.setColumnWidth(2, 120)
-        self.tree.setColumnWidth(3, 80)
-        self.tree.setColumnWidth(4, 120)
-        self.tree.setColumnWidth(5, 100)
-        self.tree.setColumnWidth(6, 120)
+        self.tree.setColumnWidth(1, 74)
+        self.tree.setColumnWidth(2, 116)
+        self.tree.setColumnWidth(3, 70)
+        self.tree.setColumnWidth(4, 96)
+        self.tree.setColumnWidth(5, 108)
+        self.tree.setColumnWidth(6, 98)
         # Apply default filter (show all)
         self._apply_filters()
-        # Expand if there is anything to expand; otherwise keep collapsed
-        def _has_children(node):
-            for c in node.get('children', []):
-                # If any child has its own children, or is a directory, consider expandable
-                if c.get('children'):
-                    return True
-                if c.get('is_dir'):
-                    # directory without children still shows as expandable in tree
-                    return True
-            return False
-
-        if _has_children(root_node):
-            self.btn_expand.setChecked(True)
-            self.tree.expandAll()
-            self.btn_expand.setText("⬍  Collapse All")
-        else:
-            self.btn_expand.setChecked(False)
-            self.tree.collapseAll()
-            self.btn_expand.setText("⬍  Expand All")
+        self._set_expand_state(self._has_visible_rows())
         n = len(root_node.get('children', []))
         self.lbl_status.setText(f"Scan complete — {n} top-level items")
         self._update_chips(root_node)
         self.tree_model.dataChanged.connect(self._on_checked)
+        self._do_recount()
 
     def _update_chips(self, root_node):
-        empty_n = inactive_n = reclaim = 0
+        empty_n = inactive_folders = inactive_files = reclaim = 0
         def walk(n):
-            nonlocal empty_n, inactive_n, reclaim
+            nonlocal empty_n, inactive_folders, inactive_files, reclaim
             s = n.get('status')
             if s == 'Empty': empty_n += 1
-            if s == 'Inactive' and n.get('is_dir'): inactive_n += 1
+            if s == 'Inactive':
+                if n.get('is_dir'):
+                    inactive_folders += 1
+                else:
+                    inactive_files += 1
             if s in ('Empty', 'Inactive') and not n.get('is_dir'):
                 reclaim += n.get('size', 0)
             for c in n.get('children', []):
@@ -626,8 +935,15 @@ class MainWindow(QMainWindow):
         walk(root_node)
         from .models import format_size
         self.chip_empty.setText(f"Empty: {empty_n}")
-        self.chip_inactive.setText(f"Inactive: {inactive_n}")
+        self.chip_inactive_folders.setText(f"Inactive folders: {inactive_folders}")
+        self.chip_inactive_files.setText(f"Inactive files: {inactive_files}")
         self.chip_space.setText(f"Reclaimable: {format_size(reclaim)}")
+        # Enable/disable quick-select buttons depending on presence
+        try:
+            self.btn_select_inactive.setEnabled((inactive_folders + inactive_files) > 0)
+            self.btn_select_empty.setEnabled(empty_n > 0)
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Selection count (debounced)
@@ -639,17 +955,18 @@ class MainWindow(QMainWindow):
 
     def _do_recount(self):
         if not self.tree_model:
+            self.btn_delete.setText("Delete Selected")
+            self.btn_delete.setEnabled(False)
+            self._refresh_selection_buttons()
             return
-        n = 0
-        def walk(parent):
-            nonlocal n
-            for r in range(self.tree_model.rowCount(parent)):
-                idx = self.tree_model.index(r, 0, parent)
-                if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
-                    n += 1
-                walk(idx)
-        walk(QModelIndex())
-        self.btn_delete.setText(f"Delete Selected ({n})" if n else "Delete Selected")
+        paths, folder_count, file_count = self._checked_delete_summary()
+        total = len(paths)
+        if total:
+            self.btn_delete.setText(f"Delete Selected (Folders: {folder_count}, Files: {file_count})")
+        else:
+            self.btn_delete.setText("Delete Selected")
+        self.btn_delete.setEnabled(total > 0)
+        self._refresh_selection_buttons()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tree interactions
@@ -661,21 +978,32 @@ class MainWindow(QMainWindow):
         src = self.proxy_model.mapToSource(proxy_index)
         return self.tree_model.data(src, Qt.ItemDataRole.UserRole)
 
-    def _on_click(self, index):
+    def _is_tree_index_clickable(self, index):
+        if not index.isValid():
+            return False
+        if index.column() == 0:
+            return True
         if index.column() == 6:
-            # If the action column displays a queued state, do not open
             action_text = self.proxy_model.data(index, Qt.ItemDataRole.DisplayRole)
-            if action_text and 'queued' in str(action_text).lower():
-                return
+            return not (action_text and 'queued' in str(action_text).lower())
+        return False
+
+    def _update_tree_cursor(self, index):
+        cursor = (
+            Qt.CursorShape.PointingHandCursor
+            if self._is_tree_index_clickable(index)
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.tree.viewport().setCursor(cursor)
+
+    def _on_click(self, index):
+        if index.column() == 6 and self._is_tree_index_clickable(index):
             d = self._item_data(self.proxy_model.index(index.row(), 0, index.parent()))
             if d:
                 self._open(d['path'], d.get('is_dir', True))
 
     def _on_double_click(self, index):
-        # Prevent opening on double-click if the action column shows queued
-        action_idx = self.proxy_model.index(index.row(), 6, index.parent())
-        action_text = self.proxy_model.data(action_idx, Qt.ItemDataRole.DisplayRole)
-        if action_text and 'queued' in str(action_text).lower():
+        if not self._is_tree_index_clickable(index):
             return
         d = self._item_data(index)
         if d:
@@ -739,21 +1067,17 @@ class MainWindow(QMainWindow):
     def _delete_selected(self):
         if not self.tree_model:
             return
-        paths = []
-        def collect(parent):
-            for r in range(self.tree_model.rowCount(parent)):
-                idx = self.tree_model.index(r, 0, parent)
-                if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
-                    d = self.tree_model.data(idx, Qt.ItemDataRole.UserRole)
-                    if d:
-                        paths.append(d['path'])
-                collect(idx)
-        collect(QModelIndex())
+        paths, folder_count, file_count = self._checked_delete_summary()
         if not paths:
             QMessageBox.information(self, "Delete", "No items selected.")
             return
         r = QMessageBox.question(self, "Confirm Delete",
-            f"Send {len(paths)} item(s) to the Recycle Bin?",
+            (
+                "Send selected items to the Recycle Bin?\n\n"
+                f"Folders: {folder_count}\n"
+                f"Files: {file_count}\n"
+                f"Total: {len(paths)}"
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if r == QMessageBox.StandardButton.Yes:

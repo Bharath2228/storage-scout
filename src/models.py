@@ -1,5 +1,7 @@
-from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
 from datetime import datetime
+
+from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
+
 
 def format_size(size_bytes):
     if size_bytes == 0:
@@ -10,22 +12,25 @@ def format_size(size_bytes):
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} PB"
 
+
 def format_age(timestamp):
     if timestamp == 0:
         return "--"
     now = datetime.now().timestamp()
     diff = now - timestamp
     months = int(diff / (30 * 24 * 3600))
-    if months == 0:
+    if months <= 0:
         return "<1mo"
     return f"{months}mo"
+
 
 class TreeItem:
     def __init__(self, data, parent=None):
         self.parentItem = parent
-        self.itemData = data # Data is the dict from scanner
+        self.itemData = data  # Data is the dict from scanner
         self.childItems = []
         self.checkState = Qt.CheckState.Unchecked
+        self.explicitlyChecked = False
 
     def appendChild(self, item):
         self.childItems.append(item)
@@ -39,31 +44,36 @@ class TreeItem:
         return len(self.childItems)
 
     def columnCount(self):
-        return 7 # Name, Type, Last Modified, Age, Size, Status, Action
+        return 7  # Name, Type, Last Modified, Age, Size, Status, Action
 
     def data(self, column):
         if column == 0:
-            return self.itemData.get('name', '')
-        elif column == 1:
+            name = self.itemData.get('name', '')
+            if self.itemData.get('is_hidden'):
+                return f"[Hidden] {name}"
+            return name
+        if column == 1:
             return "Folder" if self.itemData.get('is_dir') else "File"
-        elif column == 2:
+        if column == 2:
             ts = self.itemData.get('last_modified', 0)
-            if ts == 0: return ""
+            if ts == 0:
+                return ""
             return datetime.fromtimestamp(ts).strftime("%b %d, %Y")
-        elif column == 3:
+        if column == 3:
             return format_age(self.itemData.get('last_modified', 0))
-        elif column == 4:
+        if column == 4:
             return format_size(self.itemData.get('size', 0))
-        elif column == 5:
+        if column == 5:
             return self.itemData.get('status', '')
-        elif column == 6:
-            return "queued" if self.checkState == Qt.CheckState.Checked else "Open \u2192"
+        if column == 6:
+            return "queued" if self.checkState == Qt.CheckState.Checked else "Open"
         return None
 
     def row(self):
         if self.parentItem:
             return self.parentItem.childItems.index(self)
         return 0
+
 
 class WatchdogTreeModel(QAbstractItemModel):
     def __init__(self, root_data, parent=None):
@@ -101,52 +111,85 @@ class WatchdogTreeModel(QAbstractItemModel):
 
         if role == Qt.ItemDataRole.DisplayRole:
             return item.data(index.column())
-            
-        elif role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
+
+        if role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
             return item.checkState
-            
-        elif role == Qt.ItemDataRole.UserRole:
+
+        if role == Qt.ItemDataRole.UserRole:
             return item.itemData
-            
-        elif role == Qt.ItemDataRole.TextAlignmentRole:
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
             col = index.column()
-            if col == 0:  # Name / path: left-align for readability
+            if col == 0:
                 return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            if col in (1, 2, 5, 6):  # Type, Last modified, Status, Action: center
+            if col in (1, 2, 5, 6):
                 return Qt.AlignmentFlag.AlignCenter
-            if col in (3, 4):  # Age and Size: right-align numeric values
+            if col in (3, 4):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                
+
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
-            item = index.internalPointer()
             state = Qt.CheckState(value)
-            self.set_check_state(index, state)
+            self.set_check_state(index, state, explicit=True)
             return True
         return False
 
-    def set_check_state(self, index, state):
-        item = index.internalPointer()
-        if item.checkState == state:
+    def set_check_state(self, index, state, explicit=False):
+        if not index.isValid():
             return
-            
-        item.checkState = state
-        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
-        
-        # Action column changes when checked
-        action_index = self.index(index.row(), 6, index.parent())
-        self.dataChanged.emit(action_index, action_index, [Qt.ItemDataRole.DisplayRole])
-        
-        # Optional: check/uncheck children automatically
+        state = Qt.CheckState(state)
+        self._set_check_state_recursive(index, state, explicit=explicit)
+        self._update_ancestor_states(index.parent())
+
+    def _set_check_state_recursive(self, index, state, explicit=False):
+        item = index.internalPointer()
+        if item.checkState == state and item.explicitlyChecked == (explicit and state == Qt.CheckState.Checked):
+            if item.childCount() == 0:
+                return
+
+        self._update_item_check_state(index, state, explicit=explicit)
+
         for row in range(item.childCount()):
             child_idx = self.index(row, 0, index)
-            self.set_check_state(child_idx, state)
+            self._set_check_state_recursive(child_idx, state, explicit=False)
+
+    def _update_item_check_state(self, index, state, explicit=False):
+        item = index.internalPointer()
+        explicit_checked = bool(explicit) and state == Qt.CheckState.Checked
+        if item.checkState == state and item.explicitlyChecked == explicit_checked:
+            return
+
+        item.checkState = state
+        item.explicitlyChecked = explicit_checked
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+
+        action_index = self.index(index.row(), 6, index.parent())
+        self.dataChanged.emit(action_index, action_index, [Qt.ItemDataRole.DisplayRole])
+
+    def _update_ancestor_states(self, index):
+        while index.isValid():
+            item = index.internalPointer()
+            child_states = [item.child(row).checkState for row in range(item.childCount())]
+            if child_states and all(state == Qt.CheckState.Checked for state in child_states):
+                state = Qt.CheckState.Checked
+            elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
+                state = Qt.CheckState.Unchecked
+            else:
+                state = Qt.CheckState.PartiallyChecked
+
+            self._update_item_check_state(index, state, explicit=False)
+            index = index.parent()
+
+    def is_explicitly_checked(self, index):
+        if not index.isValid():
+            return False
+        return bool(index.internalPointer().explicitlyChecked)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            headers = ["Folder / File path", "Type", "Last modified", "Age \u2191", "Size", "Status", "Action"]
+            headers = ["Folder / File path", "Type", "Last modified", "Age ↑", "Size", "Status", "Action"]
             if section < len(headers):
                 return headers[section]
         return None
@@ -186,71 +229,118 @@ class WatchdogTreeModel(QAbstractItemModel):
             flags |= Qt.ItemFlag.ItemIsUserCheckable
         return flags
 
+
 class WatchdogFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._reset()
 
     def _reset(self):
-        self.empty_only      = False
-        self.status_filter   = None   # None = all, 'Active', 'Inactive', 'Empty'
-        self.date_from_ts    = None
-        self.date_to_ts      = None
+        self.empty_only = False
+        self.status_filter = None   # None = all, 'Active', 'Inactive', 'Empty'
+        self.date_from_ts = None
+        self.date_to_ts = None
         self.older_than_secs = None
+        self.older_than_cutoff_ts = None
 
     def set_filters(self, empty_only,
                     date_from_ts=None, date_to_ts=None,
                     older_than_secs=None,
                     status_filter=None):
-        self.empty_only      = empty_only
-        self.status_filter   = status_filter
-        self.date_from_ts    = date_from_ts
-        self.date_to_ts      = date_to_ts
+        if date_from_ts is not None and date_to_ts is not None and date_from_ts > date_to_ts:
+            date_from_ts, date_to_ts = date_to_ts, date_from_ts
+
+        self.empty_only = empty_only
+        self.status_filter = status_filter
+        self.date_from_ts = date_from_ts
+        self.date_to_ts = date_to_ts
         self.older_than_secs = older_than_secs
+        self.older_than_cutoff_ts = (
+            datetime.now().timestamp() - older_than_secs
+            if older_than_secs is not None else None
+        )
         self.invalidateFilter()
+
+    def has_active_filters(self):
+        return any((
+            self.empty_only,
+            self.status_filter is not None,
+            self.date_from_ts is not None,
+            self.date_to_ts is not None,
+            self.older_than_cutoff_ts is not None,
+        ))
+
+    def matches_source_index(self, source_index):
+        source_model = self.sourceModel()
+        if source_model is None or not source_index.isValid():
+            return False
+        item_data = source_model.data(source_index, Qt.ItemDataRole.UserRole)
+        return bool(item_data) and self._matches(item_data)
+
+    def is_context_only(self, source_index):
+        return self.has_active_filters() and not self.matches_source_index(source_index)
 
     def filterAcceptsRow(self, source_row, source_parent):
         return self._accepts(source_row, source_parent)
 
+    def flags(self, index):
+        return super().flags(index)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        source_index = self.mapToSource(index)
+        if self.is_context_only(source_index):
+            if role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
+                return "Context"
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return "Visible because a child item matches the current filters."
+
+        return super().data(index, role)
+
     def _accepts(self, source_row, source_parent):
-        idx = self.sourceModel().index(source_row, 0, source_parent)
-        item_data = self.sourceModel().data(idx, Qt.ItemDataRole.UserRole)
+        source_model = self.sourceModel()
+        if source_model is None:
+            return False
+
+        idx = source_model.index(source_row, 0, source_parent)
+        item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
         if not item_data:
             return False
+
         if self._matches(item_data):
             return True
-        # Show parent directories if any child matches
+
         if item_data.get('is_dir'):
-            for r in range(self.sourceModel().rowCount(idx)):
-                if self._accepts(r, idx):
+            for row in range(source_model.rowCount(idx)):
+                if self._accepts(row, idx):
                     return True
         return False
 
-    def _matches(self, d):
-        status = d.get('status', '')
-        ts     = d.get('last_modified', 0)
+    def _matches(self, item_data):
+        status = item_data.get('status', '')
+        ts = item_data.get('last_modified', 0)
 
-        # ── Filter 1: empty-only mode (legacy radio) ─────────────────────────
         if self.empty_only:
-            return status == 'Empty' and d.get('is_dir', False)
+            return status == 'Empty' and item_data.get('is_dir', False)
 
-        # ── Filter 2: status filter (Active / Inactive / Empty) ──────────────
-        if self.status_filter is not None:
-            return status == self.status_filter
+        if self.status_filter is not None and status != self.status_filter:
+            return False
 
-        # ── Filter 3: date range ─────────────────────────────────────────────
-        if ts and self.date_from_ts is not None:
-            if ts < self.date_from_ts:
-                return False
-        if ts and self.date_to_ts is not None:
-            if ts > self.date_to_ts:
-                return False
+        has_time_filter = any(value is not None for value in (
+            self.date_from_ts,
+            self.date_to_ts,
+            self.older_than_cutoff_ts,
+        ))
+        if has_time_filter and not ts:
+            return False
 
-        # ── Filter 4: older-than slider ──────────────────────────────────────
-        if self.older_than_secs is not None and ts:
-            from datetime import datetime
-            cutoff = datetime.now().timestamp() - self.older_than_secs
-            if ts > cutoff:
-                return False
+        if self.date_from_ts is not None and ts < self.date_from_ts:
+            return False
+        if self.date_to_ts is not None and ts > self.date_to_ts:
+            return False
+        if self.older_than_cutoff_ts is not None and ts > self.older_than_cutoff_ts:
+            return False
 
         return True

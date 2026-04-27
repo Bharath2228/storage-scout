@@ -1,4 +1,5 @@
 import os
+import stat
 from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -32,17 +33,29 @@ class ScannerThread(QThread):
             
     def cancel(self):
         self.is_cancelled = True
+
+    def _is_hidden(self, name, stat_result):
+        if name.startswith('.'):
+            return True
+
+        attributes = getattr(stat_result, 'st_file_attributes', 0)
+        hidden_mask = (
+            getattr(stat, 'FILE_ATTRIBUTE_HIDDEN', 0)
+            | getattr(stat, 'FILE_ATTRIBUTE_SYSTEM', 0)
+        )
+        return bool(attributes & hidden_mask)
         
     def _scan_directory(self, path):
         # A node is a dict: {'name': str, 'path': str, 'is_dir': bool, 'size': int, 'last_modified': float, 'status': str, 'children': list}
         try:
-            stat = os.stat(path)
+            path_stat = os.stat(path)
             node = {
                 'name': os.path.basename(path) or path,
                 'path': path,
                 'is_dir': True,
+                'is_hidden': self._is_hidden(os.path.basename(path) or path, path_stat),
                 'size': 0,
-                'last_modified': stat.st_mtime,
+                'last_modified': path_stat.st_mtime,
                 'status': 'Active',
                 'children': []
             }
@@ -78,12 +91,15 @@ class ScannerThread(QThread):
                     
                 try:
                     is_dir = entry.is_dir()
+                    entry_stat = entry.stat()
+                    is_hidden = self._is_hidden(entry.name, entry_stat)
                     
                     if is_dir:
                         child_node = self._scan_directory(item_path)
                         if self.is_cancelled:
                             return None
                         if child_node:
+                            child_node['is_hidden'] = child_node.get('is_hidden', is_hidden)
                             node['children'].append(child_node)
                             total_size += child_node['size']
                             if child_node['last_modified'] > latest_mod_time:
@@ -94,9 +110,8 @@ class ScannerThread(QThread):
                                 all_stale = False
                     else:
                         has_files = True
-                        item_stat = entry.stat()
-                        mod_time = item_stat.st_mtime
-                        size = item_stat.st_size
+                        mod_time = entry_stat.st_mtime
+                        size = entry_stat.st_size
                         total_size += size
                         
                         if mod_time > latest_mod_time:
@@ -110,6 +125,7 @@ class ScannerThread(QThread):
                             'name': entry.name,
                             'path': item_path,
                             'is_dir': False,
+                            'is_hidden': is_hidden,
                             'size': size,
                             'last_modified': mod_time,
                             'status': 'Inactive' if is_stale else 'Active',
