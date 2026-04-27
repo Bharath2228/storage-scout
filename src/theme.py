@@ -27,8 +27,8 @@ def apply_theme(app, theme_name="dark"):
             border-bottom: 1px solid {border};
         }}
         QWidget#filterPanel {{
-            background-color: {bg_main};
-            border-bottom: 2px solid {accent};
+            background-color: {bg_sec};
+            border-bottom: 1px solid {border};
         }}
         QWidget#statusbar {{
             background-color: transparent;
@@ -43,7 +43,9 @@ def apply_theme(app, theme_name="dark"):
         QTreeView {{
             background-color: {bg_main};
             alternate-background-color: {bg_sec};
-            border: none; outline: none;
+            border: none;
+            border-top: 1px solid {border};
+            outline: none;
             color: {text};
         }}
         QTreeView::item {{ padding: 7px 4px; border: none; }}
@@ -67,7 +69,71 @@ def apply_theme(app, theme_name="dark"):
             border-color: {accent};
             image: url({base_dir}/check.svg);
         }}
-        
+
+        /* ── Scrollbar ───────────────────────────────────────────────────── */
+        QScrollBar:vertical {{
+            background: {bg_sec};
+            width: 12px;
+            border: none;
+            border-left: 1px solid {border};
+            margin: 0;
+        }}
+        QScrollBar::handle:vertical {{
+            background: #c0c8d2;
+            border-radius: 5px;
+            min-height: 32px;
+            margin: 2px 2px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: #9ca3af;
+        }}
+        QScrollBar::handle:vertical:pressed {{
+            background: #6b7280;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+            background: none;
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: none;
+        }}
+        QScrollBar:horizontal {{
+            background: {bg_sec};
+            height: 12px;
+            border: none;
+            border-top: 1px solid {border};
+        }}
+        QScrollBar::handle:horizontal {{
+            background: #c0c8d2;
+            border-radius: 5px;
+            min-width: 32px;
+            margin: 2px 2px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: #9ca3af;
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0;
+            background: none;
+        }}
+
+        /* ── Floating scroll-to-top button ───────────────────────────────── */
+        QPushButton#scrollTopBtn {{
+            background-color: {accent};
+            border: none;
+            border-radius: 19px;
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            padding: 0;
+        }}
+        QPushButton#scrollTopBtn:hover {{
+            background-color: #0761d1;
+        }}
+        QPushButton#scrollTopBtn:pressed {{
+            background-color: #0353a4;
+        }}
+
         QHeaderView::section {{
             background-color: {bg_sec};
             padding: 8px 6px;
@@ -76,132 +142,191 @@ def apply_theme(app, theme_name="dark"):
             border-right: 1px solid {border};
             font-weight: bold; color: {text_muted};
         }}
-        
-        /* ── Base button — tactile feedback ─────────────────────────────── */
-        QPushButton {{
-            background-color: {bg_hover};
+
+        /* ── SpinBox ─────────────────────────────────────────────────────── */
+        QSpinBox {{
+            background-color: {bg_main};
             border: 1px solid {border};
             border-radius: 6px;
-            padding: 6px 14px;
+            padding: 4px 8px;
+            color: {text};
+            selection-background-color: {bg_hover};
+            selection-color: {text};
+        }}
+        QSpinBox:focus {{
+            border-color: {accent};
+        }}
+        QSpinBox::up-button, QSpinBox::down-button {{
+            background-color: {bg_sec};
+            border: none;
+            border-left: 1px solid {border};
+            width: 18px;
+        }}
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background-color: {bg_hover};
+        }}
+        QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
+            background-color: {border};
+        }}
+
+        /* ── Base button — tactile feedback ─────────────────────────────── */
+        QPushButton {{
+            background-color: {bg_sec};
+            border: 1px solid {border};
+            border-bottom: 2px solid {border};
+            border-radius: 7px;
+            padding: 6px 16px;
             color: {text};
             font-weight: 500;
             outline: none;
         }}
         QPushButton:hover {{
-            background-color: {bg_sec};
-            border-color: {accent};
-            color: {accent};
+            background-color: {bg_hover};
+            border-color: #9ca3af;
+            border-bottom-color: #9ca3af;
+            color: {text};
         }}
         QPushButton:pressed {{
-            background-color: {bg_main};
-            border-color: {accent};
+            background-color: {border};
+            border-color: {text_muted};
+            border-bottom-width: 1px;
+            padding: 7px 16px 5px 16px;
             color: {text};
-            padding: 7px 14px 5px 14px;
         }}
         QPushButton:disabled {{
-            color: {text_muted};
-            border-color: {border};
-            background-color: {bg_main};
+            color: #b0b8c1;
+            border: 1px dashed {border};
+            border-bottom: 1px dashed {border};
+            background-color: #f9fafb;
         }}
         QPushButton#primaryBtn {{
             background-color: {accent};
-            border-color: {accent};
+            border: 1px solid #0358b6;
+            border-bottom: 2px solid #0256af;
             color: #ffffff;
             font-weight: 600;
         }}
         QPushButton#primaryBtn:hover {{
-            background-color: #0353a4;
-            border-color: #0353a4;
+            background-color: #0761d1;
+            border-color: #0358b6;
+            border-bottom-color: #024fa3;
             color: #ffffff;
         }}
         QPushButton#primaryBtn:pressed {{
-            background-color: #023e7d;
-            border-color: #023e7d;
+            background-color: #0353a4;
+            border-color: #0256af;
+            border-bottom-width: 1px;
             color: #ffffff;
+            padding: 7px 16px 5px 16px;
         }}
         QPushButton#ghostBtn {{
             background-color: transparent;
             color: {text_muted};
-            border-color: {border};
+            border: 1px solid {border};
+            border-bottom: 2px solid {border};
         }}
         QPushButton#ghostBtn:hover {{
             background-color: {bg_hover};
             color: {text};
-            border-color: {text_muted};
+            border-color: #9ca3af;
+            border-bottom-color: #9ca3af;
+        }}
+        QPushButton#ghostBtn:pressed {{
+            background-color: {bg_sec};
+            border-bottom-width: 1px;
+            padding: 7px 16px 5px 16px;
         }}
 
         /* ── Filter toggle ───────────────────────────────────────────────── */
         QPushButton#filterBtn {{
             color: {accent};
-            font-weight: bold;
-            border-color: {accent};
+            font-weight: 600;
+            border: 1px solid {accent};
+            border-bottom: 2px solid #0358b6;
+            background-color: #eef4fd;
         }}
         QPushButton#filterBtn:hover {{
             background-color: {accent};
+            border-bottom-color: #0358b6;
             color: white;
         }}
         QPushButton#filterBtn:checked {{
             background-color: {accent};
+            border: 1px solid #0358b6;
+            border-bottom: 2px solid #0256af;
             color: white;
-            border-color: {accent};
         }}
         QPushButton#filterBtn:pressed {{
-            background-color: {bg_sec};
-            color: {accent};
+            background-color: #0353a4;
+            border-bottom-width: 1px;
+            color: white;
             padding: 7px 14px 5px 14px;
         }}
 
         /* ── Delete button ───────────────────────────────────────────────── */
         QPushButton#deleteBtn {{
             color: {chip_red};
-            font-weight: bold;
-            border-color: {chip_red};
+            font-weight: 600;
+            border: 1px solid {chip_red};
+            border-bottom: 2px solid #a40e26;
+            background-color: #fff0f1;
         }}
         QPushButton#deleteBtn:hover {{
             background-color: {chip_red};
-            border-color: {chip_red};
+            border-color: #a40e26;
+            border-bottom-color: #a40e26;
             color: white;
         }}
         QPushButton#deleteBtn:pressed {{
             background-color: #a40e26;
-            border-color: #a40e26;
+            border-bottom-width: 1px;
             color: white;
             padding: 7px 14px 5px 14px;
         }}
+        QPushButton#deleteBtn:disabled {{
+            color: {text_muted};
+            border: 1px solid {border};
+            border-bottom: 2px solid {border};
+            background-color: {bg_sec};
+        }}
 
-        /* ── Apply (accent-filled) ───────────────────────────────────────── */
-        QPushButton#applyBtn {{
-            background-color: {accent};
-            border: 1px solid {accent};
-            color: white;
-            font-weight: 600;
-            padding: 6px 16px;
+        /* ── Filter Close button ─────────────────────────────────────────── */
+        QPushButton#filterCloseBtn {{
+            background-color: {bg_sec};
+            border: 1px solid {border};
+            border-bottom: 2px solid {border};
+            color: {text_muted};
+            font-weight: 500;
         }}
-        QPushButton#applyBtn:hover {{
-            background-color: {text};
-            border-color: {text};
-            color: {bg_main};
+        QPushButton#filterCloseBtn:hover {{
+            background-color: #fff0f1;
+            border-color: {chip_red};
+            border-bottom-color: #a40e26;
+            color: {chip_red};
         }}
-        QPushButton#applyBtn:pressed {{
-            background-color: {border};
-            border-color: {border};
-            color: {bg_main};
-            padding: 7px 16px 5px 16px;
+        QPushButton#filterCloseBtn:pressed {{
+            background-color: #ffcdd0;
+            border-bottom-width: 1px;
+            color: {chip_red};
+            padding: 7px 14px 5px 14px;
         }}
 
         /* ── Reset (ghost) ───────────────────────────────────────────────── */
         QPushButton#resetBtn {{
             background-color: transparent;
             border: 1px solid {border};
+            border-bottom: 2px solid {border};
             color: {text_muted};
         }}
         QPushButton#resetBtn:hover {{
-            border-color: {text_muted};
+            border-color: #9ca3af;
+            border-bottom-color: #9ca3af;
             background-color: {bg_hover};
             color: {text};
         }}
         QPushButton#resetBtn:pressed {{
             background-color: {bg_sec};
+            border-bottom-width: 1px;
             color: {text_muted};
             padding: 7px 14px 5px 14px;
         }}
@@ -210,9 +335,8 @@ def apply_theme(app, theme_name="dark"):
         QPushButton#linkBtn {{
             background: transparent;
             border: none;
-            color: {text_muted};
-            font-size: 11px;
-            text-decoration: underline;
+            color: {accent};
+            font-size: 12px;
             padding: 0;
         }}
         QPushButton#linkBtn:hover {{
@@ -240,12 +364,32 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
         }}
 
+        QWidget#emptyState {{
+            background-color: {bg_main};
+        }}
+        QLabel#emptyIcon {{
+            font-size: 52px;
+            padding-bottom: 4px;
+        }}
+        QLabel#emptyTitle {{
+            font-size: 18px;
+            font-weight: 700;
+            color: {text};
+            padding-bottom: 2px;
+        }}
+        QLabel#emptySub {{
+            font-size: 13px;
+            color: {text_muted};
+            line-height: 1.5;
+        }}
+
         QLabel#agePill {{
-            background-color: #f97316;
+            background-color: #0969da;
             color: #ffffff;
-            border-radius: 11px;
+            border-radius: 10px;
             font-weight: bold;
             font-size: 11px;
+            padding: 0px 7px;
         }}
 
         QLabel#statusLabel {{

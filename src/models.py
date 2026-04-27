@@ -127,6 +127,14 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col in (3, 4):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
+        if role == Qt.ItemDataRole.FontRole and index.column() == 0:
+            item_data = item.itemData
+            if item_data.get('is_dir', False):
+                from PyQt6.QtGui import QFont
+                f = QFont()
+                f.setBold(True)
+                return f
+
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
