@@ -37,9 +37,33 @@ def apply_theme(app, theme_name="dark"):
         }}
         QLabel#statusLabel {{ color: {text_muted}; }}
         
-        QLabel#chipEmpty {{ background-color: transparent; color: {text_muted}; border-radius: 10px; padding: 2px 10px; font-weight: 600; font-size: 12px; border: none; }}
-        QLabel#chipInactive {{ background-color: transparent; color: {text_muted}; border-radius: 10px; padding: 2px 10px; font-weight: 600; font-size: 12px; border: none; }}
-        QLabel#chipSpace {{ background-color: transparent; color: {text_muted}; border-radius: 10px; padding: 2px 10px; font-weight: 600; font-size: 12px; border: none; }}
+        QLabel#chipEmpty {{ 
+            background-color: {chip_green_bg}; 
+            color: {chip_green}; 
+            border: 1px solid #bccdc1;
+            border-radius: 6px; 
+            padding: 2px 8px; 
+            font-weight: 600; 
+            font-size: 11px; 
+        }}
+        QLabel#chipInactive {{ 
+            background-color: {chip_yellow_bg}; 
+            color: {chip_yellow}; 
+            border: 1px solid #d8d0a4;
+            border-radius: 6px; 
+            padding: 2px 8px; 
+            font-weight: 600; 
+            font-size: 11px; 
+        }}
+        QLabel#chipSpace {{ 
+            background-color: #f1f5f9; 
+            color: {text}; 
+            border: 1px solid {border};
+            border-radius: 6px; 
+            padding: 2px 8px; 
+            font-weight: 600; 
+            font-size: 11px; 
+        }}
         QTreeView {{
             background-color: {bg_main};
             alternate-background-color: {bg_sec};
@@ -160,13 +184,21 @@ def apply_theme(app, theme_name="dark"):
             background-color: {bg_sec};
             border: none;
             border-left: 1px solid {border};
-            width: 18px;
+            width: 20px;
         }}
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
             background-color: {bg_hover};
         }}
         QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
             background-color: {border};
+        }}
+        QSpinBox::up-arrow {{
+            width: 10px; height: 6px;
+            image: url({base_dir}/up_arrow.svg);
+        }}
+        QSpinBox::down-arrow {{
+            width: 10px; height: 6px;
+            image: url({base_dir}/down_arrow.svg);
         }}
 
         /* ── Base button — tactile feedback ─────────────────────────────── */
@@ -347,9 +379,11 @@ def apply_theme(app, theme_name="dark"):
         }}
 
         QLabel#appTitle {{
-            font-weight: bold;
-            font-size: 15px;
+            font-weight: 800;
+            font-size: 14px;
             color: {accent};
+            text-transform: uppercase;
+            letter-spacing: 1px;
             padding-right: 4px;
         }}
 
@@ -445,36 +479,6 @@ def apply_theme(app, theme_name="dark"):
             color: {text};
         }}
         QDateEdit::drop-down {{ border: none; }}
-        QSpinBox {{
-            background-color: {bg_main};
-            border: 1px solid {border};
-            border-radius: 4px;
-            padding: 4px;
-            color: {text};
-        }}
-        QSpinBox:focus {{ border-color: {accent}; }}
-        QSpinBox::up-button, QSpinBox::down-button {{
-            width: 20px;
-            background: transparent;
-            border-left: 1px solid {border};
-        }}
-        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
-            background: {bg_sec};
-        }}
-        QSpinBox::up-arrow {{
-            width: 10px; height: 6px;
-            image: url({base_dir}/up_arrow.svg);
-        }}
-        QSpinBox::down-arrow {{
-            width: 10px; height: 6px;
-            image: url({base_dir}/down_arrow.svg);
-        }}
-        QSpinBox::up-arrow:hover {{
-            image: url({base_dir}/up_arrow_hover.svg);
-        }}
-        QSpinBox::down-arrow:hover {{
-            image: url({base_dir}/down_arrow_hover.svg);
-        }}
         QCalendarWidget {{ background-color: {bg_sec}; color: {text}; }}
     """
     app.setStyleSheet(base_style + custom_style)

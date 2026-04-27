@@ -378,8 +378,8 @@ class MainWindow(QMainWindow):
         topbar = QWidget()
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(14, 8, 14, 8)
-        tb.setSpacing(8)
+        tb.setContentsMargins(16, 12, 16, 12)
+        tb.setSpacing(10)
 
         lbl = QLabel("IBMS Watchdog")
         lbl.setObjectName("appTitle")
@@ -389,16 +389,15 @@ class MainWindow(QMainWindow):
         self.txt_path = QLineEdit()
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.txt_path.setMinimumWidth(240)
-        self.txt_path.setMaximumWidth(520)
         self.txt_path.setPlaceholderText("Enter or browse a folder path…")
-        btn_browse = QPushButton("Browse")
+        btn_browse = QPushButton("📂  Browse")
         btn_browse.setToolTip("Browse folder")
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse)
         tb.addWidget(self.txt_path)
         tb.addWidget(btn_browse)
 
-        self.btn_rescan = QPushButton("Re-scan")
+        self.btn_rescan = QPushButton("⟳  Re-scan")
         self.btn_rescan.setObjectName("primaryBtn")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rescan.clicked.connect(self.start_scan)
@@ -406,7 +405,7 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(self._vbar())
 
-        self.btn_filter = QPushButton("Filters")
+        self.btn_filter = QPushButton("⚙  Filters")
         self.btn_filter.setObjectName("filterBtn")
         self.btn_filter.setCheckable(True)
         self.btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -418,20 +417,22 @@ class MainWindow(QMainWindow):
         self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_expand.clicked.connect(self._toggle_expand)
 
-        btn_export = QPushButton("Export CSV")
+        # ── Push Export + Delete to the far right ──────────────────────────
+        tb.addStretch()
+        tb.addWidget(self._vbar())
+
+        btn_export = QPushButton("📊  Export CSV")
         btn_export.setObjectName("ghostBtn")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.clicked.connect(self._export_csv)
         tb.addWidget(btn_export)
 
-        self.btn_delete = QPushButton("Delete Selected")
+        self.btn_delete = QPushButton("🗑  Delete Selected")
         self.btn_delete.setObjectName("deleteBtn")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_delete.setEnabled(False)
         tb.addWidget(self.btn_delete)
-
-        tb.addStretch()
 
         vbox.addWidget(topbar)
 
@@ -492,11 +493,11 @@ class MainWindow(QMainWindow):
         icon_lbl.setObjectName("emptyIcon")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        title_lbl = QLabel("No folder selected")
+        title_lbl = QLabel("READY TO SCAN")
         title_lbl.setObjectName("emptyTitle")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        sub_lbl = QLabel("Browse to a folder or paste a path above, then click Re-scan to analyse it.")
+        sub_lbl = QLabel("Select a folder above to analyze its contents.\nInactive and empty folders will be highlighted automatically.")
         sub_lbl.setObjectName("emptySub")
         sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub_lbl.setWordWrap(True)
@@ -611,7 +612,7 @@ class MainWindow(QMainWindow):
         # ── Status bar ────────────────────────────────────────────────────────
         sb = QWidget()
         sb.setObjectName("statusbar")
-        sb.setFixedHeight(30)
+        sb.setFixedHeight(36)
         sbl = QHBoxLayout(sb)
         sbl.setContentsMargins(12, 0, 12, 0)
         sbl.setSpacing(12)
