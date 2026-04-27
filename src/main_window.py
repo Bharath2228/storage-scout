@@ -93,7 +93,7 @@ class AnyDateEdit(QDateEdit):
 class FilterPanel(QFrame):
     DEFAULT_STALE_MONTHS = 3
     AGE_FILTER_DISABLED = 0
-    MAX_STALE_MONTHS = 120
+    MAX_STALE_MONTHS = 24
     DEFAULT_STATUS_FILTER = "Inactive"
 
     def __init__(self, parent=None):
@@ -107,13 +107,12 @@ class FilterPanel(QFrame):
 
         # ── Section 1: Display Mode ──────────────────────────────────────────
         sec1 = self._make_section("DISPLAY MODE")
-        self.rb_all      = QRadioButton("All")
-        self.rb_active   = QRadioButton("Active only")
+        self.rb_all      = QRadioButton("Show all")
         self.rb_inactive = QRadioButton("Inactive only")
         self.rb_empty    = QRadioButton("Empty only")
         self.rb_all.setChecked(True)
         self.bg = QButtonGroup()
-        for rb in [self.rb_all, self.rb_active, self.rb_inactive, self.rb_empty]:
+        for rb in [self.rb_all, self.rb_inactive, self.rb_empty]:
             self.bg.addButton(rb)
             sec1.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -161,36 +160,56 @@ class FilterPanel(QFrame):
 
         # ── Section 3: Stale Threshold ───────────────────────────────────────
         sec3 = self._make_section("AGE THRESHOLD")
+        
+        self.lbl_val = QLabel()
+        self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        
+        self.lbl_pill = QLabel()
+        self.lbl_pill.setObjectName("agePill")
+        self.lbl_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_pill.setFixedHeight(22)
+        
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        top_row.addWidget(self.lbl_val)
+        top_row.addWidget(self.lbl_pill)
+        top_row.addStretch()
+        sec3.addLayout(top_row)
+        
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
         self.slider.setValue(self.AGE_FILTER_DISABLED)
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider.setTickInterval(1)
         self.slider.setMinimumWidth(180)
-        self.slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        self.lbl_val = QLabel()
-        self.lbl_val.setObjectName("sliderLabel")
-        self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._update_age_label(self.slider.value())
+        self.slider.setMaximumWidth(260)
+        self.slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.slider.valueChanged.connect(self._update_age_label)
         self.slider.valueChanged.connect(self._sync_manual_age_from_slider)
-        self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        sec3.addWidget(self.slider)
 
         self.age_input = QSpinBox()
         self.age_input.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
         self.age_input.setValue(self.AGE_FILTER_DISABLED)
-        self.age_input.setSuffix(" mo")
-        self.age_input.setMinimumWidth(86)
+        self.age_input.setSuffix(" months")
+        self.age_input.setMinimumWidth(120)
+        self.age_input.setCursor(Qt.CursorShape.PointingHandCursor)
         self.age_input.setToolTip("Manual age filter (months). 0 means Any age.")
         self.age_input.valueChanged.connect(self._sync_slider_from_manual_age)
 
-        sec3.addWidget(self.lbl_val)
-        age_row = QHBoxLayout()
-        age_row.setSpacing(8)
-        age_row.addWidget(self.slider)
-        age_row.addWidget(self.age_input)
-        sec3.addLayout(age_row)
+        bot_row = QHBoxLayout()
+        bot_row.setSpacing(8)
+        lbl_manual = QLabel("Manual:")
+        lbl_manual.setObjectName("mutedLabel")
+        bot_row.addWidget(lbl_manual)
+        bot_row.addWidget(self.age_input)
+        bot_row.addStretch()
+        sec3.addLayout(bot_row)
+
+        self._update_age_label(self.slider.value())
+
         sec3.addStretch()
         outer.addLayout(sec3)
 
@@ -218,9 +237,23 @@ class FilterPanel(QFrame):
     def _update_age_label(self, value):
         if value == self.AGE_FILTER_DISABLED:
             self.lbl_val.setText("Any age")
+            self.lbl_pill.hide()
             return
-        suffix = "" if value == 1 else "s"
-        self.lbl_val.setText(f"Older than {value} month{suffix}")
+            
+        self.lbl_pill.show()
+        self.lbl_pill.setText(f"  {value}m  ")
+        
+        years = value // 12
+        months = value % 12
+        
+        if years > 0 and months > 0:
+            text = f"Older than {years}y {months}m"
+        elif years > 0:
+            text = f"Older than {years}y"
+        else:
+            text = f"Older than {months}m"
+            
+        self.lbl_val.setText(text)
 
     def _sync_manual_age_from_slider(self, value):
         blocker = QSignalBlocker(self.age_input)
@@ -231,6 +264,7 @@ class FilterPanel(QFrame):
         blocker = QSignalBlocker(self.slider)
         self.slider.setValue(value)
         del blocker
+        self._update_age_label(value)
 
     def get_date_range_ts(self):
         from_date = self.date_from.date()
@@ -265,6 +299,12 @@ class FilterPanel(QFrame):
         self.rb_inactive.setChecked(True)
         self._clear_dates()
         self.slider.setValue(self.DEFAULT_STALE_MONTHS)
+        
+        blocker = QSignalBlocker(self.age_input)
+        self.age_input.setValue(self.DEFAULT_STALE_MONTHS)
+        del blocker
+        
+        self._update_age_label(self.DEFAULT_STALE_MONTHS)
 
     # helpers
     def _make_section(self, title):
@@ -501,14 +541,12 @@ class MainWindow(QMainWindow):
 
     def _apply_filters(self):
         # Determine status filter from radio buttons
-        if self.fp.rb_empty.isChecked():
+        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
+            status_filter = None
+        elif self.fp.rb_empty.isChecked():
             status_filter = 'Empty'
-        elif self.fp.rb_active.isChecked():
-            status_filter = 'Active'
-        elif self.fp.rb_inactive.isChecked():
-            status_filter = 'Inactive'
         else:
-            status_filter = None   # All
+            status_filter = 'Inactive'
 
         date_from_ts, date_to_ts = self.fp.get_date_range_ts()
         self.proxy_model.set_filters(
@@ -653,10 +691,7 @@ class MainWindow(QMainWindow):
         if status == 'Empty' and not self.fp.rb_empty.isChecked():
             self.fp.rb_empty.setChecked(True)
             return True
-        if status == 'Active' and not self.fp.rb_active.isChecked():
-            self.fp.rb_active.setChecked(True)
-            return True
-        if status is None and not self.fp.rb_all.isChecked():
+        if status is None and hasattr(self.fp, 'rb_all') and not self.fp.rb_all.isChecked():
             self.fp.rb_all.setChecked(True)
             return True
         return False

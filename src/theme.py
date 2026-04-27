@@ -1,4 +1,7 @@
+import os
+
 def apply_theme(app, theme_name="dark"):
+    base_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
     # Single-theme application: keep only dark mode.
     base_style = ""
     bg_main = "#0d1117"
@@ -218,10 +221,12 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
         }}
 
-        QLabel#sliderLabel {{
-            color: {accent};
-            font-weight: 600;
-            font-size: 13px;
+        QLabel#agePill {{
+            background-color: #f97316;
+            color: #ffffff;
+            border-radius: 11px;
+            font-weight: bold;
+            font-size: 11px;
         }}
 
         QLabel#statusLabel {{
@@ -280,11 +285,33 @@ def apply_theme(app, theme_name="dark"):
         QSpinBox {{
             background-color: {bg_main};
             border: 1px solid {border};
-            border-radius: 6px;
-            padding: 4px 8px;
+            border-radius: 4px;
+            padding: 4px;
             color: {text};
         }}
         QSpinBox:focus {{ border-color: {accent}; }}
+        QSpinBox::up-button, QSpinBox::down-button {{
+            width: 20px;
+            background: transparent;
+            border-left: 1px solid {border};
+        }}
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background: {bg_sec};
+        }}
+        QSpinBox::up-arrow {{
+            width: 10px; height: 6px;
+            image: url({base_dir}/up_arrow.svg);
+        }}
+        QSpinBox::down-arrow {{
+            width: 10px; height: 6px;
+            image: url({base_dir}/down_arrow.svg);
+        }}
+        QSpinBox::up-arrow:hover {{
+            image: url({base_dir}/up_arrow_hover.svg);
+        }}
+        QSpinBox::down-arrow:hover {{
+            image: url({base_dir}/down_arrow_hover.svg);
+        }}
         QCalendarWidget {{ background-color: {bg_sec}; color: {text}; }}
     """
     app.setStyleSheet(base_style + custom_style)
