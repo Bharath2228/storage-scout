@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMenu, QSizePolicy, QFrame, QStyle
 )
 from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon
+from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel
 from .scanner import ScannerThread
@@ -53,9 +53,10 @@ class StatusDelegate(QStyledItemDelegate):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(dot_rect)
         
-        f = painter.font()
+        f = QFont("Segoe UI", 8)
         f.setBold(True)
-        f.setPointSize(8)
+
+
         painter.setFont(f)
         painter.setPen(text_color)
         
@@ -87,9 +88,10 @@ class ActionDelegate(QStyledItemDelegate):
             painter.setBrush(QBrush(QColor("#fef2f2")))
             painter.setPen(QPen(QColor("#ef4444"), 1))
             painter.drawRoundedRect(btn, 10, 10) # Rounded capsule
-            f = painter.font()
+            f = QFont("Segoe UI", 8)
             f.setBold(True)
-            f.setPointSize(8)
+
+
             painter.setFont(f)
             painter.setPen(QColor("#ef4444"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ Queued")
@@ -99,9 +101,9 @@ class ActionDelegate(QStyledItemDelegate):
             painter.setBrush(QBrush(bg))
             painter.setPen(QPen(QColor("#2563eb"), 1.2))
             painter.drawRoundedRect(btn, 5, 5) # Refined 5px radius
-            f = painter.font()
+            f = QFont("Segoe UI", 8)
             f.setBold(True)
-            f.setPointSize(8) # Compact 8pt font
+
             painter.setFont(f)
             painter.setPen(QColor("#2563eb"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
@@ -123,6 +125,12 @@ class AnyDateEdit(QDateEdit):
 
     def eventFilter(self, obj, event):
         if obj == self.calendarWidget() and event.type() == QEvent.Type.Show:
+            # Force a valid font to avoid setPointSize(-1) warnings from Qt internals
+            f = self.calendarWidget().font()
+            if f.pointSize() <= 0:
+                f.setPointSize(9)
+                self.calendarWidget().setFont(f)
+                
             if self.date() == self.minimumDate():
                 current_date = QDate.currentDate()
                 self.calendarWidget().setCurrentPage(current_date.year(), current_date.month())
@@ -152,7 +160,8 @@ class FilterPanel(QFrame):
         display_layout.setSpacing(4)
 
         lbl_display = QLabel("DISPLAY MODE")
-        lbl_display.setObjectName("sectionHeader")
+        lbl_display.setObjectName("displayModeHeader")
+
         display_layout.addWidget(lbl_display)
 
         self.rb_all      = QRadioButton("Show all")
@@ -178,7 +187,8 @@ class FilterPanel(QFrame):
         date_layout.setSpacing(4)
 
         lbl_date = QLabel("DATE RANGE")
-        lbl_date.setObjectName("sectionHeader")
+        lbl_date.setObjectName("dateRangeHeader")
+
         date_layout.addWidget(lbl_date)
 
         self.date_from = AnyDateEdit()
@@ -192,8 +202,11 @@ class FilterPanel(QFrame):
         self.date_to.setSpecialValueText("Any")
         self.date_to.setDate(self.date_to.minimumDate())
         self.date_to.setMinimumWidth(150)
+        self.date_from.setObjectName("dateRangeInput")
+        self.date_to.setObjectName("dateRangeInput")
         self.date_from.setCursor(Qt.CursorShape.PointingHandCursor)
         self.date_to.setCursor(Qt.CursorShape.PointingHandCursor)
+
 
         for lbl_text, widget in [("From", self.date_from), ("To", self.date_to)]:
             box = QWidget()
@@ -201,7 +214,8 @@ class FilterPanel(QFrame):
             box_layout.setContentsMargins(16, 4, 16, 4)
             box_layout.setSpacing(4)
             l = QLabel(lbl_text)
-            l.setObjectName("mutedLabel")
+            l.setObjectName(f"{lbl_text.lower()}Label")
+
             box_layout.addWidget(l)
             box_layout.addWidget(widget)
             date_layout.addWidget(box)
@@ -210,7 +224,7 @@ class FilterPanel(QFrame):
         btn_layout = QHBoxLayout(btn_box)
         btn_layout.setContentsMargins(16, 0, 16, 0)
         self.btn_clear_dates = QPushButton("Clear dates")
-        self.btn_clear_dates.setObjectName("linkBtn")
+        self.btn_clear_dates.setObjectName("clearDates")
         self.btn_clear_dates.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear_dates.clicked.connect(self._clear_dates)
         btn_layout.addWidget(self.btn_clear_dates)
@@ -228,7 +242,8 @@ class FilterPanel(QFrame):
         age_outer_layout.setSpacing(4)
 
         lbl_age = QLabel("AGE THRESHOLD")
-        lbl_age.setObjectName("sectionHeader")
+        lbl_age.setObjectName("ageThresholdHeader")
+
         age_outer_layout.addWidget(lbl_age)
 
         age_box = QWidget()
@@ -1387,8 +1402,7 @@ class MainWindow(QMainWindow):
             (
                 "Send selected items to the Recycle Bin?\n\n"
                 f"Folders: {folder_count}\n"
-                f"Files: {file_count}\n"
-                f"Total: {len(paths)}"
+                f"Files: {file_count}"
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)

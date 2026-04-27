@@ -24,10 +24,31 @@ def apply_theme(app, theme_name="dark"):
     chip_green_bg = "#f0fdf4"
 
     # Set application-wide font
-    app.setFont(QFont("Segoe UI", 9))
+    font = QFont("Segoe UI")
+    font.setPointSize(9)
+    app.setFont(font)
 
     custom_style = f"""
-        * {{ font-family: "Segoe UI", "Inter", system-ui, sans-serif; font-size: 12px; }}
+        * {{ font-family: "Segoe UI", "Inter", system-ui, sans-serif; font-size: 9pt; }}
+        
+        QMessageBox, QDialog {{
+            background-color: white;
+        }}
+        QMessageBox QLabel, QDialog QLabel {{
+            color: #1e293b;
+            font-size: 10pt;
+        }}
+        QMessageBox QPushButton, QDialog QPushButton {{
+            background-color: #f1f5f9;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 6px 16px;
+            min-width: 80px;
+            color: #1e293b;
+        }}
+        QMessageBox QPushButton:hover, QDialog QPushButton:hover {{
+            background-color: #e2e8f0;
+        }}
         QMainWindow {{ background-color: #f1f5f9; }}
         QLabel {{ color: {text}; }}
         QWidget#topbar {{
@@ -61,15 +82,27 @@ def apply_theme(app, theme_name="dark"):
             margin-bottom: 8px;
         }}
         
-        QLabel#sectionHeader {{
+        QLabel#displayModeHeader,
+        QLabel#dateRangeHeader,
+        QLabel#ageThresholdHeader {{
             background-color: #f1f5f9;
             padding: 10px 16px;
             font-weight: 600;
             font-size: 10pt;
             color: #1e293b;
-            margin-bottom: 8px;
+            margin-bottom: 12px;
             border-radius: 6px;
         }}
+
+        QLabel#fromLabel, QLabel#toLabel {{
+            color: #64748b;
+            font-size: 9pt;
+            font-weight: 500;
+            padding-left: 2px;
+            margin-bottom: 4px;
+            margin-top: 8px;
+        }}
+
 
         
         QCheckBox, QRadioButton {{
@@ -530,6 +563,23 @@ def apply_theme(app, theme_name="dark"):
             color: {text};
         }}
 
+        QPushButton#clearDates {{
+            background-color: transparent;
+            color: #64748b;
+            border: none;
+            padding: 6px 8px;
+            font-size: 9pt;
+            text-align: left;
+            qproperty-icon: url({base_dir}/x-circle.svg);
+            qproperty-iconSize: 14px 14px;
+        }}
+        
+        QPushButton#clearDates:hover {{
+            color: #dc2626;
+            background-color: #fef2f2;
+            border-radius: 4px;
+        }}
+
         QLabel#appTitle {{
             font-weight: 700;
             font-size: 16px; /* ~12pt Header */
@@ -661,27 +711,42 @@ def apply_theme(app, theme_name="dark"):
         }}
 
         
-        QDateEdit {{
-            background-color: {bg_main};
-            border: 1px solid {border};
+        QComboBox#dateRangeInput,
+        QDateEdit#dateRangeInput {{
+            border: 1.5px solid #e2e8f0;
             border-radius: 6px;
-            padding: 4px 8px;
-            color: {text};
-        }}
-        QDateEdit::drop-down {{ border: none; }}
-        
-        QComboBox {{
-            border: 1.5px solid {border};
-            border-radius: 6px;
-            padding: 8px 12px;
-            background-color: {bg_main};
+            padding: 10px 12px;
+            background-color: white;
             color: #334155;
-            font-size: 12px;
-            min-height: 24px;
+            font-size: 9pt;
+            min-height: 20px;
         }}
-        QComboBox:hover {{ border-color: #cbd5e1; }}
-        QComboBox:focus {{ border-color: {accent}; }}
-        QComboBox::drop-down {{ border: none; width: 30px; }}
+        
+        QComboBox#dateRangeInput:hover,
+        QDateEdit#dateRangeInput:hover {{
+            border-color: #cbd5e1;
+            background-color: #fafbfc;
+        }}
+        
+        QComboBox#dateRangeInput:focus,
+        QDateEdit#dateRangeInput:focus {{
+            border-color: #2563eb;
+            background-color: white;
+        }}
+        
+        QComboBox#dateRangeInput::drop-down,
+        QDateEdit#dateRangeInput::drop-down {{
+            border: none;
+            width: 30px;
+            padding-right: 8px;
+        }}
+        
+        QComboBox#dateRangeInput::down-arrow,
+        QDateEdit#dateRangeInput::down-arrow {{
+            image: url({base_dir}/calendar.svg);
+            width: 16px;
+            height: 16px;
+        }}
         /* ── Scrollbars ──────────────────────────────────────────────────── */
         QScrollBar:vertical {{
             border: none;
@@ -728,6 +793,13 @@ def apply_theme(app, theme_name="dark"):
             padding: 4px;
         }}
         
-        QCalendarWidget {{ background-color: {bg_sec}; color: {text}; }}
+        QCalendarWidget {{ 
+            background-color: {bg_sec}; 
+            color: {text}; 
+            font-family: "Segoe UI", sans-serif;
+            font-size: 12px;
+        }}
+        QCalendarWidget QAbstractItemView {{ font-size: 12px; }}
+        QCalendarWidget QWidget#qt_calendar_navigationbar {{ font-size: 12px; }}
     """
     app.setStyleSheet(base_style + custom_style)
