@@ -150,14 +150,20 @@ class WatchdogTreeModel(QAbstractItemModel):
         return False
 
     def set_check_state(self, index, state, explicit=False):
-        if not index.isValid():
+        self.set_indices_check_state([index], state, explicit=explicit)
+
+    def set_indices_check_state(self, indices, state, explicit=False):
+        if not indices:
             return
         state = Qt.CheckState(state)
         
         self.layoutAboutToBeChanged.emit()
         try:
-            self._set_check_state_recursive(index, state, explicit=explicit)
-            self._update_ancestor_states(index.parent())
+            for index in indices:
+                if not index.isValid():
+                    continue
+                self._set_check_state_recursive(index, state, explicit=explicit)
+                self._update_ancestor_states(index.parent())
         finally:
             self.layoutChanged.emit()
 
@@ -334,18 +340,19 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             if role == Qt.ItemDataRole.ToolTipRole:
                 return "Visible because a child item matches the current filters."
 
-        # Dynamic status for 'Show all' mode based on age slider
-        if self.status_filter is None and role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
+        # Dynamic status based on age slider (applies regardless of filter mode)
+        if role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
             item_data = self.sourceModel().data(source_index, Qt.ItemDataRole.UserRole)
             if item_data:
                 status = item_data.get('status', '')
-                if status != 'Empty' and self.older_than_cutoff_ts is not None:
-                    ts = item_data.get('last_modified', 0)
-                    if ts > 0:
-                        if ts <= self.older_than_cutoff_ts:
-                            return 'Inactive'
-                        else:
-                            return 'Active'
+                if status != 'Empty':
+                    if self.older_than_cutoff_ts is not None:
+                        ts = item_data.get('last_modified', 0)
+                        if ts > 0:
+                            return 'Inactive' if ts <= self.older_than_cutoff_ts else 'Active'
+                    else:
+                        # Age threshold is "Off" (None) or 0 -> everything non-empty is Inactive.
+                        return 'Inactive'
                 return status
 
         return super().data(index, role)
@@ -376,6 +383,15 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         status = item_data.get('status', '')
         ts = item_data.get('last_modified', 0)
 
+        # Dynamic status adjustment for filtering
+        if status != 'Empty':
+            if self.older_than_cutoff_ts is not None:
+                if ts > 0:
+                    status = 'Inactive' if ts <= self.older_than_cutoff_ts else 'Active'
+            else:
+                # User requested: if age threshold is "Off" or 0, treat everything as Inactive.
+                status = 'Inactive'
+
         if self.empty_only:
             return status == 'Empty' and item_data.get('is_dir', False)
 
@@ -385,8 +401,9 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         has_time_filter = any(value is not None for value in (
             self.date_from_ts,
             self.date_to_ts,
-            self.older_than_cutoff_ts,
         ))
+        
+        # Note: older_than_cutoff_ts is now handled by the dynamic status above
         if has_time_filter and not ts:
             return False
 
@@ -394,9 +411,5 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             return False
         if self.date_to_ts is not None and ts > self.date_to_ts:
             return False
-        if self.older_than_cutoff_ts is not None and ts > self.older_than_cutoff_ts:
-            # If "Show all" is checked (status_filter is None), don't hide items based on age
-            if self.status_filter is not None:
-                return False
 
         return True

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QRadioButton, QSlider, QDateEdit, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget,
-    QMenu, QSizePolicy, QFrame
+    QMenu, QSizePolicy, QFrame, QStyle
 )
 from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon
@@ -37,13 +37,14 @@ class StatusDelegate(QStyledItemDelegate):
         colors = self._COLORS.get(status, (QColor(0x57, 0x60, 0x6a), QColor(0xf6, 0xf8, 0xfa), QColor(0xd0, 0xd7, 0xde)))
         text_color, bg_color, border_color = colors
         rect = option.rect
-        pill = QRect(rect.left() + (rect.width() - 70) // 2,
-                     rect.top() + (rect.height() - 22) // 2, 70, 22)
+        pill = QRect(rect.left() + (rect.width() - 64) // 2,
+                     rect.top() + (rect.height() - 20) // 2, 64, 20)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(QBrush(bg_color))
         painter.setPen(QPen(border_color, 1))
-        painter.drawRoundedRect(pill, 11, 11)
+        painter.drawRoundedRect(pill, 10, 10)
+
         
         # Colored dot
         dot_size = 6
@@ -69,15 +70,23 @@ class ActionDelegate(QStyledItemDelegate):
         if not text:
             return
         rect = option.rect
-        btn = QRect(rect.left() + (rect.width() - 72) // 2,
-                    rect.top() + (rect.height() - 24) // 2, 72, 24)
+        
+        # Determine if hovered
+        is_hovered = option.state & QStyle.StateFlag.State_MouseOver
+
+        # Smaller professional button: 64x22
+        btn_w, btn_h = 64, 22
+        btn = QRect(rect.left() + (rect.width() - btn_w) // 2,
+                    rect.top() + (rect.height() - btn_h) // 2, btn_w, btn_h)
+        
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
         if "queued" in text:
             # Draw red badge for queued items
             painter.setBrush(QBrush(QColor("#fef2f2")))
             painter.setPen(QPen(QColor("#ef4444"), 1))
-            painter.drawRoundedRect(btn, 6, 6)
+            painter.drawRoundedRect(btn, 10, 10) # Rounded capsule
             f = painter.font()
             f.setBold(True)
             f.setPointSize(8)
@@ -85,13 +94,14 @@ class ActionDelegate(QStyledItemDelegate):
             painter.setPen(QColor("#ef4444"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ Queued")
         else:
-            # Modern Outline Button for "Open"
-            painter.setBrush(QBrush(QColor("#eff6ff")))
-            painter.setPen(QPen(QColor("#2563eb"), 1.5))
-            painter.drawRoundedRect(btn, 6, 6)
+            # Modern Small Outline Button for "Open"
+            bg = QColor("#eff6ff") if is_hovered else QColor("transparent")
+            painter.setBrush(QBrush(bg))
+            painter.setPen(QPen(QColor("#2563eb"), 1.2))
+            painter.drawRoundedRect(btn, 5, 5) # Refined 5px radius
             f = painter.font()
             f.setBold(True)
-            f.setPointSize(9)
+            f.setPointSize(8) # Compact 8pt font
             painter.setFont(f)
             painter.setPen(QColor("#2563eb"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
@@ -259,7 +269,8 @@ class FilterPanel(QFrame):
         bot_row = QHBoxLayout()
         bot_row.setSpacing(8)
         lbl_manual = QLabel("Manual:")
-        lbl_manual.setObjectName("mutedLabel")
+        lbl_manual.setObjectName("manualLabel")
+
         bot_row.addWidget(lbl_manual)
         bot_row.addWidget(self.age_input)
         bot_row.addStretch()
@@ -278,7 +289,8 @@ class FilterPanel(QFrame):
         action_layout.setSpacing(10)
         
         self.btn_reset = QPushButton("↺  Reset all filters")
-        self.btn_reset.setObjectName("resetBtn")
+        self.btn_reset.setObjectName("resetFilters")
+
         self.btn_reset.setToolTip("Reset all filters to their default values")
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close = QPushButton("Close sidebar")
@@ -473,6 +485,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_filter)
 
         self.btn_expand = QPushButton("Expand All")
+        self.btn_expand.setObjectName("collapseAll")
         self.btn_expand.setCheckable(True)
         self.btn_expand.setToolTip("Expand or collapse all folders in the view")
         self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -692,7 +705,8 @@ class MainWindow(QMainWindow):
         sbl.setContentsMargins(12, 0, 12, 0)
         sbl.setSpacing(12)
         self.lbl_status = QLabel("Ready — select a folder and click Re-scan")
-        self.lbl_status.setObjectName("statusLabel")
+        self.lbl_status.setObjectName("statusMessage")
+
         sbl.addWidget(self.lbl_status)
         sbl.addStretch()
         
@@ -714,9 +728,10 @@ class MainWindow(QMainWindow):
         # Do NOT auto-start scan — let the user enter a path first
 
     def _sep(self):
-        l = QLabel("|")
+        l = QLabel("•")
         l.setObjectName("statusSeparator")
         return l
+
 
     def _vbar(self):
         f = QFrame()
@@ -942,9 +957,11 @@ class MainWindow(QMainWindow):
         )
 
     def _set_indices_checked(self, indices, state):
-        for index in indices:
-            if self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) != state:
-                self.tree_model.set_check_state(index, state, explicit=True)
+        if not indices:
+            return
+        to_change = [idx for idx in indices if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != state]
+        if to_change:
+            self.tree_model.set_indices_check_state(to_change, state, explicit=True)
 
     def _set_status_filter(self, status):
         if status == 'Inactive' and not self.fp.rb_inactive.isChecked():

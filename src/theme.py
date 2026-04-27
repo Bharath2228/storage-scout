@@ -62,16 +62,15 @@ def apply_theme(app, theme_name="dark"):
         }}
         
         QLabel#sectionHeader {{
-            background-color: {bg_hover};
-            padding: 8px 16px;
+            background-color: #f1f5f9;
+            padding: 10px 16px;
             font-weight: 600;
-            font-size: 13px;
-            color: #334155;
-            margin-top: 8px;
-            border-left: 3px solid {accent};
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            font-size: 10pt;
+            color: #1e293b;
+            margin-bottom: 8px;
+            border-radius: 6px;
         }}
+
         
         QCheckBox, QRadioButton {{
             padding: 10px 16px;
@@ -93,11 +92,16 @@ def apply_theme(app, theme_name="dark"):
             border: 2px solid #cbd5e1;
             background-color: {bg_main};
         }}
+        QCheckBox::indicator:hover {{
+            border-color: #94a3b8;
+            background-color: #f8fafc;
+        }}
         QCheckBox::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
             image: url({base_dir}/check.svg);
         }}
+
         
         QRadioButton::indicator {{
             width: 20px;
@@ -119,35 +123,24 @@ def apply_theme(app, theme_name="dark"):
             border-top: 1px solid {border};
             color: {text_muted};
         }}
-        QLabel#statusLabel {{ color: {text_muted}; }}
+        QLabel#statusMessage {{
+            color: #475569;
+            font-weight: 500;
+            padding-right: 24px;
+        }}
         QLabel#statusSeparator {{
             color: #cbd5e1;
+            font-size: 10pt;
             padding: 0 8px;
         }}
+
         
-        QLabel#chipEmpty {{ 
-            background-color: {chip_green_bg}; 
-            color: #065f46; 
-            border-radius: 12px; 
-            padding: 4px 12px; 
-            font-weight: 600; 
-            font-size: 11px; 
-        }}
-        QLabel#chipInactive {{ 
-            background-color: {chip_yellow_bg}; 
-            color: #92400e; 
-            border-radius: 12px; 
-            padding: 4px 12px; 
-            font-weight: 600; 
-            font-size: 11px; 
-        }}
-        QLabel#chipSpace {{ 
-            background-color: #f1f5f9; 
-            color: #334155; 
-            border-radius: 12px; 
-            padding: 4px 12px; 
-            font-weight: 600; 
-            font-size: 11px; 
+        QLabel#chipEmpty, QLabel#chipInactive, QLabel#chipSpace {{ 
+            background-color: transparent;
+            color: {text_muted};
+            padding: 0 4px;
+            font-weight: 600;
+            font-size: 11px;
         }}
         QTreeView {{
             background-color: transparent;
@@ -156,27 +149,35 @@ def apply_theme(app, theme_name="dark"):
             outline: none;
             color: {text};
         }}
-        QTreeView::item {{ padding: 7px 4px; border: none; }}
+        QTreeView::item {{ 
+            padding: 10px 4px; 
+            border-bottom: 1px solid #f1f5f9; 
+        }}
         QTreeView::item:hover {{ background-color: {bg_hover}; color: {text}; }}
         QTreeView::item:selected {{ background-color: {accent}; color: #fff; }}
         QTreeView::item:selected:hover {{ background-color: #0353a4; color: #fff; }}
         
         QTreeView::indicator {{
-            width: 14px;
-            height: 14px;
-            border: 1px solid {text_muted};
-            border-radius: 3px;
+            width: 16px;
+            height: 16px;
+            border: 1.5px solid #cbd5e1;
+            border-radius: 4px;
             background-color: {bg_main};
         }}
         QTreeView::indicator:hover {{
-            border-color: {text};
-            background-color: {bg_hover};
+            border-color: #94a3b8;
+            background-color: #f8fafc;
         }}
         QTreeView::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
             image: url({base_dir}/check.svg);
         }}
+
+        QTreeView::branch {{
+            border-bottom: 1px solid #f1f5f9;
+        }}
+
 
         /* ── Scrollbar ───────────────────────────────────────────────────── */
         QScrollBar:vertical {{
@@ -243,13 +244,39 @@ def apply_theme(app, theme_name="dark"):
         }}
 
         QHeaderView::section {{
-            background-color: {bg_sec};
-            padding: 8px 6px;
+            background-color: #fafbfc;
+            padding: 14px 16px;
             border: none;
-            border-bottom: 1px solid {border};
-            border-right: 1px solid {border};
-            font-weight: bold; color: {text_muted};
+            border-bottom: 2px solid #e2e8f0;
+            font-weight: 600;
+            color: #64748b;
+            font-size: 9pt;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }}
+        QHeaderView::section:hover {{
+            background-color: #f1f5f9;
+        }}
+
+        QPushButton:disabled {{
+            background-color: #f8fafc;
+            color: #cbd5e1;
+            border: 1.5px solid #f1f5f9;
+        }}
+
+        QPushButton#collapseAll {{
+            background-color: white;
+            color: #475569;
+            border: 1.5px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-weight: 500;
+        }}
+        QPushButton#collapseAll:hover {{
+            background-color: #f8fafc;
+            border-color: #cbd5e1;
+        }}
+
 
         /* ── SpinBox ─────────────────────────────────────────────────────── */
         QSpinBox {{
@@ -399,6 +426,28 @@ def apply_theme(app, theme_name="dark"):
         QPushButton#closeSidebar:hover {{
             background-color: {bg_hover};
             color: {text};
+        }}
+
+        QPushButton#resetFilters {{
+            background-color: transparent;
+            color: #2563eb;
+            border: 1.5px solid #dbeafe;
+            border-radius: 6px;
+            padding: 10px 16px;
+            font-weight: 500;
+        }}
+        QPushButton#resetFilters:hover {{
+            background-color: #eff6ff;
+            border-color: #2563eb;
+        }}
+        QPushButton#resetFilters:pressed {{
+            background-color: #dbeafe;
+        }}
+
+        QLabel#manualLabel {{
+            color: #64748b;
+            font-size: 8pt;
+            font-weight: 400;
         }}
 
         /* ── Delete button ───────────────────────────────────────────────── */
