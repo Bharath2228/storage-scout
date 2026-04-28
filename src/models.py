@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
+from PyQt6.QtGui import QFont, QIcon
 
 
 def format_size(size_bytes):
@@ -133,8 +134,13 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col in (3, 4):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
+        if role == Qt.ItemDataRole.FontRole:
+            if item.itemData.get('is_dir', False) and index.column() == 0:
+                font = QFont()
+                font.setBold(True)
+                return font
+
         if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
-            from PyQt6.QtGui import QIcon
             is_dir = item.itemData.get('is_dir', False)
             if is_dir:
                 return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
