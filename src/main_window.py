@@ -1239,32 +1239,61 @@ class MainWindow(QMainWindow):
         self._set_expand_state(self._has_visible_rows())
         n = len(root_node.get('children', []))
         self.lbl_status.setText(f"Scan complete — {n} top-level items")
-        self._update_chips(root_node)
+        self._update_chips()
         self.tree_model.dataChanged.connect(self._on_checked)
         self.tree_model.layoutChanged.connect(lambda: self.recount_timer.start(80))
         self._do_recount()
 
-    def _update_chips(self, root_node):
+    def _update_chips(self):
+        if not self.proxy_model or not self.tree_model:
+            return
+
         empty_n = inactive_folders = inactive_files = reclaim = 0
-        def walk(n):
+
+        def walk(parent_proxy_idx=QModelIndex()):
             nonlocal empty_n, inactive_folders, inactive_files, reclaim
-            s = n.get('status')
-            if s == 'Empty': empty_n += 1
-            if s == 'Inactive':
-                if n.get('is_dir'):
-                    inactive_folders += 1
-                else:
-                    inactive_files += 1
-            if s in ('Empty', 'Inactive') and not n.get('is_dir'):
-                reclaim += n.get('size', 0)
-            for c in n.get('children', []):
-                walk(c)
-        walk(root_node)
+            for row in range(self.proxy_model.rowCount(parent_proxy_idx)):
+                proxy_idx = self.proxy_model.index(row, 0, parent_proxy_idx)
+                source_idx = self.proxy_model.mapToSource(proxy_idx)
+
+                # Skip items that are only visible as context (parents of matches)
+                if self.proxy_model.is_context_only(source_idx):
+                    if self.proxy_model.hasChildren(proxy_idx):
+                        walk(proxy_idx)
+                    continue
+
+                # Status is dynamic (column 5)
+                status_idx = self.proxy_model.index(row, 5, parent_proxy_idx)
+                status = self.proxy_model.data(status_idx, Qt.ItemDataRole.DisplayRole)
+
+                item_data = self.tree_model.data(source_idx, Qt.ItemDataRole.UserRole)
+                if not item_data:
+                    continue
+
+                is_dir = item_data.get('is_dir', False)
+                size = item_data.get('size', 0)
+
+                if status == 'Empty':
+                    empty_n += 1
+                elif status == 'Inactive':
+                    if is_dir:
+                        inactive_folders += 1
+                    else:
+                        inactive_files += 1
+
+                if status in ('Empty', 'Inactive') and not is_dir:
+                    reclaim += size
+
+                if self.proxy_model.hasChildren(proxy_idx):
+                    walk(proxy_idx)
+
+        walk()
         from .models import format_size
         self.chip_empty.setText(f"Empty: {empty_n}")
         self.chip_inactive_folders.setText(f"Inactive folders: {inactive_folders}")
         self.chip_inactive_files.setText(f"Inactive files: {inactive_files}")
         self.chip_space.setText(f"Reclaimable: {format_size(reclaim)}")
+
         # Enable/disable quick-select buttons depending on presence
         try:
             self.btn_select_inactive.setEnabled((inactive_folders + inactive_files) > 0)
@@ -1294,6 +1323,7 @@ class MainWindow(QMainWindow):
             self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(total > 0)
         self._refresh_selection_buttons()
+        self._update_chips()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tree interactions
