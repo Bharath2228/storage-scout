@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
+from PyQt6.QtGui import QFont, QIcon
 
 
 def format_size(size_bytes):
@@ -81,13 +82,19 @@ class WatchdogTreeModel(QAbstractItemModel):
         self.rootItem = TreeItem({'name': 'Root'})
         self._setupModelData(root_data, self.rootItem)
 
-    def _setupModelData(self, data_node, parent):
-        if not data_node:
+    def _setupModelData(self, root_data, root_item):
+        if not root_data:
             return
-        for child_data in data_node.get('children', []):
-            child_item = TreeItem(child_data, parent)
-            parent.appendChild(child_item)
-            self._setupModelData(child_data, child_item)
+        # Iterative setup to avoid recursion limits
+        stack = [(root_data, root_item)]
+        while stack:
+            data_node, parent_item = stack.pop()
+            for child_data in data_node.get('children', []):
+                child_item = TreeItem(child_data, parent_item)
+                parent_item.appendChild(child_item)
+                if child_data.get('children'):
+                    stack.append((child_data, child_item))
+
 
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
@@ -127,13 +134,17 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col in (3, 4):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
-        if role == Qt.ItemDataRole.FontRole and index.column() == 0:
-            item_data = item.itemData
-            if item_data.get('is_dir', False):
-                from PyQt6.QtGui import QFont
-                f = QFont()
-                f.setBold(True)
-                return f
+        if role == Qt.ItemDataRole.FontRole:
+            if item.itemData.get('is_dir', False) and index.column() == 0:
+                font = QFont()
+                font.setBold(True)
+                return font
+
+        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
+            is_dir = item.itemData.get('is_dir', False)
+            if is_dir:
+                return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
+            return QIcon.fromTheme("text-x-generic", QIcon.fromTheme("document-new"))
 
         return None
 
@@ -145,36 +156,49 @@ class WatchdogTreeModel(QAbstractItemModel):
         return False
 
     def set_check_state(self, index, state, explicit=False):
-        if not index.isValid():
+        self.set_indices_check_state([index], state, explicit=explicit)
+
+    def set_indices_check_state(self, indices, state, explicit=False):
+        if not indices:
             return
         state = Qt.CheckState(state)
-        self._set_check_state_recursive(index, state, explicit=explicit)
-        self._update_ancestor_states(index.parent())
+        
+        self.layoutAboutToBeChanged.emit()
+        try:
+            for index in indices:
+                if not index.isValid():
+                    continue
+                self._set_check_state_recursive(index, state, explicit=explicit)
+                self._update_ancestor_states(index.parent())
+        finally:
+            self.layoutChanged.emit()
 
-    def _set_check_state_recursive(self, index, state, explicit=False):
-        item = index.internalPointer()
-        if item.checkState == state and item.explicitlyChecked == (explicit and state == Qt.CheckState.Checked):
-            if item.childCount() == 0:
-                return
+    def _set_check_state_recursive(self, start_index, state, explicit=False):
+        # Iterative implementation to avoid recursion and signal storms
+        stack = [(start_index, explicit)]
+        while stack:
+            index, is_explicit = stack.pop()
+            item = index.internalPointer()
+            
+            explicit_checked = bool(is_explicit) and state == Qt.CheckState.Checked
+            if item.checkState != state or item.explicitlyChecked != explicit_checked:
+                item.checkState = state
+                item.explicitlyChecked = explicit_checked
+                # We don't emit dataChanged here; layoutChanged at the end handles it
+                
+            for row in range(item.childCount()):
+                stack.append((self.index(row, 0, index), False))
 
-        self._update_item_check_state(index, state, explicit=explicit)
-
-        for row in range(item.childCount()):
-            child_idx = self.index(row, 0, index)
-            self._set_check_state_recursive(child_idx, state, explicit=False)
 
     def _update_item_check_state(self, index, state, explicit=False):
+        # This is now only used for single-item updates from ancestors
         item = index.internalPointer()
         explicit_checked = bool(explicit) and state == Qt.CheckState.Checked
         if item.checkState == state and item.explicitlyChecked == explicit_checked:
             return
-
         item.checkState = state
         item.explicitlyChecked = explicit_checked
-        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
 
-        action_index = self.index(index.row(), 6, index.parent())
-        self.dataChanged.emit(action_index, action_index, [Qt.ItemDataRole.DisplayRole])
 
     def _update_ancestor_states(self, index):
         while index.isValid():
@@ -241,7 +265,24 @@ class WatchdogTreeModel(QAbstractItemModel):
 class WatchdogFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setRecursiveFilteringEnabled(True)
+        self.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._reset()
+
+    def lessThan(self, left, right):
+        left_data = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
+        right_data = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
+        
+        col = left.column()
+        # Sort by Size (column 4)
+        if col == 4:
+            return left_data.get('size', 0) < right_data.get('size', 0)
+        # Sort by Age / Last Modified (column 3 or 2)
+        if col in (2, 3):
+            return left_data.get('last_modified', 0) < right_data.get('last_modified', 0)
+            
+        return super().lessThan(left, right)
 
     def _reset(self):
         self.empty_only = False
@@ -305,18 +346,19 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             if role == Qt.ItemDataRole.ToolTipRole:
                 return "Visible because a child item matches the current filters."
 
-        # Dynamic status for 'Show all' mode based on age slider
-        if self.status_filter is None and role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
+        # Dynamic status based on age slider (applies regardless of filter mode)
+        if role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
             item_data = self.sourceModel().data(source_index, Qt.ItemDataRole.UserRole)
             if item_data:
                 status = item_data.get('status', '')
-                if status != 'Empty' and self.older_than_cutoff_ts is not None:
-                    ts = item_data.get('last_modified', 0)
-                    if ts > 0:
-                        if ts <= self.older_than_cutoff_ts:
-                            return 'Inactive'
-                        else:
-                            return 'Active'
+                if status != 'Empty':
+                    if self.older_than_cutoff_ts is not None:
+                        ts = item_data.get('last_modified', 0)
+                        if ts > 0:
+                            return 'Inactive' if ts <= self.older_than_cutoff_ts else 'Active'
+                    else:
+                        # Age threshold is "Off" (None) or 0 -> everything non-empty is Inactive.
+                        return 'Inactive'
                 return status
 
         return super().data(index, role)
@@ -325,24 +367,36 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         source_model = self.sourceModel()
         if source_model is None:
             return False
-
-        idx = source_model.index(source_row, 0, source_parent)
-        item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
-        if not item_data:
-            return False
-
-        if self._matches(item_data):
-            return True
-
-        if item_data.get('is_dir'):
-            for row in range(source_model.rowCount(idx)):
-                if self._accepts(row, idx):
-                    return True
+        
+        start_idx = source_model.index(source_row, 0, source_parent)
+        # Iterative search for matching child to avoid deep recursion
+        stack = [start_idx]
+        while stack:
+            idx = stack.pop()
+            item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
+            if not item_data: continue
+            
+            if self._matches(item_data):
+                return True
+                
+            if item_data.get('is_dir'):
+                for row in range(source_model.rowCount(idx)):
+                    stack.append(source_model.index(row, 0, idx))
         return False
+
 
     def _matches(self, item_data):
         status = item_data.get('status', '')
         ts = item_data.get('last_modified', 0)
+
+        # Dynamic status adjustment for filtering
+        if status != 'Empty':
+            if self.older_than_cutoff_ts is not None:
+                if ts > 0:
+                    status = 'Inactive' if ts <= self.older_than_cutoff_ts else 'Active'
+            else:
+                # User requested: if age threshold is "Off" or 0, treat everything as Inactive.
+                status = 'Inactive'
 
         if self.empty_only:
             return status == 'Empty' and item_data.get('is_dir', False)
@@ -353,8 +407,9 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         has_time_filter = any(value is not None for value in (
             self.date_from_ts,
             self.date_to_ts,
-            self.older_than_cutoff_ts,
         ))
+        
+        # Note: older_than_cutoff_ts is now handled by the dynamic status above
         if has_time_filter and not ts:
             return False
 
@@ -362,9 +417,5 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             return False
         if self.date_to_ts is not None and ts > self.date_to_ts:
             return False
-        if self.older_than_cutoff_ts is not None and ts > self.older_than_cutoff_ts:
-            # If "Show all" is checked (status_filter is None), don't hide items based on age
-            if self.status_filter is not None:
-                return False
 
         return True

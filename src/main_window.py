@@ -7,10 +7,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QRadioButton, QSlider, QDateEdit, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget,
-    QMenu, QSizePolicy, QFrame
+    QMenu, QSizePolicy, QFrame, QStyle
 )
 from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush
+from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel
 from .scanner import ScannerThread
@@ -23,10 +23,11 @@ from .scanner import ScannerThread
 class StatusDelegate(QStyledItemDelegate):
     # (text_color, bg_color, border_color)
     _COLORS = {
-        'Empty':    (QColor(0xb0, 0x1c, 0x1c), QColor(0xff, 0xeb, 0xe9), QColor(0xf8, 0x51, 0x49)),
-        'Inactive': (QColor(0x7d, 0x4e, 0x00), QColor(0xff, 0xf8, 0xc5), QColor(0xd2, 0x9c, 0x22)),
-        'Active':   (QColor(0x1a, 0x7f, 0x37), QColor(0xda, 0xfb, 0xe1), QColor(0x2d, 0xa4, 0x4e)),
-        'Context':  (QColor(0x6e, 0x40, 0xc9), QColor(0xf5, 0xf0, 0xff), QColor(0xab, 0x7d, 0xff)),
+        'Empty':    (QColor("#991b1b"), QColor("#fef2f2"), QColor("#fee2e2")), # Danger Red
+        'Inactive': (QColor("#92400e"), QColor("#fffbeb"), QColor("#fef3c7")), # Warning Amber
+        'Pending':  (QColor("#92400e"), QColor("#fffbeb"), QColor("#fef3c7")), # Warning Amber
+        'Active':   (QColor("#065f46"), QColor("#f0fdf4"), QColor("#d1fae5")), # Success Emerald
+        'Context':  (QColor("#1e40af"), QColor("#eff6ff"), QColor("#dbeafe")), # Info Blue
     }
 
     def paint(self, painter, option, index):
@@ -36,19 +37,31 @@ class StatusDelegate(QStyledItemDelegate):
         colors = self._COLORS.get(status, (QColor(0x57, 0x60, 0x6a), QColor(0xf6, 0xf8, 0xfa), QColor(0xd0, 0xd7, 0xde)))
         text_color, bg_color, border_color = colors
         rect = option.rect
-        pill = QRect(rect.left() + (rect.width() - 70) // 2,
-                     rect.top() + (rect.height() - 22) // 2, 70, 22)
+        pill = QRect(rect.left() + (rect.width() - 64) // 2,
+                     rect.top() + (rect.height() - 20) // 2, 64, 20)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(QBrush(bg_color))
         painter.setPen(QPen(border_color, 1))
-        painter.drawRoundedRect(pill, 11, 11)
-        f = painter.font()
+        painter.drawRoundedRect(pill, 10, 10)
+
+        
+        # Colored dot
+        dot_size = 6
+        dot_rect = QRect(pill.left() + 8, pill.top() + (pill.height() - dot_size) // 2, dot_size, dot_size)
+        painter.setBrush(QBrush(text_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(dot_rect)
+        
+        f = QFont("Segoe UI", 8)
         f.setBold(True)
-        f.setPointSize(9)
+
+
         painter.setFont(f)
         painter.setPen(text_color)
-        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, status)
+        
+        text_rect = QRect(pill.left() + 18, pill.top(), pill.width() - 18, pill.height())
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, status)
         painter.restore()
 
 
@@ -58,23 +71,41 @@ class ActionDelegate(QStyledItemDelegate):
         if not text:
             return
         rect = option.rect
-        btn = QRect(rect.left() + (rect.width() - 72) // 2,
-                    rect.top() + (rect.height() - 24) // 2, 72, 24)
+        
+        # Determine if hovered
+        is_hovered = option.state & QStyle.StateFlag.State_MouseOver
+
+        # Smaller professional button: 64x22
+        btn_w, btn_h = 64, 22
+        btn = QRect(rect.left() + (rect.width() - btn_w) // 2,
+                    rect.top() + (rect.height() - btn_h) // 2, btn_w, btn_h)
+        
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
         if "queued" in text:
-            painter.setPen(QPen(QColor(0xcf, 0x22, 0x2e)))
-            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ queued")
-        else:
-            # Light blue pill for "Open"
-            painter.setBrush(QBrush(QColor(0xdd, 0xea, 0xfb)))
-            painter.setPen(QPen(QColor(0x09, 0x69, 0xda), 1))
-            painter.drawRoundedRect(btn, 12, 12)
-            f = painter.font()
+            # Draw red badge for queued items
+            painter.setBrush(QBrush(QColor("#fef2f2")))
+            painter.setPen(QPen(QColor("#ef4444"), 1))
+            painter.drawRoundedRect(btn, 10, 10) # Rounded capsule
+            f = QFont("Segoe UI", 8)
             f.setBold(True)
-            f.setPointSize(9)
+
+
             painter.setFont(f)
-            painter.setPen(QColor(0x09, 0x69, 0xda))
+            painter.setPen(QColor("#ef4444"))
+            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ Queued")
+        else:
+            # Modern Small Outline Button for "Open"
+            bg = QColor("#eff6ff") if is_hovered else QColor("transparent")
+            painter.setBrush(QBrush(bg))
+            painter.setPen(QPen(QColor("#2563eb"), 1.2))
+            painter.drawRoundedRect(btn, 5, 5) # Refined 5px radius
+            f = QFont("Segoe UI", 8)
+            f.setBold(True)
+
+            painter.setFont(f)
+            painter.setPen(QColor("#2563eb"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
@@ -94,6 +125,12 @@ class AnyDateEdit(QDateEdit):
 
     def eventFilter(self, obj, event):
         if obj == self.calendarWidget() and event.type() == QEvent.Type.Show:
+            # Force a valid font to avoid setPointSize(-1) warnings from Qt internals
+            f = self.calendarWidget().font()
+            if f.pointSize() <= 0:
+                f.setPointSize(9)
+                self.calendarWidget().setFont(f)
+                
             if self.date() == self.minimumDate():
                 current_date = QDate.currentDate()
                 self.calendarWidget().setCurrentPage(current_date.year(), current_date.month())
@@ -107,15 +144,26 @@ class FilterPanel(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("filterPanel")
+        self.setObjectName("sidebar")
         self.setVisible(False)
+        self.setFixedWidth(280)
 
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(24, 16, 24, 16)
-        outer.setSpacing(24)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 16, 0, 16)
+        outer.setSpacing(4)
 
         # ── Section 1: Display Mode ──────────────────────────────────────────
-        sec1 = self._make_section("DISPLAY MODE")
+        display_section = QWidget()
+        display_section.setObjectName("displayModeSection")
+        display_layout = QVBoxLayout(display_section)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.setSpacing(4)
+
+        lbl_display = QLabel("DISPLAY MODE")
+        lbl_display.setObjectName("displayModeHeader")
+
+        display_layout.addWidget(lbl_display)
+
         self.rb_all      = QRadioButton("Show all")
         self.rb_inactive = QRadioButton("Inactive only")
         self.rb_empty    = QRadioButton("Empty only")
@@ -123,20 +171,30 @@ class FilterPanel(QFrame):
         self.bg = QButtonGroup()
         for rb in [self.rb_all, self.rb_inactive, self.rb_empty]:
             self.bg.addButton(rb)
-            sec1.addWidget(rb)
+            display_layout.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
-        sec1.addStretch()
-        outer.addLayout(sec1)
+        
+        outer.addWidget(display_section)
+        outer.addWidget(self._hline())
 
-        outer.addWidget(self._vline())
+
 
         # ── Section 2: Date Range ────────────────────────────────────────────
-        sec2 = self._make_section("DATE RANGE")
+        date_section = QWidget()
+        date_section.setObjectName("dateRangeSection")
+        date_layout = QVBoxLayout(date_section)
+        date_layout.setContentsMargins(0, 0, 0, 0)
+        date_layout.setSpacing(4)
+
+        lbl_date = QLabel("DATE RANGE")
+        lbl_date.setObjectName("dateRangeHeader")
+
+        date_layout.addWidget(lbl_date)
+
         self.date_from = AnyDateEdit()
         self.date_from.setDisplayFormat("dd/MM/yyyy")
         self.date_from.setSpecialValueText("Any")
         self.date_from.setDate(self.date_from.minimumDate())
-        # Make date widgets wider to improve spacing
         self.date_from.setMinimumWidth(150)
 
         self.date_to = AnyDateEdit()
@@ -144,103 +202,119 @@ class FilterPanel(QFrame):
         self.date_to.setSpecialValueText("Any")
         self.date_to.setDate(self.date_to.minimumDate())
         self.date_to.setMinimumWidth(150)
+        self.date_from.setObjectName("dateRangeInput")
+        self.date_to.setObjectName("dateRangeInput")
         self.date_from.setCursor(Qt.CursorShape.PointingHandCursor)
         self.date_to.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        for lbl_text, widget in [("From", self.date_from), ("To", self.date_to)]:
-            row = QHBoxLayout()
-            row.setSpacing(12)
-            l = QLabel(lbl_text)
-            l.setFixedWidth(40)
-            l.setObjectName("mutedLabel")
-            row.addWidget(l)
-            row.addWidget(widget)
-            sec2.addLayout(row)
 
-        self.btn_clear_dates = QPushButton("Clear")
-        self.btn_clear_dates.setObjectName("linkBtn")
+        for lbl_text, widget in [("From", self.date_from), ("To", self.date_to)]:
+            box = QWidget()
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(16, 4, 16, 4)
+            box_layout.setSpacing(4)
+            l = QLabel(lbl_text)
+            l.setObjectName(f"{lbl_text.lower()}Label")
+
+            box_layout.addWidget(l)
+            box_layout.addWidget(widget)
+            date_layout.addWidget(box)
+
+        btn_box = QWidget()
+        btn_layout = QHBoxLayout(btn_box)
+        btn_layout.setContentsMargins(16, 0, 16, 0)
+        self.btn_clear_dates = QPushButton("Clear dates")
+        self.btn_clear_dates.setObjectName("clearDates")
         self.btn_clear_dates.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear_dates.clicked.connect(self._clear_dates)
-        sec2.addWidget(self.btn_clear_dates)
-        sec2.addStretch()
-        outer.addLayout(sec2)
-
-        outer.addWidget(self._vline())
+        btn_layout.addWidget(self.btn_clear_dates)
+        btn_layout.addStretch()
+        date_layout.addWidget(btn_box)
+        
+        outer.addWidget(date_section)
+        outer.addWidget(self._hline())
 
         # ── Section 3: Stale Threshold ───────────────────────────────────────
-        # Custom header row: "AGE THRESHOLD"  [3m pill]  "Older than 3 months"
+        age_section = QWidget()
+        age_section.setObjectName("ageThresholdSection")
+        age_outer_layout = QVBoxLayout(age_section)
+        age_outer_layout.setContentsMargins(0, 0, 0, 0)
+        age_outer_layout.setSpacing(4)
+
+        lbl_age = QLabel("AGE THRESHOLD")
+        lbl_age.setObjectName("ageThresholdHeader")
+
+        age_outer_layout.addWidget(lbl_age)
+
+        age_box = QWidget()
+        age_layout = QVBoxLayout(age_box)
+        age_layout.setContentsMargins(16, 4, 16, 4)
+        age_layout.setSpacing(8)
+
         age_hdr = QHBoxLayout()
         age_hdr.setSpacing(6)
-        age_hdr_lbl = QLabel("AGE THRESHOLD")
-        age_hdr_lbl.setObjectName("sectionLabel")
         self.lbl_pill = QLabel()
         self.lbl_pill.setObjectName("agePill")
         self.lbl_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_pill.setFixedHeight(20)
         self.lbl_val = QLabel()
         self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        age_hdr.addWidget(age_hdr_lbl)
         age_hdr.addWidget(self.lbl_pill)
-        age_hdr.addSpacing(2)
         age_hdr.addWidget(self.lbl_val)
         age_hdr.addStretch()
-        sec3 = QVBoxLayout()
-        sec3.setContentsMargins(0, 0, 0, 0)
-        sec3.setSpacing(8)
-        sec3.addLayout(age_hdr)
+        age_layout.addLayout(age_hdr)
         
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
         self.slider.setValue(self.AGE_FILTER_DISABLED)
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider.setTickInterval(1)
-        self.slider.setMinimumWidth(180)
-        self.slider.setMaximumWidth(260)
-        self.slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.slider.valueChanged.connect(self._update_age_label)
         self.slider.valueChanged.connect(self._sync_manual_age_from_slider)
-
-        sec3.addWidget(self.slider)
+        age_layout.addWidget(self.slider)
 
         self.age_input = QSpinBox()
         self.age_input.setRange(self.AGE_FILTER_DISABLED, self.MAX_STALE_MONTHS)
         self.age_input.setValue(self.AGE_FILTER_DISABLED)
         self.age_input.setSuffix(" months")
-        self.age_input.setMinimumWidth(120)
         self.age_input.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.age_input.setToolTip("Manual age filter (months). 0 means Any age.")
         self.age_input.valueChanged.connect(self._sync_slider_from_manual_age)
 
         bot_row = QHBoxLayout()
         bot_row.setSpacing(8)
         lbl_manual = QLabel("Manual:")
-        lbl_manual.setObjectName("mutedLabel")
+        lbl_manual.setObjectName("manualLabel")
+
         bot_row.addWidget(lbl_manual)
         bot_row.addWidget(self.age_input)
         bot_row.addStretch()
-        sec3.addLayout(bot_row)
+        age_layout.addLayout(bot_row)
+        age_outer_layout.addWidget(age_box)
+        
+        outer.addWidget(age_section)
 
         self._update_age_label(self.slider.value())
-
-        sec3.addStretch()
-        outer.addLayout(sec3)
-
         outer.addStretch()
 
         # ── Section 4: Actions ───────────────────────────────────────────────
-        sec4 = QVBoxLayout()
-        sec4.setSpacing(8)
-        sec4.addStretch()
-        self.btn_reset = QPushButton("↺  Reset")
-        self.btn_reset.setObjectName("resetBtn")
+        action_box = QWidget()
+        action_layout = QVBoxLayout(action_box)
+        action_layout.setContentsMargins(16, 16, 16, 16)
+        action_layout.setSpacing(10)
+        
+        self.btn_reset = QPushButton("↺  Reset all filters")
+        self.btn_reset.setObjectName("resetFilters")
+
+        self.btn_reset.setToolTip("Reset all filters to their default values")
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_close = QPushButton("✕  Close")
-        self.btn_close.setObjectName("filterCloseBtn")
+        self.btn_close = QPushButton("Close sidebar")
+        self.btn_close.setObjectName("closeSidebar")
+        self.btn_close.setToolTip("Hide the filter sidebar")
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        sec4.addWidget(self.btn_reset)
-        sec4.addWidget(self.btn_close)
-        outer.addLayout(sec4)
+        action_layout.addWidget(self.btn_reset)
+        action_layout.addWidget(self.btn_close)
+        outer.addWidget(action_box)
 
     def _clear_dates(self):
         """Reset both date pickers back to 'Any'."""
@@ -249,24 +323,29 @@ class FilterPanel(QFrame):
 
     def _update_age_label(self, value):
         if value == self.AGE_FILTER_DISABLED:
-            self.lbl_val.setText("Any age")
-            self.lbl_pill.hide()
-            return
-            
-        self.lbl_pill.show()
-        self.lbl_pill.setText(f"  {value}m  ")
-        
-        years = value // 12
-        months = value % 12
-        
-        if years > 0 and months > 0:
-            text = f"Older than {years}y {months}m"
-        elif years > 0:
-            text = f"Older than {years}y"
+            self.lbl_pill.setText("Off")
+            self.lbl_pill.setStyleSheet("background-color: #64748b; color: white;")
+            self.lbl_val.setText("Age filtering is disabled")
         else:
-            text = f"Older than {months}m"
+            self.lbl_pill.setText(f"{value}m")
+            self.lbl_pill.setStyleSheet("background-color: #2563eb; color: white;")
             
-        self.lbl_val.setText(text)
+            years = value // 12
+            months = value % 12
+            if years > 0 and months > 0:
+                text = f"Older than {years}y {months}m"
+            elif years > 0:
+                text = f"Older than {years}y"
+            else:
+                text = f"Older than {value} month{'s' if value > 1 else ''}"
+            self.lbl_val.setText(text)
+
+    def _hline(self):
+        f = QFrame()
+        f.setFrameShape(QFrame.Shape.HLine)
+        f.setObjectName("sidebarDivider")
+        f.setFixedHeight(1)
+        return f
 
     def _sync_manual_age_from_slider(self, value):
         blocker = QSignalBlocker(self.age_input)
@@ -378,8 +457,8 @@ class MainWindow(QMainWindow):
         topbar = QWidget()
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(14, 8, 14, 8)
-        tb.setSpacing(8)
+        tb.setContentsMargins(16, 12, 16, 12)
+        tb.setSpacing(12)
 
         lbl = QLabel("IBMS Watchdog")
         lbl.setObjectName("appTitle")
@@ -389,80 +468,103 @@ class MainWindow(QMainWindow):
         self.txt_path = QLineEdit()
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.txt_path.setMinimumWidth(240)
-        self.txt_path.setMaximumWidth(520)
         self.txt_path.setPlaceholderText("Enter or browse a folder path…")
-        btn_browse = QPushButton("Browse")
+        
+        # Add folder icon to the left of the path input
+        path_icon = QIcon.fromTheme("folder-open", QIcon.fromTheme("folder"))
+        self.txt_path.addAction(path_icon, QLineEdit.ActionPosition.LeadingPosition)
+
+        btn_browse = QPushButton("📂  Browse")
+        btn_browse.setObjectName("primaryBtn")
         btn_browse.setToolTip("Browse folder")
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse)
         tb.addWidget(self.txt_path)
         tb.addWidget(btn_browse)
 
-        self.btn_rescan = QPushButton("Re-scan")
+        self.btn_rescan = QPushButton("⟳  Re-scan")
         self.btn_rescan.setObjectName("primaryBtn")
+        self.btn_rescan.setToolTip("Start scanning the selected folder path")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
 
         tb.addWidget(self._vbar())
 
-        self.btn_filter = QPushButton("Filters")
-        self.btn_filter.setObjectName("filterBtn")
+        self.btn_filter = QPushButton("⚙  Filters")
+        self.btn_filter.setObjectName("ghostBtn")
         self.btn_filter.setCheckable(True)
+        self.btn_filter.setToolTip("Toggle filter sidebar (Alt+F)")
         self.btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_filter.clicked.connect(self._toggle_filters)
         tb.addWidget(self.btn_filter)
 
         self.btn_expand = QPushButton("Expand All")
+        self.btn_expand.setObjectName("collapseAll")
         self.btn_expand.setCheckable(True)
+        self.btn_expand.setToolTip("Expand or collapse all folders in the view")
         self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_expand.clicked.connect(self._toggle_expand)
 
-        btn_export = QPushButton("Export CSV")
-        btn_export.setObjectName("ghostBtn")
+        # ── Push Export + Delete to the far right ──────────────────────────
+        tb.addStretch()
+        tb.addWidget(self._vbar())
+
+        btn_export = QPushButton("📊  Export CSV")
+        btn_export.setObjectName("primaryBtn")
+        btn_export.setToolTip("Export the current view to CSV")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.clicked.connect(self._export_csv)
         tb.addWidget(btn_export)
 
-        self.btn_delete = QPushButton("Delete Selected")
+        self.btn_delete = QPushButton("🗑  Delete Selected")
         self.btn_delete.setObjectName("deleteBtn")
+        self.btn_delete.setToolTip("Permanently delete selected items")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_delete.setEnabled(False)
         tb.addWidget(self.btn_delete)
 
-        tb.addStretch()
-
         vbox.addWidget(topbar)
 
-        # ── Filter panel (instant show/hide) ──────────────────────────────────
+        # ── Main Content Area (Sidebar + Content) ──────────────────────────────
+        main_area = QHBoxLayout()
+        main_area.setContentsMargins(0, 0, 0, 0)
+        main_area.setSpacing(0)
+
+        # ── Left Sidebar (Filters) ───────────────────────────────────────────
         self.fp = FilterPanel()
         self.fp.btn_close.clicked.connect(self._toggle_filters)
         self.fp.btn_reset.clicked.connect(self._reset_filters)
-        # Dynamic filtering: when user changes any filter control, clear selections
-        # and re-apply filters so view and selection remain consistent.
+        # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
         self.fp.date_from.dateChanged.connect(lambda _d: self._on_filter_changed())
         self.fp.date_to.dateChanged.connect(lambda _d: self._on_filter_changed())
-        # Age controls: debounced — restarting the timer on every tick so the
-        # filter only fires once the user finishes moving the slider/spinner.
+        # Age controls: debounced
         self.fp.slider.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.age_input.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.btn_clear_dates.clicked.connect(lambda: self._on_filter_changed())
         self._apply_default_browse_preset(apply_now=False)
-        vbox.addWidget(self.fp)
+        main_area.addWidget(self.fp)
+
+        # ── Right Content Area ────────────────────────────────────────────────
+        self.right_content = QWidget()
+        self.right_content.setObjectName("contentArea")
+        right_v = QVBoxLayout(self.right_content)
+        right_v.setContentsMargins(24, 24, 24, 24)
+        right_v.setSpacing(16)
 
         # ── Controls row (above tree): expand / select all) ────────────────
         self.controls_bar = QWidget()
         controls_layout = QHBoxLayout(self.controls_bar)
-        controls_layout.setContentsMargins(12, 6, 12, 6)
-        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(12)
         controls_layout.addWidget(self.btn_expand)
         self.btn_select_all = QPushButton("Select All")
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_all.clicked.connect(self._select_all)
         controls_layout.addWidget(self.btn_select_all)
-        # Quick-select buttons for status-based selection
+        
         self.btn_select_inactive = QPushButton("Select All Inactive")
         self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_inactive.clicked.connect(self._select_inactive)
@@ -475,8 +577,8 @@ class MainWindow(QMainWindow):
         self.btn_select_empty.setEnabled(False)
         controls_layout.addWidget(self.btn_select_empty)
         controls_layout.addStretch()
-        self.controls_bar.setVisible(False)  # hidden until data is loaded
-        vbox.addWidget(self.controls_bar)
+        self.controls_bar.setVisible(False)
+        right_v.addWidget(self.controls_bar)
 
         # ── Empty state + Tree wrapped in a stacked widget ───────────────────
         self.content_stack = QStackedWidget()
@@ -492,17 +594,17 @@ class MainWindow(QMainWindow):
         icon_lbl.setObjectName("emptyIcon")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        title_lbl = QLabel("No folder selected")
+        title_lbl = QLabel("READY TO SCAN")
         title_lbl.setObjectName("emptyTitle")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        sub_lbl = QLabel("Browse to a folder or paste a path above, then click Re-scan to analyse it.")
+        sub_lbl = QLabel("Select a folder above to analyze its contents.\nInactive and empty folders will be highlighted automatically.")
         sub_lbl.setObjectName("emptySub")
         sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub_lbl.setWordWrap(True)
         sub_lbl.setMaximumWidth(420)
 
-        btn_browse_cta = QPushButton("  Browse folder…")
+        btn_browse_cta = QPushButton("📂  Browse folder...")
         btn_browse_cta.setObjectName("primaryBtn")
         btn_browse_cta.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse_cta.setFixedWidth(180)
@@ -520,8 +622,8 @@ class MainWindow(QMainWindow):
         self.tree = QTreeView()
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.tree.setAlternatingRowColors(True)
-        # Disable sorting — columns should not be sortable by the user
-        self.tree.setSortingEnabled(False)
+        # Enable sorting
+        self.tree.setSortingEnabled(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(False)
         self.tree.setMouseTracking(True)
@@ -534,18 +636,15 @@ class MainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self._context_menu)
         self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         self.tree.viewport().installEventFilter(self)
-        self.tree.header().setCursor(Qt.CursorShape.ArrowCursor)
-        # Prevent the user from rearranging columns and keep layout stable
         hdr = self.tree.header()
         hdr.setSectionsMovable(False)
         hdr.setStretchLastSection(False)
-        # Make headers non-clickable and hide sort indicator so sorting can't be triggered
-        hdr.setSectionsClickable(False)
+        hdr.setSectionsClickable(True)
         try:
-            hdr.setSortIndicatorShown(False)
+            hdr.setSortIndicatorShown(True)
+            hdr.setSortIndicator(3, Qt.SortOrder.DescendingOrder) # Default sort by Age
         except Exception:
             pass
-        # Center header labels for all columns
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Page 2: No results (filter produced zero matches)
@@ -585,10 +684,12 @@ class MainWindow(QMainWindow):
 
         # ── Wrap content_stack in container so we can overlay the floating button ─
         self.tree_container = QWidget()
+        self.tree_container.setObjectName("tableCard")
         tc_layout = QVBoxLayout(self.tree_container)
-        tc_layout.setContentsMargins(0, 0, 0, 0)
+        tc_layout.setContentsMargins(1, 1, 1, 1) # Internal border gap
         tc_layout.setSpacing(0)
         tc_layout.addWidget(self.content_stack)
+
 
         # Floating scroll-to-top button (child of tree_container for z-order)
         self.btn_scroll_top = QPushButton("↑")
@@ -606,28 +707,46 @@ class MainWindow(QMainWindow):
         self.tree.verticalScrollBar().valueChanged.connect(self._on_tree_scroll)
         self.tree_container.installEventFilter(self)
 
-        vbox.addWidget(self.tree_container, 1)
+        right_v.addWidget(self.tree_container, 1)
+        main_area.addWidget(self.right_content, 1)
+
+        vbox.addLayout(main_area, 1)
 
         # ── Status bar ────────────────────────────────────────────────────────
         sb = QWidget()
         sb.setObjectName("statusbar")
-        sb.setFixedHeight(30)
+        sb.setFixedHeight(36)
         sbl = QHBoxLayout(sb)
         sbl.setContentsMargins(12, 0, 12, 0)
         sbl.setSpacing(12)
         self.lbl_status = QLabel("Ready — select a folder and click Re-scan")
-        self.lbl_status.setObjectName("statusLabel")
+        self.lbl_status.setObjectName("statusMessage")
+
         sbl.addWidget(self.lbl_status)
         sbl.addStretch()
+        
         self.chip_empty = self._chip("Empty: 0", "chipEmpty")
         self.chip_inactive_folders = self._chip("Inactive folders: 0", "chipInactive")
         self.chip_inactive_files = self._chip("Inactive files: 0", "chipInactive")
         self.chip_space = self._chip("Reclaimable: —", "chipSpace")
-        for c in [self.chip_empty, self.chip_inactive_folders, self.chip_inactive_files, self.chip_space]:
-            sbl.addWidget(c)
+        
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_empty)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_inactive_folders)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_inactive_files)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_space)
         vbox.addWidget(sb)
 
         # Do NOT auto-start scan — let the user enter a path first
+
+    def _sep(self):
+        l = QLabel("•")
+        l.setObjectName("statusSeparator")
+        return l
+
 
     def _vbar(self):
         f = QFrame()
@@ -679,9 +798,28 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _toggle_filters(self):
-        visible = not self.fp.isVisible()
-        self.fp.setVisible(visible)
-        self.btn_filter.setChecked(visible)
+        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+        
+        is_visible = self.fp.isVisible()
+        target_width = 280 if not is_visible else 0
+        
+        # Ensure it's ready for animation
+        if not is_visible:
+            self.fp.setVisible(True)
+            self.fp.setMinimumWidth(0)
+            self.fp.setMaximumWidth(0)
+            
+        self.sidebar_anim = QPropertyAnimation(self.fp, b"maximumWidth")
+        self.sidebar_anim.setDuration(250)
+        self.sidebar_anim.setStartValue(self.fp.width())
+        self.sidebar_anim.setEndValue(target_width)
+        self.sidebar_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        
+        if is_visible:
+            self.sidebar_anim.finished.connect(lambda: self.fp.setVisible(False))
+            
+        self.sidebar_anim.start()
+        self.btn_filter.setChecked(not is_visible)
 
     def _apply_filters(self):
         # Determine status filter from radio buttons
@@ -834,9 +972,11 @@ class MainWindow(QMainWindow):
         )
 
     def _set_indices_checked(self, indices, state):
-        for index in indices:
-            if self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) != state:
-                self.tree_model.set_check_state(index, state, explicit=True)
+        if not indices:
+            return
+        to_change = [idx for idx in indices if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != state]
+        if to_change:
+            self.tree_model.set_indices_check_state(to_change, state, explicit=True)
 
     def _set_status_filter(self, status):
         if status == 'Inactive' and not self.fp.rb_inactive.isChecked():
@@ -882,15 +1022,15 @@ class MainWindow(QMainWindow):
             return []
 
         checked_indices = []
-
-        def walk(parent=QModelIndex()):
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
             for row in range(self.tree_model.rowCount(parent)):
                 index = self.tree_model.index(row, 0, parent)
                 if self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
                     checked_indices.append(index)
-                walk(index)
-
-        walk()
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
         return checked_indices
 
     def _prune_paths(self, paths):
@@ -933,50 +1073,45 @@ class MainWindow(QMainWindow):
         if not target_paths:
             return [], 0, 0
 
+        # Build path map iteratively
         path_to_index = {}
-
-        def map_paths(parent=QModelIndex()):
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
             for row in range(self.tree_model.rowCount(parent)):
                 index = self.tree_model.index(row, 0, parent)
                 item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
                 if item_data and item_data.get('path'):
                     path_to_index[item_data['path']] = index
-                map_paths(index)
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
 
-        def count_subtree(index):
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-            if not item_data:
-                return 0, 0
+        def count_subtree_iterative(root_index):
+            f_count = d_count = 0
+            s = [root_index]
+            while s:
+                curr = s.pop()
+                d = self.tree_model.data(curr, Qt.ItemDataRole.UserRole)
+                if not d: continue
+                if d.get('is_dir'): d_count += 1
+                else: f_count += 1
+                for r in range(self.tree_model.rowCount(curr)):
+                    s.append(self.tree_model.index(r, 0, curr))
+            return d_count, f_count
 
-            folder_count = 1 if item_data.get('is_dir', False) else 0
-            file_count = 0 if item_data.get('is_dir', False) else 1
-
-            for row in range(self.tree_model.rowCount(index)):
-                child_index = self.tree_model.index(row, 0, index)
-                child_folders, child_files = count_subtree(child_index)
-                folder_count += child_folders
-                file_count += child_files
-
-            return folder_count, file_count
-
-        map_paths()
-
-        folder_count = 0
-        file_count = 0
+        total_folders = 0
+        total_files = 0
         for path in target_paths:
-            index = path_to_index.get(path)
-            if index is None:
-                # Fallback for edge cases where path disappeared from current model
-                if os.path.isdir(path):
-                    folder_count += 1
-                else:
-                    file_count += 1
-                continue
-            folders, files = count_subtree(index)
-            folder_count += folders
-            file_count += files
+            idx = path_to_index.get(path)
+            if idx and idx.isValid():
+                fld, fil = count_subtree_iterative(idx)
+                total_folders += fld
+                total_files += fil
+            else:
+                if os.path.isdir(path): total_folders += 1
+                else: total_files += 1
 
-        return target_paths, folder_count, file_count
+        return target_paths, total_folders, total_files
 
     def _select_by_status(self, status):
         if not self.tree_model:
@@ -1104,31 +1239,61 @@ class MainWindow(QMainWindow):
         self._set_expand_state(self._has_visible_rows())
         n = len(root_node.get('children', []))
         self.lbl_status.setText(f"Scan complete — {n} top-level items")
-        self._update_chips(root_node)
+        self._update_chips()
         self.tree_model.dataChanged.connect(self._on_checked)
+        self.tree_model.layoutChanged.connect(lambda: self.recount_timer.start(80))
         self._do_recount()
 
-    def _update_chips(self, root_node):
+    def _update_chips(self):
+        if not self.proxy_model or not self.tree_model:
+            return
+
         empty_n = inactive_folders = inactive_files = reclaim = 0
-        def walk(n):
+
+        def walk(parent_proxy_idx=QModelIndex()):
             nonlocal empty_n, inactive_folders, inactive_files, reclaim
-            s = n.get('status')
-            if s == 'Empty': empty_n += 1
-            if s == 'Inactive':
-                if n.get('is_dir'):
-                    inactive_folders += 1
-                else:
-                    inactive_files += 1
-            if s in ('Empty', 'Inactive') and not n.get('is_dir'):
-                reclaim += n.get('size', 0)
-            for c in n.get('children', []):
-                walk(c)
-        walk(root_node)
+            for row in range(self.proxy_model.rowCount(parent_proxy_idx)):
+                proxy_idx = self.proxy_model.index(row, 0, parent_proxy_idx)
+                source_idx = self.proxy_model.mapToSource(proxy_idx)
+
+                # Skip items that are only visible as context (parents of matches)
+                if self.proxy_model.is_context_only(source_idx):
+                    if self.proxy_model.hasChildren(proxy_idx):
+                        walk(proxy_idx)
+                    continue
+
+                # Status is dynamic (column 5)
+                status_idx = self.proxy_model.index(row, 5, parent_proxy_idx)
+                status = self.proxy_model.data(status_idx, Qt.ItemDataRole.DisplayRole)
+
+                item_data = self.tree_model.data(source_idx, Qt.ItemDataRole.UserRole)
+                if not item_data:
+                    continue
+
+                is_dir = item_data.get('is_dir', False)
+                size = item_data.get('size', 0)
+
+                if status == 'Empty':
+                    empty_n += 1
+                elif status == 'Inactive':
+                    if is_dir:
+                        inactive_folders += 1
+                    else:
+                        inactive_files += 1
+
+                if status in ('Empty', 'Inactive') and not is_dir:
+                    reclaim += size
+
+                if self.proxy_model.hasChildren(proxy_idx):
+                    walk(proxy_idx)
+
+        walk()
         from .models import format_size
         self.chip_empty.setText(f"Empty: {empty_n}")
         self.chip_inactive_folders.setText(f"Inactive folders: {inactive_folders}")
         self.chip_inactive_files.setText(f"Inactive files: {inactive_files}")
         self.chip_space.setText(f"Reclaimable: {format_size(reclaim)}")
+
         # Enable/disable quick-select buttons depending on presence
         try:
             self.btn_select_inactive.setEnabled((inactive_folders + inactive_files) > 0)
@@ -1140,8 +1305,8 @@ class MainWindow(QMainWindow):
     # Selection count (debounced)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _on_checked(self, tl, br, roles):
-        if Qt.ItemDataRole.CheckStateRole in roles:
+    def _on_checked(self, tl=None, br=None, roles=None):
+        if roles is None or Qt.ItemDataRole.CheckStateRole in roles:
             self.recount_timer.start(80)
 
     def _do_recount(self):
@@ -1158,6 +1323,7 @@ class MainWindow(QMainWindow):
             self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(total > 0)
         self._refresh_selection_buttons()
+        self._update_chips()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tree interactions
@@ -1266,8 +1432,7 @@ class MainWindow(QMainWindow):
             (
                 "Send selected items to the Recycle Bin?\n\n"
                 f"Folders: {folder_count}\n"
-                f"Files: {file_count}\n"
-                f"Total: {len(paths)}"
+                f"Files: {file_count}"
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)

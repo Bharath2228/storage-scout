@@ -1,5 +1,4 @@
 PyQt6==6.11.0
 PyQt6-Qt6==6.11.0
 PyQt6_sip==13.11.0
-send2trash==1.8.3
-pyqtdarktheme==0.1.7
+Send2Trash==1.8.3
