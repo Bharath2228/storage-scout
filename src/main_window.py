@@ -176,6 +176,31 @@ class FilterPanel(QFrame):
         outer.addWidget(display_section)
         outer.addWidget(self._hline())
 
+        # ── Section 1.5: View Mode ───────────────────────────────────────────
+        view_section = QWidget()
+        view_section.setObjectName("viewModeSection")
+        view_layout = QVBoxLayout(view_section)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.setSpacing(4)
+
+        lbl_view = QLabel("VIEW MODE")
+        lbl_view.setObjectName("viewModeHeader")
+        view_layout.addWidget(lbl_view)
+
+        self.rb_view_tree    = QRadioButton("Tree view")
+        self.rb_view_files   = QRadioButton("Files only")
+        self.rb_view_folders = QRadioButton("Folders only")
+        self.rb_view_tree.setChecked(True)
+        
+        self.bg_view = QButtonGroup()
+        for rb in [self.rb_view_tree, self.rb_view_files, self.rb_view_folders]:
+            self.bg_view.addButton(rb)
+            view_layout.addWidget(rb)
+            rb.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+        outer.addWidget(view_section)
+        outer.addWidget(self._hline())
+
 
 
         # ── Section 2: Date Range ────────────────────────────────────────────
@@ -386,8 +411,15 @@ class FilterPanel(QFrame):
         value = self.slider.value()
         return value if value > 0 else self.DEFAULT_STALE_MONTHS
 
+    def get_view_mode(self):
+        """Returns 'Tree', 'Files', or 'Folders'."""
+        if self.rb_view_files.isChecked(): return 'Files'
+        if self.rb_view_folders.isChecked(): return 'Folders'
+        return 'Tree'
+
     def apply_default_browse_preset(self):
         self.rb_inactive.setChecked(True)
+        self.rb_view_tree.setChecked(True)
         self._clear_dates()
         self.slider.setValue(self.DEFAULT_STALE_MONTHS)
         
@@ -433,10 +465,10 @@ class MainWindow(QMainWindow):
         self.recount_timer.setSingleShot(True)
         self.recount_timer.timeout.connect(self._do_recount)
 
-        # Debounce timer for age threshold — avoids refiltering on every tick
+        # Debounce timer for age threshold
         self.filter_debounce_timer = QTimer(self)
         self.filter_debounce_timer.setSingleShot(True)
-        self.filter_debounce_timer.setInterval(180)  # ms after last change
+        self.filter_debounce_timer.setInterval(180)
         self.filter_debounce_timer.timeout.connect(self._on_filter_changed)
 
         self._build_ui()
@@ -543,6 +575,12 @@ class MainWindow(QMainWindow):
         self.fp.slider.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.age_input.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.btn_clear_dates.clicked.connect(lambda: self._on_filter_changed())
+        
+        # View mode connections
+        self.fp.rb_view_tree.toggled.connect(self._on_filter_changed)
+        self.fp.rb_view_files.toggled.connect(self._on_filter_changed)
+        self.fp.rb_view_folders.toggled.connect(self._on_filter_changed)
+        
         self._apply_default_browse_preset(apply_now=False)
         main_area.addWidget(self.fp)
 
@@ -1317,6 +1355,12 @@ class MainWindow(QMainWindow):
             params.append(date_to)
         if status_filter == 'Empty': where_clauses.append("is_folder = 1")
 
+        view_mode = self.fp.get_view_mode()
+        if view_mode == 'Files':
+            where_clauses.append("is_folder = 0")
+        elif view_mode == 'Folders':
+            where_clauses.append("is_folder = 1")
+
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
         total_matches = cursor.fetchone()[0]
@@ -1412,6 +1456,12 @@ class MainWindow(QMainWindow):
         if status_filter == 'Empty':
             where_clauses.append("is_folder = 1")
             
+        view_mode = self.fp.get_view_mode()
+        if view_mode == 'Files':
+            where_clauses.append("is_folder = 0")
+        elif view_mode == 'Folders':
+            where_clauses.append("is_folder = 1")
+            
         if where_clauses:
             where_sql = " WHERE " + " AND ".join(where_clauses)
             query += where_sql
@@ -1438,7 +1488,7 @@ class MainWindow(QMainWindow):
         # Build a set of paths that were originally fetched so we can mark others as context
         original_fetched_paths = {r[0] for r in rows}
         
-        if missing_parents:
+        if missing_parents and view_mode == 'Tree':
             # Fetch parents in batches to avoid SQLite variable limits
             parents_list = list(missing_parents)
             for i in range(0, len(parents_list), 900):
@@ -1463,6 +1513,9 @@ class MainWindow(QMainWindow):
             if status_filter == 'Empty' and is_folder:
                 status = 'Empty'
             
+            is_context = (path not in original_fetched_paths) if view_mode == 'Tree' else False
+            actual_parent = parent_path if view_mode == 'Tree' else None
+
             node = {
                 'name': name,
                 'path': path,
@@ -1471,8 +1524,9 @@ class MainWindow(QMainWindow):
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
-                '_parent_path': parent_path,
-                '_is_context_fetched': path not in original_fetched_paths
+                '_parent_path': actual_parent,
+                '_is_context_fetched': is_context,
+                'location': parent_path if view_mode != 'Tree' else None
             }
             nodes_by_path[path] = node
 
@@ -1500,6 +1554,7 @@ class MainWindow(QMainWindow):
 
         # The proxy model now correctly handles contextual filtering and UI status overrides
         self.tree_model = WatchdogTreeModel(root_node)
+        self.tree_model.view_mode = view_mode
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
         
@@ -1522,8 +1577,12 @@ class MainWindow(QMainWindow):
         for i in range(1, 7):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
             
-        self.tree.setColumnWidth(0, 420)
-        self.tree.setColumnWidth(1, 74)
+        if view_mode == 'Tree':
+            self.tree.setColumnWidth(0, 420)
+            self.tree.setColumnWidth(1, 74)
+        else:
+            self.tree.setColumnWidth(0, 250)
+            self.tree.setColumnWidth(1, 400)
         self.tree.setColumnWidth(2, 116)
         self.tree.setColumnWidth(3, 70)
         self.tree.setColumnWidth(4, 96)

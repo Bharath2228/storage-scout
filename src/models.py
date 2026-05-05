@@ -79,6 +79,7 @@ class TreeItem:
 class WatchdogTreeModel(QAbstractItemModel):
     def __init__(self, root_data, parent=None):
         super().__init__(parent)
+        self.view_mode = 'Tree'
         self.rootItem = TreeItem({'name': 'Root'})
         self._setupModelData(root_data, self.rootItem)
 
@@ -115,35 +116,51 @@ class WatchdogTreeModel(QAbstractItemModel):
             return None
 
         item = index.internalPointer()
+        col = index.column()
+        is_tree = self.view_mode == 'Tree'
 
         if role == Qt.ItemDataRole.DisplayRole:
-            return item.data(index.column())
+            if col == 0:
+                name = item.itemData.get('name', '')
+                if item.itemData.get('is_hidden'): return f"[Hidden] {name}"
+                return name
+            
+            if is_tree:
+                if col == 1: return "Folder" if item.itemData.get('is_dir') else "File"
+            else:
+                if col == 1: return item.itemData.get('location', '')
 
-        if role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
+            # Common columns shifted by 0
+            if col == 2:
+                ts = item.itemData.get('last_modified', 0)
+                return datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else ""
+            if col == 3: return format_age(item.itemData.get('last_modified', 0))
+            if col == 4: return format_size(item.itemData.get('size', 0))
+            if col == 5: return item.itemData.get('status', '')
+            if col == 6: return "queued" if item.checkState == Qt.CheckState.Checked else "Open"
+            return None
+
+        if role == Qt.ItemDataRole.CheckStateRole and col == 0:
             return item.checkState
 
         if role == Qt.ItemDataRole.UserRole:
             return item.itemData
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            col = index.column()
-            if col == 0:
+            if col == 0 or (not is_tree and col == 1):
                 return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            if col in (1, 2, 5, 6):
-                return Qt.AlignmentFlag.AlignCenter
-            if col in (3, 4):
-                return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            if col in (1, 2, 5, 6): return Qt.AlignmentFlag.AlignCenter
+            if col in (3, 4): return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
         if role == Qt.ItemDataRole.FontRole:
-            if item.itemData.get('is_dir', False) and index.column() == 0:
+            if item.itemData.get('is_dir', False) and col == 0:
                 font = QFont()
                 font.setBold(True)
                 return font
 
-        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
+        if role == Qt.ItemDataRole.DecorationRole and col == 0:
             is_dir = item.itemData.get('is_dir', False)
-            if is_dir:
-                return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
+            if is_dir: return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
             return QIcon.fromTheme("text-x-generic", QIcon.fromTheme("document-new"))
 
         return None
@@ -221,7 +238,10 @@ class WatchdogTreeModel(QAbstractItemModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            headers = ["Folder / File path", "Type", "Last modified", "Age ↑", "Size", "Status", "Action"]
+            if self.view_mode == 'Tree':
+                headers = ["Folder / File path", "Type", "Last modified", "Age", "Size", "Status", "Action"]
+            else:
+                headers = ["Name", "Location", "Last modified", "Age", "Size", "Status", "Action"]
             if section < len(headers):
                 return headers[section]
         return None
