@@ -49,6 +49,10 @@ env.bak/
 ehthumbs.db
 Thumbs.db
 Desktop.ini
+file_index.db
+*.db
+*.sqlite
+*.sqlite3
 
 # Log Files
 *.log
