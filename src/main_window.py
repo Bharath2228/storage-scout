@@ -101,15 +101,13 @@ class ActionDelegate(QStyledItemDelegate):
             bg = QColor("#eff6ff") if is_hovered else QColor("transparent")
             painter.setBrush(QBrush(bg))
             painter.setPen(QPen(QColor("#2563eb"), 1.2))
-            painter.drawRoundedRect(btn, 5, 5) # Refined 5px radius
+            painter.drawRoundedRect(btn, 5, 5)
             f = QFont("Segoe UI", 8)
             f.setBold(True)
-
             painter.setFont(f)
             painter.setPen(QColor("#2563eb"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Filter Panel (standalone widget)
@@ -853,7 +851,25 @@ class MainWindow(QMainWindow):
         self.btn_filter.setChecked(not is_visible)
 
     def _apply_filters(self):
-        # We now filter purely in SQL!
+        # 1. Update proxy model so it can format the Status column correctly
+        age_secs = self.fp.get_older_than_secs()
+        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
+            status_filter = None
+        elif self.fp.rb_empty.isChecked():
+            status_filter = 'Empty'
+        else:
+            status_filter = 'Inactive'
+
+        date_from_ts, date_to_ts = self.fp.get_date_range_ts()
+        self.proxy_model.set_filters(
+            empty_only=False,
+            date_from_ts=date_from_ts,
+            date_to_ts=date_to_ts,
+            older_than_secs=age_secs,
+            status_filter=status_filter,
+        )
+
+        # 2. Fetch the paginated data from SQL
         self.current_page = 0
         if self.content_stack.currentIndex() != 0:
             self._load_page()
@@ -970,6 +986,7 @@ class MainWindow(QMainWindow):
                     is_non_empty_dir = item_data.get('is_dir', False) and self.tree_model.rowCount(source_index) > 0
                     if (
                         path and path not in seen_paths
+                        and not item_data.get('_is_context_fetched', False)
                         and (status is None or item_data.get('status') == status)
                         and (not exact_only or is_exact_match)
                         and (include_non_empty_directories or not is_non_empty_dir)
@@ -1070,13 +1087,14 @@ class MainWindow(QMainWindow):
 
         paths = []
         for index in self._collect_checked_source_indices():
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+            is_context_fetched = item_data and item_data.get('_is_context_fetched', False)
             if (
                 self.proxy_model.sourceModel() is self.tree_model
-                and self.proxy_model.is_context_only(index)
+                and (self.proxy_model.is_context_only(index) or is_context_fetched)
                 and not self.tree_model.is_explicitly_checked(index)
             ):
                 continue
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
             if item_data and item_data.get('path'):
                 paths.append(item_data['path'])
         return self._prune_paths(paths)
@@ -1162,6 +1180,32 @@ class MainWindow(QMainWindow):
     # Scan
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _reset_view(self):
+        """Clear all displayed data and return to the empty/welcome page."""
+        # Stop any running scan first
+        if self.scanner_thread and self.scanner_thread.isRunning():
+            self.scanner_thread.cancel()
+
+        # Clear the tree model
+        self.tree_model = None
+        self.proxy_model.setSourceModel(None)
+
+        # Reset pagination state
+        self.current_page = 0
+        self.is_scanning  = False
+
+        # Reset status chips
+        self.chip_empty.setText("Empty: 0")
+        self.chip_inactive_folders.setText("Inactive folders: 0")
+        self.chip_inactive_files.setText("Inactive files: 0")
+        self.chip_space.setText("Reclaimable: —")
+
+        # Hide pagination, show empty page
+        self.pagination_bar.setVisible(False)
+        self.controls_bar.setVisible(False)
+        self.content_stack.setCurrentIndex(0)
+        self.lbl_status.setText("Ready — select a folder and click Re-scan")
+
     def _browse(self):
         # Use native Windows Explorer dialog
         start_dir = self.txt_path.text().strip() or ""
@@ -1169,6 +1213,9 @@ class MainWindow(QMainWindow):
             self, "Select Folder", start_dir
         )
         if folder:
+            # Clear any previous scan results immediately
+            self._reset_view()
+
             # Preserve UNC paths; normpath mangles \\server to \server
             if folder.startswith("//") or folder.startswith("\\\\"):
                 self.txt_path.setText(folder.replace("/", "\\"))
@@ -1211,8 +1258,8 @@ class MainWindow(QMainWindow):
         
         self.lbl_status.setText("Scanning…")
         self.btn_rescan.setText("⏹  Stop")
-        self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;") # temporary stop style
-        
+        self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
+
         self.current_page = 0
         self.total_scanned = 0
         self.is_scanning = True
@@ -1241,7 +1288,7 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText("Scan stopped by user.")
         else:
             self.lbl_status.setText("Scan complete.")
-            
+
         if self.content_stack.currentIndex() == 0:
             self._load_page()
             
@@ -1316,6 +1363,29 @@ class MainWindow(QMainWindow):
         query += f" ORDER BY path LIMIT {limit} OFFSET {offset}"
         cursor.execute(query, params)
         rows = cursor.fetchall()
+        
+        # --- Restore Tree Context by fetching missing parents ---
+        fetched_paths = {r[0] for r in rows}
+        missing_parents = set()
+        
+        for r in rows:
+            p_path = r[5]
+            while p_path and p_path not in fetched_paths and p_path not in missing_parents:
+                missing_parents.add(p_path)
+                p_path = os.path.dirname(p_path) if '\\' in p_path or '/' in p_path else None
+                
+        # Build a set of paths that were originally fetched so we can mark others as context
+        original_fetched_paths = {r[0] for r in rows}
+        
+        if missing_parents:
+            # Fetch parents in batches to avoid SQLite variable limits
+            parents_list = list(missing_parents)
+            for i in range(0, len(parents_list), 900):
+                batch = parents_list[i:i+900]
+                placeholders = ','.join('?' * len(batch))
+                cursor.execute(f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path IN ({placeholders})", batch)
+                rows.extend(cursor.fetchall())
+        
         tool.close()
         
         root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
@@ -1340,7 +1410,8 @@ class MainWindow(QMainWindow):
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
-                '_parent_path': parent_path
+                '_parent_path': parent_path,
+                '_is_context_fetched': path not in original_fetched_paths
             }
             nodes_by_path[path] = node
 
@@ -1367,7 +1438,7 @@ class MainWindow(QMainWindow):
                 self.pagination_bar.setVisible(False)
             return
 
-        # Disable proxy model filtering because SQL already filtered it!
+        # The proxy model now correctly handles contextual filtering and UI status overrides
         self.tree_model = WatchdogTreeModel(root_node)
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
@@ -1594,11 +1665,13 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if r == QMessageBox.StandardButton.Yes:
+            errors = []
             for p in paths:
                 try:
                     send2trash.send2trash(p)
                     self._remove_path_from_db(p)
                 except Exception as e:
+                    errors.append(str(e))
                     print(f"Error: {e}")
             self._load_page()
 
