@@ -461,6 +461,9 @@ class MainWindow(QMainWindow):
         self.tree_model     = None
         self.proxy_model    = WatchdogFilterProxyModel()
 
+        self.sort_column = 3 # Default sort by Age
+        self.sort_order = Qt.SortOrder.DescendingOrder
+
         self.recount_timer = QTimer(self)
         self.recount_timer.setSingleShot(True)
         self.recount_timer.timeout.connect(self._do_recount)
@@ -472,6 +475,7 @@ class MainWindow(QMainWindow):
         self.filter_debounce_timer.timeout.connect(self._on_filter_changed)
 
         self._build_ui()
+        self.tree.header().sortIndicatorChanged.connect(self._on_sort_changed)
 
     # ──────────────────────────────────────────────────────────────────────────
     # UI
@@ -1406,6 +1410,12 @@ class MainWindow(QMainWindow):
         self.current_page += 1
         self._load_page()
 
+    def _on_sort_changed(self, col, order):
+        self.sort_column = col
+        self.sort_order = order
+        self.current_page = 0 # Reset to first page when sorting changes
+        self._load_page()
+
     def _load_page(self):
         limit = 2000
         offset = self.current_page * limit
@@ -1471,7 +1481,26 @@ class MainWindow(QMainWindow):
         cursor.execute(count_query, params)
         total_matches = cursor.fetchone()[0]
         
-        query += f" ORDER BY path LIMIT {limit} OFFSET {offset}"
+        # Map column index to SQL column
+        # Tree: [Name(0), Type(1), Modified(2), Age(3), Size(4), Status(5), Action(6)]
+        # Flat: [Name(0), Location(1), Modified(2), Age(3), Size(4), Status(5), Action(6)]
+        sort_map = {
+            0: 'path',
+            1: 'is_folder' if view_mode == 'Tree' else 'parent_path',
+            2: 'modified_time',
+            3: 'modified_time',
+            4: 'size',
+            5: 'modified_time' # Status is mostly age-based
+        }
+        
+        sort_col_sql = sort_map.get(self.sort_column, 'path')
+        sort_dir = "DESC" if self.sort_order == Qt.SortOrder.DescendingOrder else "ASC"
+        
+        # Invert direction for Age (Column 3) because larger age = smaller modified_time
+        if self.sort_column == 3:
+            sort_dir = "ASC" if sort_dir == "DESC" else "DESC"
+
+        query += f" ORDER BY {sort_col_sql} {sort_dir} LIMIT {limit} OFFSET {offset}"
         cursor.execute(query, params)
         rows = cursor.fetchall()
         
