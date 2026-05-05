@@ -8,6 +8,7 @@ class ScannerThread(QThread):
     scan_progress = pyqtSignal(str) # current_path
     scan_finished = pyqtSignal() # no root_node anymore!
     first_batch_ready = pyqtSignal()
+    batch_ready = pyqtSignal()
     
     def __init__(self, start_path, stale_months=6):
         super().__init__()
@@ -52,6 +53,7 @@ class ScannerThread(QThread):
         tool.clear_index()
 
         self.initial_batch_emitted = False
+        self.last_emitted_count = 0
 
         def cancel_cb():
             return self.is_cancelled
@@ -64,6 +66,10 @@ class ScannerThread(QThread):
             if inserted >= 2000 and not self.initial_batch_emitted:
                 self.initial_batch_emitted = True
                 self.first_batch_ready.emit()
+                self.last_emitted_count = inserted
+            elif self.initial_batch_emitted and (inserted - self.last_emitted_count) >= 2000:
+                self.last_emitted_count = inserted
+                self.batch_ready.emit()
 
         tool.scan(
             root_folder=start_path,

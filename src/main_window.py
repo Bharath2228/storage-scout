@@ -575,7 +575,28 @@ class MainWindow(QMainWindow):
         self.btn_select_empty.clicked.connect(self._select_empty)
         self.btn_select_empty.setEnabled(False)
         controls_layout.addWidget(self.btn_select_empty)
+
         controls_layout.addStretch()
+
+        # Integrated Pagination
+        self.btn_prev_page = QPushButton("◀")
+        self.btn_prev_page.setFixedWidth(30)
+        self.btn_prev_page.setToolTip("Previous Page")
+        self.btn_prev_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_prev_page.clicked.connect(self._prev_page)
+        controls_layout.addWidget(self.btn_prev_page)
+
+        self.lbl_page_info = QLabel("Page 1")
+        self.lbl_page_info.setStyleSheet("color: #64748b; font-weight: 500; font-size: 12px; margin: 0 8px;")
+        controls_layout.addWidget(self.lbl_page_info)
+
+        self.btn_next_page = QPushButton("▶")
+        self.btn_next_page.setFixedWidth(30)
+        self.btn_next_page.setToolTip("Next Page")
+        self.btn_next_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_next_page.clicked.connect(self._next_page)
+        controls_layout.addWidget(self.btn_next_page)
+
         self.controls_bar.setVisible(False)
         right_v.addWidget(self.controls_bar)
 
@@ -682,31 +703,7 @@ class MainWindow(QMainWindow):
 
         right_v.addWidget(self.content_stack)
 
-        # ── Pagination Bar ─────────────────────────────────────────────────────
-        self.pagination_bar = QWidget()
-        self.pagination_bar.setVisible(False)
-        pg_layout = QHBoxLayout(self.pagination_bar)
-        pg_layout.setContentsMargins(0, 8, 0, 0)
-        
-        self.btn_prev_page = QPushButton("◀ Prev")
-        self.btn_prev_page.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_prev_page.clicked.connect(self._prev_page)
-        
-        self.lbl_page_info = QLabel("Page 1")
-        self.lbl_page_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_page_info.setMinimumWidth(150)
-        
-        self.btn_next_page = QPushButton("Next ▶")
-        self.btn_next_page.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_next_page.clicked.connect(self._next_page)
-        
-        pg_layout.addStretch()
-        pg_layout.addWidget(self.btn_prev_page)
-        pg_layout.addWidget(self.lbl_page_info)
-        pg_layout.addWidget(self.btn_next_page)
-        pg_layout.addStretch()
-        
-        right_v.addWidget(self.pagination_bar)
+
         self.content_stack.addWidget(self.tree)        # index 1
         self.content_stack.addWidget(no_results_page)  # index 2
         self.content_stack.setCurrentIndex(0)
@@ -917,10 +914,9 @@ class MainWindow(QMainWindow):
             return
 
         if expanded:
-            # Prevent expandAll from freezing the UI on huge datasets
             if self.proxy_model and self.proxy_model.rowCount() > 0:
-                # If the tree is very large, expand only top levels or don't expand all
-                self.tree.expandToDepth(1)
+                # Pages are capped at 2000 rows so expandAll is safe
+                self.tree.expandAll()
         else:
             self.tree.collapseAll()
 
@@ -1200,8 +1196,7 @@ class MainWindow(QMainWindow):
         self.chip_inactive_files.setText("Inactive files: 0")
         self.chip_space.setText("Reclaimable: —")
 
-        # Hide pagination, show empty page
-        self.pagination_bar.setVisible(False)
+        # Hide controls, show empty page
         self.controls_bar.setVisible(False)
         self.content_stack.setCurrentIndex(0)
         self.lbl_status.setText("Ready — select a folder and click Re-scan")
@@ -1268,6 +1263,7 @@ class MainWindow(QMainWindow):
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_progress.connect(self._on_progress)
         self.scanner_thread.first_batch_ready.connect(self._on_first_batch_ready)
+        self.scanner_thread.batch_ready.connect(self._on_batch_ready)
         self.scanner_thread.start()
 
     def _on_progress(self, path):
@@ -1277,6 +1273,71 @@ class MainWindow(QMainWindow):
     def _on_first_batch_ready(self):
         if self.current_page == 0 and self.content_stack.currentIndex() == 0:
             self._load_page()
+
+    def _on_batch_ready(self):
+        """Called during scanning when a new batch of 2,000 items is indexed."""
+        # Only refresh if we are currently looking at the tree
+        if self.content_stack.currentIndex() == 1:
+            self._refresh_pagination_only()
+
+    def _refresh_pagination_only(self):
+        """Update pagination buttons/info without reloading the whole tree."""
+        from src.file_index_tool import FileIndexTool
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+
+        # We need the same WHERE clause as _load_page
+        where_clauses = []
+        params = []
+        age_secs = self.fp.get_older_than_secs()
+        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+        
+        # Determine status filter (simplified mirror of _load_page logic)
+        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked(): status_filter = None
+        elif self.fp.rb_empty.isChecked(): status_filter = 'Empty'
+        else: status_filter = 'Inactive'
+
+        if status_filter == 'Inactive':
+            if age_cutoff is not None:
+                where_clauses.append("modified_time <= ?")
+                params.append(age_cutoff)
+            else: where_clauses.append("1=1")
+        elif status_filter == 'Active':
+            if age_cutoff is not None:
+                where_clauses.append("modified_time > ?")
+                params.append(age_cutoff)
+            else: where_clauses.append("1=0")
+        
+        date_from, date_to = self.fp.get_date_range_ts()
+        if date_from:
+            where_clauses.append("modified_time >= ?")
+            params.append(date_from)
+        if date_to:
+            where_clauses.append("modified_time <= ?")
+            params.append(date_to)
+        if status_filter == 'Empty': where_clauses.append("is_folder = 1")
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
+        total_matches = cursor.fetchone()[0]
+        tool.close()
+
+        # Update UI controls
+        limit = 2000
+        offset = self.current_page * limit
+        has_multiple_pages = total_matches > limit
+        self.btn_prev_page.setVisible(has_multiple_pages)
+        self.btn_next_page.setVisible(has_multiple_pages)
+        self.lbl_page_info.setVisible(has_multiple_pages)
+        
+        if has_multiple_pages:
+            # Re-fetch rows count on current page is tricky without query, 
+            # but we can approximate or just show total_matches
+            self.lbl_page_info.setText(f"Showing page {self.current_page+1} of {total_matches}")
+            self.btn_prev_page.setEnabled(self.current_page > 0)
+            self.btn_next_page.setEnabled(offset + limit < total_matches)
+        
+        self.lbl_status.setText(f"Scanning... Found {total_matches} matching items")
 
     def _on_scan_done(self):
         self.btn_rescan.setEnabled(True)
@@ -1435,7 +1496,6 @@ class MainWindow(QMainWindow):
             else:
                 self.content_stack.setCurrentIndex(2) # No results page
                 self.controls_bar.setVisible(False)
-                self.pagination_bar.setVisible(False)
             return
 
         # The proxy model now correctly handles contextual filtering and UI status overrides
@@ -1443,9 +1503,19 @@ class MainWindow(QMainWindow):
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
         
+        # Update pagination controls
+        has_multiple_pages = total_matches > limit
+        self.btn_prev_page.setVisible(has_multiple_pages)
+        self.btn_next_page.setVisible(has_multiple_pages)
+        self.lbl_page_info.setVisible(has_multiple_pages)
+        
+        if has_multiple_pages:
+            self.lbl_page_info.setText(f"{offset + 1}-{offset + len(rows)} of {total_matches}")
+            self.btn_prev_page.setEnabled(self.current_page > 0)
+            self.btn_next_page.setEnabled(offset + len(rows) < total_matches)
+        
         self.content_stack.setCurrentIndex(1)  # show tree
         self.controls_bar.setVisible(True)
-        self.pagination_bar.setVisible(True)
         
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1462,16 +1532,6 @@ class MainWindow(QMainWindow):
         
         # Expand top level
         self._set_expand_state(True)
-        
-        # Update pagination bar
-        start_idx = offset + 1 if total_matches > 0 else 0
-        end_idx = min(offset + limit, total_matches)
-        
-        scanning_text = " (Scanning...)" if self.is_scanning else ""
-        self.lbl_page_info.setText(f"Showing {start_idx} - {end_idx} of {total_matches}{scanning_text}")
-        
-        self.btn_prev_page.setEnabled(self.current_page > 0)
-        self.btn_next_page.setEnabled(end_idx < total_matches)
         
         self.lbl_status.setText(f"Found {total_matches} matching items")
         self._update_chips_sql()
@@ -1537,7 +1597,7 @@ class MainWindow(QMainWindow):
         paths, folder_count, file_count = self._checked_delete_summary()
         total = len(paths)
         if total:
-            self.btn_delete.setText(f"Delete Selected (Folders: {folder_count}, Files: {file_count})")
+            self.btn_delete.setText(f"🗑  Delete Selected (Folders: {folder_count}, Files: {file_count})  [Current Page]")
         else:
             self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(total > 0)
