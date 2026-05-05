@@ -291,6 +291,7 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         self.date_to_ts = None
         self.older_than_secs = None
         self.older_than_cutoff_ts = None
+        self._accepts_cache = {}
 
     def set_filters(self, empty_only,
                     date_from_ts=None, date_to_ts=None,
@@ -308,6 +309,7 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             datetime.now().timestamp() - older_than_secs
             if older_than_secs is not None else None
         )
+        self._accepts_cache.clear()
         self.invalidateFilter()
 
     def has_active_filters(self):
@@ -367,21 +369,44 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         source_model = self.sourceModel()
         if source_model is None:
             return False
-        
+            
         start_idx = source_model.index(source_row, 0, source_parent)
-        # Iterative search for matching child to avoid deep recursion
+        
+        # Check cache (we can use internalPointer to identify the item uniquely)
+        item = start_idx.internalPointer()
+        if item in self._accepts_cache:
+            return self._accepts_cache[item]
+            
+        # If it doesn't match immediately, we must check descendants
+        # To avoid O(N^2) redundant scanning, we can do a post-order traversal
+        # But since PyQt calls this dynamically, caching the result of the subtree search is enough.
+        
+        visited_items = []
         stack = [start_idx]
         while stack:
             idx = stack.pop()
+            current_item = idx.internalPointer()
+            if current_item in self._accepts_cache:
+                if self._accepts_cache[current_item]:
+                    self._accepts_cache[item] = True
+                    return True
+                continue
+                
+            visited_items.append(current_item)
             item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
             if not item_data: continue
             
             if self._matches(item_data):
+                self._accepts_cache[item] = True
+                self._accepts_cache[current_item] = True
                 return True
                 
             if item_data.get('is_dir'):
                 for row in range(source_model.rowCount(idx)):
                     stack.append(source_model.index(row, 0, idx))
+                    
+        for v in visited_items:
+            self._accepts_cache[v] = False
         return False
 
 

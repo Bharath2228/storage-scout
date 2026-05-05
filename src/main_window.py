@@ -2,6 +2,7 @@ import os
 import csv
 import subprocess
 import send2trash
+from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QRadioButton, QSlider, QDateEdit, QTreeView, QHeaderView,
@@ -678,6 +679,36 @@ class MainWindow(QMainWindow):
         nr_layout.addStretch()
 
         self.content_stack.addWidget(empty_page)      # index 0
+        self.content_stack.addWidget(self.tree)       # index 1
+        self.content_stack.addWidget(no_results_page) # index 2
+
+        right_v.addWidget(self.content_stack)
+
+        # ── Pagination Bar ─────────────────────────────────────────────────────
+        self.pagination_bar = QWidget()
+        self.pagination_bar.setVisible(False)
+        pg_layout = QHBoxLayout(self.pagination_bar)
+        pg_layout.setContentsMargins(0, 8, 0, 0)
+        
+        self.btn_prev_page = QPushButton("◀ Prev")
+        self.btn_prev_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_prev_page.clicked.connect(self._prev_page)
+        
+        self.lbl_page_info = QLabel("Page 1")
+        self.lbl_page_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_page_info.setMinimumWidth(150)
+        
+        self.btn_next_page = QPushButton("Next ▶")
+        self.btn_next_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_next_page.clicked.connect(self._next_page)
+        
+        pg_layout.addStretch()
+        pg_layout.addWidget(self.btn_prev_page)
+        pg_layout.addWidget(self.lbl_page_info)
+        pg_layout.addWidget(self.btn_next_page)
+        pg_layout.addStretch()
+        
+        right_v.addWidget(self.pagination_bar)
         self.content_stack.addWidget(self.tree)        # index 1
         self.content_stack.addWidget(no_results_page)  # index 2
         self.content_stack.setCurrentIndex(0)
@@ -822,27 +853,10 @@ class MainWindow(QMainWindow):
         self.btn_filter.setChecked(not is_visible)
 
     def _apply_filters(self):
-        # Determine status filter from radio buttons
-        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
-            status_filter = None
-        elif self.fp.rb_empty.isChecked():
-            status_filter = 'Empty'
-        else:
-            status_filter = 'Inactive'
-
-        date_from_ts, date_to_ts = self.fp.get_date_range_ts()
-        self.proxy_model.set_filters(
-            empty_only=False,       # now handled by status_filter
-            date_from_ts=date_from_ts,
-            date_to_ts=date_to_ts,
-            older_than_secs=self.fp.get_older_than_secs(),
-            status_filter=status_filter,
-        )
-        # Always expand while filtering so all matched branches are visible.
-        self._set_expand_state(self._has_visible_rows())
-        self._refresh_selection_buttons()
-        self._do_recount()
-        self._update_content_page()
+        # We now filter purely in SQL!
+        self.current_page = 0
+        if self.content_stack.currentIndex() != 0:
+            self._load_page()
 
     def _apply_default_browse_preset(self, apply_now=True):
         blockers = [
@@ -887,7 +901,10 @@ class MainWindow(QMainWindow):
             return
 
         if expanded:
-            self.tree.expandAll()
+            # Prevent expandAll from freezing the UI on huge datasets
+            if self.proxy_model and self.proxy_model.rowCount() > 0:
+                # If the tree is very large, expand only top levels or don't expand all
+                self.tree.expandToDepth(1)
         else:
             self.tree.collapseAll()
 
@@ -1196,37 +1213,174 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("⏹  Stop")
         self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;") # temporary stop style
         
+        self.current_page = 0
+        self.total_scanned = 0
+        self.is_scanning = True
+
         self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_progress.connect(self._on_progress)
+        self.scanner_thread.first_batch_ready.connect(self._on_first_batch_ready)
         self.scanner_thread.start()
 
     def _on_progress(self, path):
         s = ("…" + path[-72:]) if len(path) > 75 else path
         self.lbl_status.setText(f"Scanning: {s}")
 
-    def _on_scan_done(self, root_node):
+    def _on_first_batch_ready(self):
+        if self.current_page == 0 and self.content_stack.currentIndex() == 0:
+            self._load_page()
+
+    def _on_scan_done(self):
         self.btn_rescan.setEnabled(True)
         self.btn_rescan.setText("⟳  Re-scan")
         self.btn_rescan.setStyleSheet("") # reset style
+        self.is_scanning = False
         
-        if not root_node:
-            if self.scanner_thread and self.scanner_thread.is_cancelled:
-                self.lbl_status.setText("Scan stopped by user.")
+        if self.scanner_thread and self.scanner_thread.is_cancelled:
+            self.lbl_status.setText("Scan stopped by user.")
+        else:
+            self.lbl_status.setText("Scan complete.")
+            
+        if self.content_stack.currentIndex() == 0:
+            self._load_page()
+            
+    def _prev_page(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._load_page()
+
+    def _next_page(self):
+        self.current_page += 1
+        self._load_page()
+
+    def _load_page(self):
+        limit = 2000
+        offset = self.current_page * limit
+        
+        from src.file_index_tool import FileIndexTool
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+        
+        # Build SQL query based on active filters
+        query = "SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index"
+        count_query = "SELECT COUNT(*) FROM file_index"
+        
+        where_clauses = []
+        params = []
+        
+        age_secs = self.fp.get_older_than_secs()
+        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+        
+        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
+            status_filter = None
+        elif self.fp.rb_empty.isChecked():
+            status_filter = 'Empty'
+        else:
+            status_filter = 'Inactive'
+        
+        if status_filter == 'Inactive':
+            if age_cutoff is not None:
+                where_clauses.append("modified_time <= ?")
+                params.append(age_cutoff)
             else:
-                self.lbl_status.setText("Scan failed or folder is empty.")
-            self._set_expand_state(False)
+                where_clauses.append("1=1") # Everything is inactive if age limit is 0
+        elif status_filter == 'Active':
+            if age_cutoff is not None:
+                where_clauses.append("modified_time > ?")
+                params.append(age_cutoff)
+            else:
+                where_clauses.append("1=0") # Nothing is active
+                
+        date_from, date_to = self.fp.get_date_range_ts()
+        
+        if date_from:
+            where_clauses.append("modified_time >= ?")
+            params.append(date_from)
+        if date_to:
+            where_clauses.append("modified_time <= ?")
+            params.append(date_to)
+            
+        if status_filter == 'Empty':
+            where_clauses.append("is_folder = 1")
+            
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+            query += where_sql
+            count_query += where_sql
+            
+        # Get total matching rows count
+        cursor.execute(count_query, params)
+        total_matches = cursor.fetchone()[0]
+        
+        query += f" ORDER BY path LIMIT {limit} OFFSET {offset}"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        tool.close()
+        
+        root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
+        nodes_by_path = {}
+        
+        for path, name, is_folder, size, modified_time, parent_path in rows:
+            is_stale = False
+            if age_cutoff and modified_time <= age_cutoff:
+                is_stale = True
+            elif not age_cutoff:
+                is_stale = True
+                
+            status = 'Inactive' if is_stale else 'Active'
+            if status_filter == 'Empty' and is_folder:
+                status = 'Empty'
+            
+            node = {
+                'name': name,
+                'path': path,
+                'is_dir': bool(is_folder),
+                'size': size if not is_folder else 0,
+                'last_modified': modified_time,
+                'status': status,
+                'children': [],
+                '_parent_path': parent_path
+            }
+            nodes_by_path[path] = node
+
+        for path, node in nodes_by_path.items():
+            parent_path = node.pop('_parent_path', None)
+            parent_node = nodes_by_path.get(parent_path)
+            if parent_node:
+                parent_node['children'].append(node)
+            else:
+                # If parent isn't in the current page, attach it to root
+                root_node['children'].append(node)
+            
+        if not rows and self.current_page > 0:
+            self.current_page -= 1
             return
+            
+        if not rows and self.current_page == 0:
+            if self.is_scanning:
+                # Still scanning, just wait
+                pass
+            else:
+                self.content_stack.setCurrentIndex(2) # No results page
+                self.controls_bar.setVisible(False)
+                self.pagination_bar.setVisible(False)
+            return
+
+        # Disable proxy model filtering because SQL already filtered it!
         self.tree_model = WatchdogTreeModel(root_node)
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
-        self.content_stack.setCurrentIndex(1)  # show tree, hide empty state
-        self.controls_bar.setVisible(True)      # show controls bar
+        
+        self.content_stack.setCurrentIndex(1)  # show tree
+        self.controls_bar.setVisible(True)
+        self.pagination_bar.setVisible(True)
+        
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for i in range(1, 7):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-        # Set sensible initial widths; column 0 stretches but give it an initial baseline
+            
         self.tree.setColumnWidth(0, 420)
         self.tree.setColumnWidth(1, 74)
         self.tree.setColumnWidth(2, 116)
@@ -1234,67 +1388,61 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(4, 96)
         self.tree.setColumnWidth(5, 108)
         self.tree.setColumnWidth(6, 98)
-        # Apply default filter (show all)
-        self._apply_filters()
-        self._set_expand_state(self._has_visible_rows())
-        n = len(root_node.get('children', []))
-        self.lbl_status.setText(f"Scan complete — {n} top-level items")
-        self._update_chips()
+        
+        # Expand top level
+        self._set_expand_state(True)
+        
+        # Update pagination bar
+        start_idx = offset + 1 if total_matches > 0 else 0
+        end_idx = min(offset + limit, total_matches)
+        
+        scanning_text = " (Scanning...)" if self.is_scanning else ""
+        self.lbl_page_info.setText(f"Showing {start_idx} - {end_idx} of {total_matches}{scanning_text}")
+        
+        self.btn_prev_page.setEnabled(self.current_page > 0)
+        self.btn_next_page.setEnabled(end_idx < total_matches)
+        
+        self.lbl_status.setText(f"Found {total_matches} matching items")
+        self._update_chips_sql()
+        
         self.tree_model.dataChanged.connect(self._on_checked)
-        self.tree_model.layoutChanged.connect(lambda: self.recount_timer.start(80))
-        self._do_recount()
 
-    def _update_chips(self):
-        if not self.proxy_model or not self.tree_model:
-            return
-
-        empty_n = inactive_folders = inactive_files = reclaim = 0
-
-        def walk(parent_proxy_idx=QModelIndex()):
-            nonlocal empty_n, inactive_folders, inactive_files, reclaim
-            for row in range(self.proxy_model.rowCount(parent_proxy_idx)):
-                proxy_idx = self.proxy_model.index(row, 0, parent_proxy_idx)
-                source_idx = self.proxy_model.mapToSource(proxy_idx)
-
-                # Skip items that are only visible as context (parents of matches)
-                if self.proxy_model.is_context_only(source_idx):
-                    if self.proxy_model.hasChildren(proxy_idx):
-                        walk(proxy_idx)
-                    continue
-
-                # Status is dynamic (column 5)
-                status_idx = self.proxy_model.index(row, 5, parent_proxy_idx)
-                status = self.proxy_model.data(status_idx, Qt.ItemDataRole.DisplayRole)
-
-                item_data = self.tree_model.data(source_idx, Qt.ItemDataRole.UserRole)
-                if not item_data:
-                    continue
-
-                is_dir = item_data.get('is_dir', False)
-                size = item_data.get('size', 0)
-
-                if status == 'Empty':
-                    empty_n += 1
-                elif status == 'Inactive':
-                    if is_dir:
-                        inactive_folders += 1
-                    else:
-                        inactive_files += 1
-
-                if status in ('Empty', 'Inactive') and not is_dir:
-                    reclaim += size
-
-                if self.proxy_model.hasChildren(proxy_idx):
-                    walk(proxy_idx)
-
-        walk()
+    def _update_chips_sql(self):
+        from src.file_index_tool import FileIndexTool
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+        
+        age_secs = self.fp.get_older_than_secs()
+        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+        
+        # Inactive files
+        if age_cutoff is not None:
+            cursor.execute("SELECT COUNT(*), SUM(size) FROM file_index WHERE is_folder = 0 AND modified_time <= ?", (age_cutoff,))
+        else:
+            cursor.execute("SELECT COUNT(*), SUM(size) FROM file_index WHERE is_folder = 0")
+        row = cursor.fetchone()
+        inactive_files = row[0] or 0
+        reclaim = row[1] or 0
+        
+        # Inactive folders
+        if age_cutoff is not None:
+            cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1 AND modified_time <= ?", (age_cutoff,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1")
+        inactive_folders = cursor.fetchone()[0] or 0
+        
+        # Empty
+        cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1 AND size = 0")
+        empty_n = cursor.fetchone()[0] or 0
+        
+        tool.close()
+        
         from .models import format_size
         self.chip_empty.setText(f"Empty: {empty_n}")
         self.chip_inactive_folders.setText(f"Inactive folders: {inactive_folders}")
         self.chip_inactive_files.setText(f"Inactive files: {inactive_files}")
         self.chip_space.setText(f"Reclaimable: {format_size(reclaim)}")
 
-        # Enable/disable quick-select buttons depending on presence
         try:
             self.btn_select_inactive.setEnabled((inactive_folders + inactive_files) > 0)
             self.btn_select_empty.setEnabled(empty_n > 0)
@@ -1323,7 +1471,7 @@ class MainWindow(QMainWindow):
             self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(total > 0)
         self._refresh_selection_buttons()
-        self._update_chips()
+        self._update_chips_sql()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tree interactions
@@ -1409,6 +1557,14 @@ class MainWindow(QMainWindow):
     # Delete
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _remove_path_from_db(self, path):
+        from src.file_index_tool import FileIndexTool
+        tool = FileIndexTool()
+        tool.conn.execute("DELETE FROM file_index WHERE path = ?", (path,))
+        tool.conn.execute("DELETE FROM file_index WHERE path LIKE ?", (path + '\\%',))
+        tool.conn.commit()
+        tool.close()
+
     def _delete_one(self, path):
         r = QMessageBox.question(self, "Confirm Delete",
             f"Send to Recycle Bin?\n\n{path}",
@@ -1417,7 +1573,8 @@ class MainWindow(QMainWindow):
         if r == QMessageBox.StandardButton.Yes:
             try:
                 send2trash.send2trash(path)
-                self.start_scan()
+                self._remove_path_from_db(path)
+                self._load_page()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
@@ -1440,9 +1597,10 @@ class MainWindow(QMainWindow):
             for p in paths:
                 try:
                     send2trash.send2trash(p)
+                    self._remove_path_from_db(p)
                 except Exception as e:
                     print(f"Error: {e}")
-            self.start_scan()
+            self._load_page()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Export CSV
