@@ -49,6 +49,81 @@ def apply_theme(app, theme_name="dark"):
         QMessageBox QPushButton:hover, QDialog QPushButton:hover {{
             background-color: #e2e8f0;
         }}
+        QDialog#deleteProgressDialog {{
+            background-color: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+        }}
+        QLabel#deleteProgressTitle {{
+            color: #1e293b;
+            font-size: 15px;
+            font-weight: 700;
+        }}
+        QLabel#deleteProgressCount {{
+            color: #475569;
+            font-size: 12px;
+            font-weight: 600;
+        }}
+        QLabel#deleteProgressPath {{
+            color: #64748b;
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 11px;
+        }}
+        QProgressBar#deleteProgressBar {{
+            background-color: #e2e8f0;
+            border: none;
+            border-radius: 5px;
+            height: 10px;
+        }}
+        QProgressBar#deleteProgressBar::chunk {{
+            background-color: #2563eb;
+            border-radius: 5px;
+        }}
+        QPushButton#deleteProgressCancel {{
+            background-color: transparent;
+            color: #dc2626;
+            border: 1.5px solid #fecaca;
+            border-radius: 6px;
+            padding: 8px 14px;
+            font-weight: 600;
+        }}
+        QPushButton#deleteProgressCancel:hover {{
+            background-color: #fef2f2;
+            border-color: #dc2626;
+        }}
+        QPushButton#deleteProgressCancel:disabled {{
+            color: #94a3b8;
+            border-color: #e2e8f0;
+            background-color: #f8fafc;
+        }}
+        QDialog#loadingDialog {{
+            background-color: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+        }}
+        QLabel#loadingTitle {{
+            color: #1e293b;
+            font-size: 15px;
+            font-weight: 700;
+        }}
+        QLabel#loadingDetail {{
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 500;
+        }}
+        QProgressBar#loadingBar {{
+            background-color: #e2e8f0;
+            border: none;
+            border-radius: 5px;
+            height: 10px;
+        }}
+        QProgressBar#loadingBar::chunk {{
+            background-color: #2563eb;
+            border-radius: 5px;
+        }}
         QMainWindow {{ background-color: #f1f5f9; }}
         QLabel {{ color: {text}; }}
         QWidget#topbar {{
@@ -77,12 +152,14 @@ def apply_theme(app, theme_name="dark"):
         }}
         
         QWidget#displayModeSection,
+        QWidget#viewModeSection,
         QWidget#dateRangeSection,
         QWidget#ageThresholdSection {{
             margin-bottom: 8px;
         }}
         
         QLabel#displayModeHeader,
+        QLabel#viewModeHeader,
         QLabel#dateRangeHeader,
         QLabel#ageThresholdHeader {{
             background-color: #f1f5f9;
@@ -308,6 +385,38 @@ def apply_theme(app, theme_name="dark"):
         QPushButton#collapseAll:hover {{
             background-color: #f8fafc;
             border-color: #cbd5e1;
+        }}
+
+        QPushButton#pageNavBtn {{
+            background-color: white;
+            color: #2563eb;
+            border: 1.5px solid #cbd5e1;
+            border-radius: 7px;
+            padding: 0;
+            font-size: 13px;
+            font-weight: 700;
+        }}
+        QPushButton#pageNavBtn:hover {{
+            background-color: #eff6ff;
+            border-color: #2563eb;
+        }}
+        QPushButton#pageNavBtn:pressed {{
+            background-color: #dbeafe;
+        }}
+        QPushButton#pageNavBtn:disabled {{
+            background-color: #f8fafc;
+            color: #94a3b8;
+            border: 1px solid #e2e8f0;
+        }}
+
+        QLabel#pageInfo {{
+            background-color: #f8fafc;
+            color: #475569;
+            border: 1px solid #e2e8f0;
+            border-radius: 7px;
+            padding: 7px 12px;
+            font-size: 12px;
+            font-weight: 600;
         }}
 
 

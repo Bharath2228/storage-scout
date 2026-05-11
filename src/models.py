@@ -128,7 +128,7 @@ class WatchdogTreeModel(QAbstractItemModel):
             if is_tree:
                 if col == 1: return "Folder" if item.itemData.get('is_dir') else "File"
             else:
-                if col == 1: return item.itemData.get('location', '')
+                if col == 1: return item.itemData.get('display_location') or item.itemData.get('location', '')
 
             # Common columns shifted by 0
             if col == 2:
@@ -145,6 +145,12 @@ class WatchdogTreeModel(QAbstractItemModel):
 
         if role == Qt.ItemDataRole.UserRole:
             return item.itemData
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if not is_tree and col == 1:
+                return item.itemData.get('location', '')
+            if col == 0:
+                return item.itemData.get('path', '')
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if col == 0 or (not is_tree and col == 1):
@@ -189,6 +195,47 @@ class WatchdogTreeModel(QAbstractItemModel):
                 self._update_ancestor_states(index.parent())
         finally:
             self.layoutChanged.emit()
+
+    def set_indices_check_state_direct(self, indices, state, explicit=False):
+        if not indices:
+            return
+        state = Qt.CheckState(state)
+
+        self.layoutAboutToBeChanged.emit()
+        try:
+            ancestors = []
+            for index in indices:
+                if not index.isValid():
+                    continue
+
+                item = index.internalPointer()
+                explicit_checked = bool(explicit) and state == Qt.CheckState.Checked
+                item.checkState = state
+                item.explicitlyChecked = explicit_checked
+
+                parent = index.parent()
+                while parent.isValid():
+                    ancestors.append(parent)
+                    parent = parent.parent()
+
+            for index in ancestors:
+                self._update_ancestor_states_for_direct_bulk(index)
+        finally:
+            self.layoutChanged.emit()
+
+    def _update_ancestor_states_for_direct_bulk(self, index):
+        while index.isValid():
+            item = index.internalPointer()
+            child_states = [item.child(row).checkState for row in range(item.childCount())]
+            if item.explicitlyChecked:
+                state = Qt.CheckState.Checked
+            elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
+                state = Qt.CheckState.Unchecked
+            else:
+                state = Qt.CheckState.PartiallyChecked
+
+            self._update_item_check_state(index, state, explicit=item.explicitlyChecked)
+            index = index.parent()
 
     def _set_check_state_recursive(self, start_index, state, explicit=False):
         # Iterative implementation to avoid recursion and signal storms

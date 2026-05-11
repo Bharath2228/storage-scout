@@ -53,6 +53,8 @@ file_index.db
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
 
 # Log Files
 *.log

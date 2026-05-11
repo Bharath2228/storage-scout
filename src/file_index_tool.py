@@ -39,6 +39,7 @@ class FileIndexTool:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_modified ON file_index(modified_time);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_inactive ON file_index(inactive);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_folder ON file_index(is_folder);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_extension ON file_index(extension);")
         self.conn.commit()
 
     def clear_index(self) -> None:
