@@ -824,6 +824,11 @@ class MainWindow(QMainWindow):
         self.loading_timer.setInterval(180)
         self.loading_timer.timeout.connect(self._show_loading_dialog)
 
+        self.scan_refresh_timer = QTimer(self)
+        self.scan_refresh_timer.setSingleShot(True)
+        self.scan_refresh_timer.setInterval(1200)
+        self.scan_refresh_timer.timeout.connect(self._refresh_pagination_only)
+
         self._build_ui()
         self.tree.header().sortIndicatorChanged.connect(self._on_sort_changed)
 
@@ -1762,6 +1767,7 @@ class MainWindow(QMainWindow):
         self.proxy_model.setSourceModel(None)
         self.bulk_delete_scope = None
         self.page_load_request_id += 1
+        self.scan_refresh_timer.stop()
         self._hide_loading_dialog()
 
         # Reset pagination state
@@ -1855,12 +1861,15 @@ class MainWindow(QMainWindow):
 
     def _on_batch_ready(self):
         """Called during scanning when a new batch of 2,000 items is indexed."""
-        # Only refresh if we are currently looking at the tree
-        if self.content_stack.currentIndex() == 1:
-            self._refresh_pagination_only()
+        # Counting matches can be expensive on large scans, so throttle it.
+        if self.content_stack.currentIndex() == 1 and not self.scan_refresh_timer.isActive():
+            self.scan_refresh_timer.start()
 
     def _refresh_pagination_only(self):
         """Update pagination buttons/info without reloading the whole tree."""
+        if self.page_load_thread and self.page_load_thread.isRunning():
+            return
+
         from src.file_index_tool import FileIndexTool
         tool = FileIndexTool()
         cursor = tool.conn.cursor()
@@ -1949,6 +1958,8 @@ class MainWindow(QMainWindow):
 
         if self.content_stack.currentIndex() == 0:
             self._load_page()
+        elif self.content_stack.currentIndex() == 1:
+            self.scan_refresh_timer.start()
             
     def _prev_page(self):
         if self.current_page > 0:
@@ -2270,6 +2281,7 @@ class MainWindow(QMainWindow):
         self._refresh_selection_buttons()
         
         self.tree_model.dataChanged.connect(self._on_checked)
+        self.tree_model.layoutChanged.connect(self._on_checked)
 
     def _on_page_load_ready(self, request_id, result):
         if request_id != self.page_load_request_id:
@@ -2339,6 +2351,7 @@ class MainWindow(QMainWindow):
         self._update_chips_sql()
         self._refresh_selection_buttons()
         self.tree_model.dataChanged.connect(self._on_checked)
+        self.tree_model.layoutChanged.connect(self._on_checked)
 
     def _on_page_load_failed(self, request_id, error):
         if request_id != self.page_load_request_id:
@@ -2603,10 +2616,9 @@ class MainWindow(QMainWindow):
 
         self.delete_thread = None
         self.bulk_delete_scope = None
-        self._clear_all_checks()
+        self._discard_current_page_selection()
         self._set_delete_controls_enabled(True)
         self._load_page()
-        self._do_recount()
 
         if cancelled:
             title = "Deletion stopped"
