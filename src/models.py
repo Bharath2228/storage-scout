@@ -1,7 +1,12 @@
+import os
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
 from PyQt6.QtGui import QFont, QIcon
+
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+FOLDER_ICON = QIcon(os.path.join(ASSETS_DIR, "folder_blue.svg"))
+FILE_ICON = QIcon(os.path.join(ASSETS_DIR, "file_blue.svg"))
 
 
 def format_size(size_bytes):
@@ -166,8 +171,9 @@ class WatchdogTreeModel(QAbstractItemModel):
 
         if role == Qt.ItemDataRole.DecorationRole and col == 0:
             is_dir = item.itemData.get('is_dir', False)
-            if is_dir: return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
-            return QIcon.fromTheme("text-x-generic", QIcon.fromTheme("document-new"))
+            if is_dir:
+                return FOLDER_ICON
+            return FILE_ICON
 
         return None
 
@@ -354,23 +360,13 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
     def _reset(self):
         self.empty_only = False
         self.status_filter = None   # None = all, 'Active', 'Inactive', 'Empty'
-        self.date_from_ts = None
-        self.date_to_ts = None
         self.older_than_secs = None
         self.older_than_cutoff_ts = None
         self._accepts_cache = {}
 
-    def set_filters(self, empty_only,
-                    date_from_ts=None, date_to_ts=None,
-                    older_than_secs=None,
-                    status_filter=None):
-        if date_from_ts is not None and date_to_ts is not None and date_from_ts > date_to_ts:
-            date_from_ts, date_to_ts = date_to_ts, date_from_ts
-
+    def set_filters(self, empty_only, older_than_secs=None, status_filter=None):
         self.empty_only = empty_only
         self.status_filter = status_filter
-        self.date_from_ts = date_from_ts
-        self.date_to_ts = date_to_ts
         self.older_than_secs = older_than_secs
         self.older_than_cutoff_ts = (
             datetime.now().timestamp() - older_than_secs
@@ -383,8 +379,6 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         return any((
             self.empty_only,
             self.status_filter is not None,
-            self.date_from_ts is not None,
-            self.date_to_ts is not None,
             self.older_than_cutoff_ts is not None,
         ))
 
@@ -494,20 +488,6 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             return status == 'Empty' and item_data.get('is_dir', False)
 
         if self.status_filter is not None and status != self.status_filter:
-            return False
-
-        has_time_filter = any(value is not None for value in (
-            self.date_from_ts,
-            self.date_to_ts,
-        ))
-        
-        # Note: older_than_cutoff_ts is now handled by the dynamic status above
-        if has_time_filter and not ts:
-            return False
-
-        if self.date_from_ts is not None and ts < self.date_from_ts:
-            return False
-        if self.date_to_ts is not None and ts > self.date_to_ts:
             return False
 
         return True

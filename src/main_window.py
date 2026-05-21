@@ -5,12 +5,12 @@ import send2trash
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QRadioButton, QSlider, QDateEdit, QTreeView, QHeaderView,
+    QPushButton, QRadioButton, QSlider, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar
 )
-from PyQt6.QtCore import Qt, QDate, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel
@@ -27,6 +27,27 @@ EMPTY_FOLDER_SQL = (
     "SELECT 1 FROM file_index child WHERE child.parent_path = file_index.path"
     ") AND lower(name) NOT IN ('.git', '__pycache__', 'venv', '.venv', 'node_modules')"
 )
+
+
+def build_sort_order_clause(view_mode, sort_column, sort_desc):
+    primary_dir = "DESC" if sort_desc else "ASC"
+    age_dir = "ASC" if sort_desc else "DESC"
+
+    if sort_column == 0:
+        return f"lower(name) {primary_dir}, lower(path) ASC"
+    if sort_column == 1:
+        if view_mode == 'Tree':
+            return f"is_folder {primary_dir}, lower(name) ASC, lower(path) ASC"
+        return f"lower(parent_path) {primary_dir}, lower(name) ASC, lower(path) ASC"
+    if sort_column == 2:
+        return f"modified_time {primary_dir}, lower(path) ASC"
+    if sort_column == 3:
+        return f"modified_time {age_dir}, lower(path) ASC"
+    if sort_column == 4:
+        return f"size {primary_dir}, lower(path) ASC"
+    if sort_column == 5:
+        return f"modified_time {primary_dir}, is_folder DESC, lower(name) ASC"
+    return f"lower(path) {primary_dir}"
 
 
 class DeleteThread(QThread):
@@ -204,8 +225,6 @@ class PageLoadThread(QThread):
         view_mode = self.options['view_mode']
         status_filter = self.options['status_filter']
         age_cutoff = self.options['age_cutoff']
-        date_from = self.options['date_from']
-        date_to = self.options['date_to']
         videos_only = self.options['videos_only']
 
         query = "SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index"
@@ -231,13 +250,6 @@ class PageLoadThread(QThread):
             else:
                 where_clauses.append("1=0")
 
-        if date_from:
-            where_clauses.append("modified_time >= ?")
-            params.append(date_from)
-        if date_to:
-            where_clauses.append("modified_time <= ?")
-            params.append(date_to)
-
         if videos_only:
             placeholders = ','.join('?' * len(VIDEO_EXTENSIONS))
             where_clauses.append("is_folder = 0")
@@ -262,20 +274,12 @@ class PageLoadThread(QThread):
         cursor.execute(count_query, params)
         total_matches = cursor.fetchone()[0]
 
-        sort_map = {
-            0: 'path',
-            1: 'is_folder' if view_mode == 'Tree' else 'parent_path',
-            2: 'modified_time',
-            3: 'modified_time',
-            4: 'size',
-            5: 'modified_time'
-        }
-        sort_col_sql = sort_map.get(self.options['sort_column'], 'path')
-        sort_dir = "DESC" if self.options['sort_desc'] else "ASC"
-        if self.options['sort_column'] == 3:
-            sort_dir = "ASC" if sort_dir == "DESC" else "DESC"
-
-        query += f" ORDER BY {sort_col_sql} {sort_dir} LIMIT {limit} OFFSET {offset}"
+        order_by_sql = build_sort_order_clause(
+            view_mode,
+            self.options['sort_column'],
+            self.options['sort_desc'],
+        )
+        query += f" ORDER BY {order_by_sql} LIMIT {limit} OFFSET {offset}"
         cursor.execute(query, params)
         rows = cursor.fetchall()
 
@@ -330,6 +334,7 @@ class PageLoadThread(QThread):
                 'children': [],
                 '_parent_path': actual_parent,
                 '_is_context_fetched': is_context,
+                '_is_page_result': path in original_fetched_paths,
                 'location': parent_path if view_mode != 'Tree' else None,
                 'display_location': display_location,
             }
@@ -356,6 +361,106 @@ class PageLoadThread(QThread):
 # ────────────────────────────────────────────────────────────────────────────
 # Delegates
 # ────────────────────────────────────────────────────────────────────────────
+
+class TotalsThread(QThread):
+    totals_ready = pyqtSignal(int, dict)
+    totals_failed = pyqtSignal(int, str)
+
+    def __init__(self, request_id, options, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.options = options
+
+    def run(self):
+        try:
+            self.totals_ready.emit(self.request_id, self._compute())
+        except Exception as exc:
+            self.totals_failed.emit(self.request_id, str(exc))
+
+    def _sum_paths_total_size(self, cursor, paths):
+        total_size = 0
+        for path in paths:
+            cursor.execute("SELECT is_folder, size FROM file_index WHERE path = ?", (path,))
+            row = cursor.fetchone()
+            if not row:
+                continue
+
+            is_folder, size = row
+            if not is_folder:
+                total_size += size or 0
+                continue
+
+            normalized = os.path.normpath(path).rstrip("\\/")
+            like_pattern = normalized + os.sep + "%"
+            cursor.execute(
+                "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND path LIKE ?",
+                (like_pattern,),
+            )
+            total_size += cursor.fetchone()[0] or 0
+        return total_size
+
+    def _browse_folder_total_size(self, cursor, root_path):
+        if not root_path:
+            return 0
+
+        normalized = os.path.normpath(root_path).rstrip("\\/")
+        like_pattern = normalized + os.sep + "%"
+        cursor.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR path LIKE ?)",
+            (normalized, like_pattern),
+        )
+        return cursor.fetchone()[0] or 0
+
+    def _compute(self):
+        from src.file_index_tool import FileIndexTool
+
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+        try:
+            age_cutoff = self.options['age_cutoff']
+
+            if age_cutoff is not None:
+                cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 0 AND modified_time <= ?", (age_cutoff,))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 0")
+            inactive_files = cursor.fetchone()[0] or 0
+
+            if age_cutoff is not None:
+                cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1 AND modified_time <= ?", (age_cutoff,))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1")
+            inactive_folders = cursor.fetchone()[0] or 0
+
+            if age_cutoff is not None:
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM file_index WHERE {EMPTY_FOLDER_SQL} AND modified_time <= ?",
+                    (age_cutoff,),
+                )
+            else:
+                cursor.execute(f"SELECT COUNT(*) FROM file_index WHERE {EMPTY_FOLDER_SQL}")
+            empty_n = cursor.fetchone()[0] or 0
+
+            if self.options['is_scanning']:
+                folder_total = None
+            elif self.options['cached_folder_total'] is not None:
+                folder_total = self.options['cached_folder_total']
+            else:
+                folder_total = self._browse_folder_total_size(cursor, self.options['root_path'])
+
+            current_page_total = self._sum_paths_total_size(cursor, self.options['current_page_paths'])
+            selected_total = self._sum_paths_total_size(cursor, self.options['selected_paths'])
+        finally:
+            tool.close()
+
+        return {
+            'empty_n': empty_n,
+            'inactive_folders': inactive_folders,
+            'inactive_files': inactive_files,
+            'folder_total': folder_total,
+            'current_page_total': current_page_total,
+            'selected_total': selected_total,
+        }
+
 
 class StatusDelegate(QStyledItemDelegate):
     # (text_color, bg_color, border_color)
@@ -449,28 +554,6 @@ class ActionDelegate(QStyledItemDelegate):
 # Filter Panel (standalone widget)
 # ────────────────────────────────────────────────────────────────────────────
 
-class AnyDateEdit(QDateEdit):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.setCalendarPopup(True)
-        self.calendarWidget().installEventFilter(self)
-        self.lineEdit().setReadOnly(True)
-        # Prevent keyboard focus on the line edit so it doesn't blink a cursor
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
-    def eventFilter(self, obj, event):
-        if obj == self.calendarWidget() and event.type() == QEvent.Type.Show:
-            # Force a valid font to avoid setPointSize(-1) warnings from Qt internals
-            f = self.calendarWidget().font()
-            if f.pointSize() <= 0:
-                f.setPointSize(9)
-                self.calendarWidget().setFont(f)
-                
-            if self.date() == self.minimumDate():
-                current_date = QDate.currentDate()
-                self.calendarWidget().setCurrentPage(current_date.year(), current_date.month())
-        return super().eventFilter(obj, event)
-
 class FilterPanel(QFrame):
     DEFAULT_STALE_MONTHS = 3
     AGE_FILTER_DISABLED = 0
@@ -542,59 +625,8 @@ class FilterPanel(QFrame):
 
 
         # ── Section 2: Date Range ────────────────────────────────────────────
-        date_section = QWidget()
-        date_section.setObjectName("dateRangeSection")
-        date_layout = QVBoxLayout(date_section)
-        date_layout.setContentsMargins(0, 0, 0, 0)
-        date_layout.setSpacing(4)
-
-        lbl_date = QLabel("DATE RANGE")
-        lbl_date.setObjectName("dateRangeHeader")
-
-        date_layout.addWidget(lbl_date)
-
-        self.date_from = AnyDateEdit()
-        self.date_from.setDisplayFormat("dd/MM/yyyy")
-        self.date_from.setSpecialValueText("Any")
-        self.date_from.setDate(self.date_from.minimumDate())
-        self.date_from.setMinimumWidth(150)
-
-        self.date_to = AnyDateEdit()
-        self.date_to.setDisplayFormat("dd/MM/yyyy")
-        self.date_to.setSpecialValueText("Any")
-        self.date_to.setDate(self.date_to.minimumDate())
-        self.date_to.setMinimumWidth(150)
-        self.date_from.setObjectName("dateRangeInput")
-        self.date_to.setObjectName("dateRangeInput")
-        self.date_from.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.date_to.setCursor(Qt.CursorShape.PointingHandCursor)
-
-
-        for lbl_text, widget in [("From", self.date_from), ("To", self.date_to)]:
-            box = QWidget()
-            box_layout = QVBoxLayout(box)
-            box_layout.setContentsMargins(16, 4, 16, 4)
-            box_layout.setSpacing(4)
-            l = QLabel(lbl_text)
-            l.setObjectName(f"{lbl_text.lower()}Label")
-
-            box_layout.addWidget(l)
-            box_layout.addWidget(widget)
-            date_layout.addWidget(box)
-
-        btn_box = QWidget()
-        btn_layout = QHBoxLayout(btn_box)
-        btn_layout.setContentsMargins(16, 0, 16, 0)
-        self.btn_clear_dates = QPushButton("Clear dates")
-        self.btn_clear_dates.setObjectName("clearDates")
-        self.btn_clear_dates.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear_dates.clicked.connect(self._clear_dates)
-        btn_layout.addWidget(self.btn_clear_dates)
-        btn_layout.addStretch()
-        date_layout.addWidget(btn_box)
         
-        outer.addWidget(date_section)
-        outer.addWidget(self._hline())
+        
 
         # ── Section 3: Stale Threshold ───────────────────────────────────────
         age_section = QWidget()
@@ -678,11 +710,6 @@ class FilterPanel(QFrame):
         action_layout.addWidget(self.btn_close)
         outer.addWidget(action_box)
 
-    def _clear_dates(self):
-        """Reset both date pickers back to 'Any'."""
-        self.date_from.setDate(self.date_from.minimumDate())
-        self.date_to.setDate(self.date_to.minimumDate())
-
     def _update_age_label(self, value):
         if value == self.AGE_FILTER_DISABLED:
             self.lbl_pill.setText("Off")
@@ -720,24 +747,6 @@ class FilterPanel(QFrame):
         del blocker
         self._update_age_label(value)
 
-    def get_date_range_ts(self):
-        from_date = self.date_from.date()
-        to_date = self.date_to.date()
-        minimum_date = self.date_from.minimumDate()
-
-        if from_date != minimum_date and to_date != minimum_date and from_date > to_date:
-            from_blocker = QSignalBlocker(self.date_from)
-            to_blocker = QSignalBlocker(self.date_to)
-            self.date_from.setDate(to_date)
-            self.date_to.setDate(from_date)
-            del from_blocker
-            del to_blocker
-            from_date, to_date = to_date, from_date
-
-        date_from_ts = None if from_date == minimum_date else int(from_date.startOfDay().toSecsSinceEpoch())
-        date_to_ts = None if to_date == minimum_date else int(to_date.endOfDay().toSecsSinceEpoch())
-        return date_from_ts, date_to_ts
-
     def get_older_than_secs(self):
         """Returns seconds threshold or None if age filtering is disabled."""
         v = self.age_input.value()
@@ -758,7 +767,6 @@ class FilterPanel(QFrame):
     def apply_default_browse_preset(self):
         self.rb_inactive.setChecked(True)
         self.rb_view_tree.setChecked(True)
-        self._clear_dates()
         self.slider.setValue(self.DEFAULT_STALE_MONTHS)
         
         blocker = QSignalBlocker(self.age_input)
@@ -801,6 +809,11 @@ class MainWindow(QMainWindow):
         self.page_load_thread = None
         self.page_load_threads = []
         self.page_load_request_id = 0
+        self.totals_thread = None
+        self.totals_threads = []
+        self.totals_request_id = 0
+        self.cached_folder_total = None
+        self.cached_folder_total_root = None
         self.loading_dialog = None
         self.tree_model     = None
         self.proxy_model    = WatchdogFilterProxyModel()
@@ -830,7 +843,8 @@ class MainWindow(QMainWindow):
         self.scan_refresh_timer.timeout.connect(self._refresh_pagination_only)
 
         self._build_ui()
-        self.tree.header().sortIndicatorChanged.connect(self._on_sort_changed)
+        self.tree.header().sectionClicked.connect(self._on_header_sort_clicked)
+        self._apply_sort_indicator()
 
     # ──────────────────────────────────────────────────────────────────────────
     # UI
@@ -929,12 +943,9 @@ class MainWindow(QMainWindow):
         # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
         self.fp.rb_videos.toggled.connect(self._on_videos_mode_toggled)
-        self.fp.date_from.dateChanged.connect(lambda _d: self._on_filter_changed())
-        self.fp.date_to.dateChanged.connect(lambda _d: self._on_filter_changed())
         # Age controls: debounced
         self.fp.slider.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
         self.fp.age_input.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
-        self.fp.btn_clear_dates.clicked.connect(lambda: self._on_filter_changed())
         
         # View mode connections
         self.fp.rb_view_tree.toggled.connect(self._on_filter_changed)
@@ -1044,10 +1055,13 @@ class MainWindow(QMainWindow):
         self.tree = QTreeView()
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.tree.setAlternatingRowColors(True)
-        # Enable sorting
-        self.tree.setSortingEnabled(True)
+        self.tree.setSortingEnabled(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(False)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setItemsExpandable(True)
+        self.tree.setExpandsOnDoubleClick(True)
+        self.tree.setIndentation(16)
         self.tree.setMouseTracking(True)
         self.tree.viewport().setMouseTracking(True)
         self.tree.setItemDelegateForColumn(5, StatusDelegate(self.tree))
@@ -1156,7 +1170,9 @@ class MainWindow(QMainWindow):
         self.chip_empty = self._chip("Empty: 0", "chipEmpty")
         self.chip_inactive_folders = self._chip("Inactive folders: 0", "chipInactive")
         self.chip_inactive_files = self._chip("Inactive files: 0", "chipInactive")
-        self.chip_space = self._chip("Reclaimable: —", "chipSpace")
+        self.chip_browse_size = self._chip("Folder total: —", "chipSpace")
+        self.chip_page_size = self._chip("Current page: —", "chipSpace")
+        self.chip_selected_size = self._chip("Selected total: —", "chipSpace")
         
         sbl.addWidget(self._sep())
         sbl.addWidget(self.chip_empty)
@@ -1165,7 +1181,11 @@ class MainWindow(QMainWindow):
         sbl.addWidget(self._sep())
         sbl.addWidget(self.chip_inactive_files)
         sbl.addWidget(self._sep())
-        sbl.addWidget(self.chip_space)
+        sbl.addWidget(self.chip_browse_size)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_page_size)
+        sbl.addWidget(self._sep())
+        sbl.addWidget(self.chip_selected_size)
         vbox.addWidget(sb)
 
         # Do NOT auto-start scan — let the user enter a path first
@@ -1188,6 +1208,14 @@ class MainWindow(QMainWindow):
         l = QLabel(text)
         l.setObjectName(obj_name)
         return l
+
+    def _set_size_totals_pending(self, browse=False, page=False, selected=False):
+        if browse:
+            self.chip_browse_size.setText("Folder total: Calculating...")
+        if page:
+            self.chip_page_size.setText("Current page: Calculating...")
+        if selected:
+            self.chip_selected_size.setText("Selected total: Calculating...")
 
     def _on_tree_scroll(self, value):
         """Show/hide the scroll-to-top button based on vertical scroll position."""
@@ -1261,15 +1289,12 @@ class MainWindow(QMainWindow):
         else:
             status_filter = 'Inactive'
 
-        date_from_ts, date_to_ts = self.fp.get_date_range_ts()
         if self.content_stack.currentIndex() != 0:
             self.proxy_model.setSourceModel(None)
             self.tree_model = None
 
         self.proxy_model.set_filters(
             empty_only=False,
-            date_from_ts=date_from_ts,
-            date_to_ts=date_to_ts,
             older_than_secs=age_secs,
             status_filter=status_filter,
         )
@@ -1282,11 +1307,8 @@ class MainWindow(QMainWindow):
     def _apply_default_browse_preset(self, apply_now=True):
         blockers = [
             QSignalBlocker(self.fp.bg),
-            QSignalBlocker(self.fp.date_from),
-            QSignalBlocker(self.fp.date_to),
             QSignalBlocker(self.fp.slider),
             QSignalBlocker(self.fp.age_input),
-            QSignalBlocker(self.fp.btn_clear_dates),
         ]
         try:
             self.fp.apply_default_browse_preset()
@@ -1406,7 +1428,7 @@ class MainWindow(QMainWindow):
             return False
         return os.path.splitext(item_data.get('name', ''))[1].lower() in VIDEO_EXTENSIONS
 
-    def _collect_bulk_target_indices(self, status=None, videos_only=False):
+    def _collect_bulk_target_indices(self, status=None, videos_only=False, include_context=True):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
             return []
 
@@ -1422,9 +1444,13 @@ class MainWindow(QMainWindow):
                 if item_data:
                     path = item_data.get('path')
                     is_exact_match = self.proxy_model.matches_source_index(source_index)
+                    is_page_result = item_data.get(
+                        '_is_page_result',
+                        not item_data.get('_is_context_fetched', False),
+                    )
                     if (
                         path and path not in seen_paths
-                        and (not item_data.get('_is_context_fetched', False) or is_exact_match)
+                        and (include_context or is_page_result)
                         and (status is None or item_data.get('status') == status)
                         and (not videos_only or self._is_video_item(item_data))
                         and (not exact_only or is_exact_match)
@@ -1498,14 +1524,6 @@ class MainWindow(QMainWindow):
                 if age_cutoff is not None:
                     where_clauses.append("modified_time <= ?")
                     params.append(age_cutoff)
-
-        date_from, date_to = self.fp.get_date_range_ts()
-        if date_from:
-            where_clauses.append("modified_time >= ?")
-            params.append(date_from)
-        if date_to:
-            where_clauses.append("modified_time <= ?")
-            params.append(date_to)
 
         view_mode = self.fp.get_view_mode()
         if view_mode == 'Files':
@@ -1663,7 +1681,6 @@ class MainWindow(QMainWindow):
             if (
                 self.proxy_model.sourceModel() is self.tree_model
                 and (self.proxy_model.is_context_only(index) or is_context_fetched)
-                and not self.tree_model.is_explicitly_checked(index)
             ):
                 continue
             if item_data and item_data.get('path'):
@@ -1719,6 +1736,69 @@ class MainWindow(QMainWindow):
 
         return target_paths, total_folders, total_files
 
+    def _current_page_target_paths(self):
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            return []
+
+        indices = self._collect_bulk_target_indices(
+            videos_only=self._display_mode() == 'Videos',
+            include_context=False,
+        )
+        paths = []
+        for index in indices:
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+            if item_data and item_data.get('path'):
+                paths.append(item_data['path'])
+        return self._prune_paths(paths)
+
+    def _path_subtree_size(self, cursor, path):
+        cursor.execute("SELECT is_folder, size FROM file_index WHERE path = ?", (path,))
+        row = cursor.fetchone()
+        if not row:
+            return 0
+
+        is_folder, size = row
+        if not is_folder:
+            return size or 0
+
+        normalized = os.path.normpath(path).rstrip("\\/")
+        like_pattern = normalized + os.sep + "%"
+        cursor.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND path LIKE ?",
+            (like_pattern,),
+        )
+        return cursor.fetchone()[0] or 0
+
+    def _sum_paths_total_size(self, paths):
+        from src.file_index_tool import FileIndexTool
+
+        pruned_paths = self._prune_paths(paths)
+        if not pruned_paths:
+            return 0
+
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+        total_size = 0
+        try:
+            for path in pruned_paths:
+                total_size += self._path_subtree_size(cursor, path)
+        finally:
+            tool.close()
+        return total_size
+
+    def _browse_folder_total_size(self, cursor):
+        root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
+        if not root_path:
+            return 0
+
+        normalized = os.path.normpath(root_path).rstrip("\\/")
+        like_pattern = normalized + os.sep + "%"
+        cursor.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR path LIKE ?)",
+            (normalized, like_pattern),
+        )
+        return cursor.fetchone()[0] or 0
+
     def _select_by_status(self, status):
         if not self.tree_model:
             return
@@ -1773,12 +1853,17 @@ class MainWindow(QMainWindow):
         # Reset pagination state
         self.current_page = 0
         self.is_scanning  = False
+        self.cached_folder_total = None
+        self.cached_folder_total_root = None
+        self.totals_request_id += 1
 
         # Reset status chips
         self.chip_empty.setText("Empty: 0")
         self.chip_inactive_folders.setText("Inactive folders: 0")
         self.chip_inactive_files.setText("Inactive files: 0")
-        self.chip_space.setText("Reclaimable: —")
+        self.chip_browse_size.setText("Folder total: —")
+        self.chip_page_size.setText("Current page: —")
+        self.chip_selected_size.setText("Selected total: —")
 
         # Hide controls, show empty page
         self.controls_bar.setVisible(False)
@@ -1838,11 +1923,15 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText("Scanning…")
         self.btn_rescan.setText("⏹  Stop")
         self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
+        self._set_size_totals_pending(browse=True, page=True, selected=True)
 
         self.current_page = 0
         self.total_scanned = 0
         self.is_scanning = True
         self.current_scan_root = os.path.normcase(os.path.normpath(path))
+        self.cached_folder_total = None
+        self.cached_folder_total_root = self.current_scan_root
+        self.totals_request_id += 1
 
         self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
@@ -1901,13 +1990,6 @@ class MainWindow(QMainWindow):
                 params.append(age_cutoff)
             else: where_clauses.append("1=0")
         
-        date_from, date_to = self.fp.get_date_range_ts()
-        if date_from:
-            where_clauses.append("modified_time >= ?")
-            params.append(date_from)
-        if date_to:
-            where_clauses.append("modified_time <= ?")
-            params.append(date_to)
         if status_filter == 'Empty': where_clauses.append(EMPTY_FOLDER_SQL)
 
         if self.fp.rb_videos.isChecked():
@@ -1960,6 +2042,7 @@ class MainWindow(QMainWindow):
             self._load_page()
         elif self.content_stack.currentIndex() == 1:
             self.scan_refresh_timer.start()
+            self._update_chips_sql()
             
     def _prev_page(self):
         if self.current_page > 0:
@@ -1972,17 +2055,49 @@ class MainWindow(QMainWindow):
         self.current_page += 1
         self._load_page()
 
+    def _default_sort_order_for_column(self, col):
+        if col in (2, 3, 4, 5):
+            return Qt.SortOrder.DescendingOrder
+        return Qt.SortOrder.AscendingOrder
+
+    def _apply_sort_indicator(self):
+        hdr = self.tree.header()
+        blocker = QSignalBlocker(hdr)
+        hdr.setSortIndicatorShown(True)
+        hdr.setSortIndicator(self.sort_column, self.sort_order)
+        del blocker
+
+    def _on_header_sort_clicked(self, col):
+        if col >= 6:
+            return
+        if self.fp.get_view_mode() != 'Tree' and col == 1:
+            return
+
+        if col == self.sort_column:
+            order = (
+                Qt.SortOrder.AscendingOrder
+                if self.sort_order == Qt.SortOrder.DescendingOrder
+                else Qt.SortOrder.DescendingOrder
+            )
+        else:
+            order = self._default_sort_order_for_column(col)
+
+        self._on_sort_changed(col, order)
+
     def _on_sort_changed(self, col, order):
+        if col >= 6:
+            return
+
         self.bulk_delete_scope = None
         self.sort_column = col
         self.sort_order = order
+        self._apply_sort_indicator()
         self.current_page = 0 # Reset to first page when sorting changes
         self._load_page()
 
     def _page_load_options(self):
         age_secs = self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
-        date_from, date_to = self.fp.get_date_range_ts()
 
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
@@ -2001,8 +2116,6 @@ class MainWindow(QMainWindow):
             'view_mode': self.fp.get_view_mode(),
             'status_filter': status_filter,
             'age_cutoff': age_cutoff,
-            'date_from': date_from,
-            'date_to': date_to,
             'videos_only': self.fp.rb_videos.isChecked(),
             'sort_column': self.sort_column,
             'sort_desc': self.sort_order == Qt.SortOrder.DescendingOrder,
@@ -2026,6 +2139,43 @@ class MainWindow(QMainWindow):
         if thread in self.page_load_threads:
             self.page_load_threads.remove(thread)
 
+    def _cleanup_totals_thread(self, thread):
+        if thread in self.totals_threads:
+            self.totals_threads.remove(thread)
+
+    def _start_totals_refresh(self):
+        self.totals_request_id += 1
+        request_id = self.totals_request_id
+
+        if self.totals_thread and self.totals_thread.isRunning():
+            try:
+                self.totals_thread.totals_ready.disconnect()
+                self.totals_thread.totals_failed.disconnect()
+            except TypeError:
+                pass
+
+        age_secs = self.fp.get_older_than_secs()
+        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+        root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
+        root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
+        cached_folder_total = self.cached_folder_total if root_key and root_key == self.cached_folder_total_root else None
+
+        options = {
+            'age_cutoff': age_cutoff,
+            'is_scanning': self.is_scanning,
+            'root_path': root_path,
+            'cached_folder_total': cached_folder_total,
+            'current_page_paths': self._current_page_target_paths(),
+            'selected_paths': self._checked_delete_paths(),
+        }
+
+        self.totals_thread = TotalsThread(request_id, options)
+        self.totals_threads.append(self.totals_thread)
+        self.totals_thread.totals_ready.connect(self._on_totals_ready)
+        self.totals_thread.totals_failed.connect(self._on_totals_failed)
+        self.totals_thread.finished.connect(lambda: self._cleanup_totals_thread(self.sender()))
+        self.totals_thread.start()
+
     def _set_loading_controls_enabled(self, enabled):
         self.controls_bar.setEnabled(enabled)
         self.tree.setEnabled(enabled)
@@ -2044,6 +2194,14 @@ class MainWindow(QMainWindow):
                 pass
 
         self.lbl_status.setText("Loading results...")
+        root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
+        root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
+        has_cached_folder_total = bool(root_key and root_key == self.cached_folder_total_root and self.cached_folder_total is not None)
+        self._set_size_totals_pending(
+            browse=self.is_scanning or not has_cached_folder_total,
+            page=True,
+            selected=True,
+        )
         self._set_loading_controls_enabled(False)
         self.loading_timer.start()
 
@@ -2098,15 +2256,6 @@ class MainWindow(QMainWindow):
             else:
                 where_clauses.append("1=0") # Nothing is active
                 
-        date_from, date_to = self.fp.get_date_range_ts()
-        
-        if date_from:
-            where_clauses.append("modified_time >= ?")
-            params.append(date_from)
-        if date_to:
-            where_clauses.append("modified_time <= ?")
-            params.append(date_to)
-            
         if status_filter == 'Empty':
             where_clauses.append(EMPTY_FOLDER_SQL)
 
@@ -2134,26 +2283,12 @@ class MainWindow(QMainWindow):
         cursor.execute(count_query, params)
         total_matches = cursor.fetchone()[0]
         
-        # Map column index to SQL column
-        # Tree: [Name(0), Type(1), Modified(2), Age(3), Size(4), Status(5), Action(6)]
-        # Flat: [Name(0), Location(1), Modified(2), Age(3), Size(4), Status(5), Action(6)]
-        sort_map = {
-            0: 'path',
-            1: 'is_folder' if view_mode == 'Tree' else 'parent_path',
-            2: 'modified_time',
-            3: 'modified_time',
-            4: 'size',
-            5: 'modified_time' # Status is mostly age-based
-        }
-        
-        sort_col_sql = sort_map.get(self.sort_column, 'path')
-        sort_dir = "DESC" if self.sort_order == Qt.SortOrder.DescendingOrder else "ASC"
-        
-        # Invert direction for Age (Column 3) because larger age = smaller modified_time
-        if self.sort_column == 3:
-            sort_dir = "ASC" if sort_dir == "DESC" else "DESC"
-
-        query += f" ORDER BY {sort_col_sql} {sort_dir} LIMIT {limit} OFFSET {offset}"
+        order_by_sql = build_sort_order_clause(
+            view_mode,
+            self.sort_column,
+            self.sort_order == Qt.SortOrder.DescendingOrder,
+        )
+        query += f" ORDER BY {order_by_sql} LIMIT {limit} OFFSET {offset}"
         cursor.execute(query, params)
         rows = cursor.fetchall()
         
@@ -2209,6 +2344,7 @@ class MainWindow(QMainWindow):
                 'children': [],
                 '_parent_path': actual_parent,
                 '_is_context_fetched': is_context,
+                '_is_page_result': path in original_fetched_paths,
                 'location': parent_path if view_mode != 'Tree' else None,
                 'display_location': display_location,
             }
@@ -2333,6 +2469,7 @@ class MainWindow(QMainWindow):
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for index in range(1, 7):
             hdr.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
+        self._apply_sort_indicator()
 
         if view_mode == 'Tree':
             self.tree.setColumnWidth(0, 420)
@@ -2364,46 +2501,37 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Load Error", error)
 
     def _update_chips_sql(self):
-        from src.file_index_tool import FileIndexTool
-        tool = FileIndexTool()
-        cursor = tool.conn.cursor()
-        
-        age_secs = self.fp.get_older_than_secs()
-        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
-        
-        # Inactive files
-        if age_cutoff is not None:
-            cursor.execute("SELECT COUNT(*), SUM(size) FROM file_index WHERE is_folder = 0 AND modified_time <= ?", (age_cutoff,))
-        else:
-            cursor.execute("SELECT COUNT(*), SUM(size) FROM file_index WHERE is_folder = 0")
-        row = cursor.fetchone()
-        inactive_files = row[0] or 0
-        reclaim = row[1] or 0
-        
-        # Inactive folders
-        if age_cutoff is not None:
-            cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1 AND modified_time <= ?", (age_cutoff,))
-        else:
-            cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1")
-        inactive_folders = cursor.fetchone()[0] or 0
-        
-        # Empty
-        if age_cutoff is not None:
-            cursor.execute(
-                f"SELECT COUNT(*) FROM file_index WHERE {EMPTY_FOLDER_SQL} AND modified_time <= ?",
-                (age_cutoff,),
-            )
-        else:
-            cursor.execute(f"SELECT COUNT(*) FROM file_index WHERE {EMPTY_FOLDER_SQL}")
-        empty_n = cursor.fetchone()[0] or 0
-        
-        tool.close()
-        
+        self._start_totals_refresh()
+
+    def _on_totals_ready(self, request_id, result):
         from .models import format_size
-        self.chip_empty.setText(f"Empty: {empty_n}")
-        self.chip_inactive_folders.setText(f"Inactive folders: {inactive_folders}")
-        self.chip_inactive_files.setText(f"Inactive files: {inactive_files}")
-        self.chip_space.setText(f"Reclaimable: {format_size(reclaim)}")
+
+        if request_id != self.totals_request_id:
+            return
+
+        root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
+        root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
+        if result['folder_total'] is not None and root_key:
+            self.cached_folder_total = result['folder_total']
+            self.cached_folder_total_root = root_key
+
+        self.chip_empty.setText(f"Empty: {result['empty_n']}")
+        self.chip_inactive_folders.setText(f"Inactive folders: {result['inactive_folders']}")
+        self.chip_inactive_files.setText(f"Inactive files: {result['inactive_files']}")
+        if result['folder_total'] is None:
+            self.chip_browse_size.setText("Folder total: Calculating...")
+        else:
+            self.chip_browse_size.setText(f"Folder total: {format_size(result['folder_total'])}")
+        self.chip_page_size.setText(f"Current page: {format_size(result['current_page_total'])}")
+        self.chip_selected_size.setText(f"Selected total: {format_size(result['selected_total'])}")
+
+    def _on_totals_failed(self, request_id, error):
+        if request_id != self.totals_request_id:
+            return
+
+        self.chip_browse_size.setText("Folder total: —")
+        self.chip_page_size.setText("Current page: —")
+        self.chip_selected_size.setText("Selected total: —")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Selection count (debounced)
@@ -2411,6 +2539,7 @@ class MainWindow(QMainWindow):
 
     def _on_checked(self, tl=None, br=None, roles=None):
         if roles is None or Qt.ItemDataRole.CheckStateRole in roles:
+            self._set_size_totals_pending(selected=True)
             self.recount_timer.start(80)
 
     def _do_recount(self):

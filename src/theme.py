@@ -153,14 +153,12 @@ def apply_theme(app, theme_name="dark"):
         
         QWidget#displayModeSection,
         QWidget#viewModeSection,
-        QWidget#dateRangeSection,
         QWidget#ageThresholdSection {{
             margin-bottom: 8px;
         }}
         
         QLabel#displayModeHeader,
         QLabel#viewModeHeader,
-        QLabel#dateRangeHeader,
         QLabel#ageThresholdHeader {{
             background-color: #f1f5f9;
             padding: 10px 16px;
@@ -171,17 +169,6 @@ def apply_theme(app, theme_name="dark"):
             border-radius: 6px;
         }}
 
-        QLabel#fromLabel, QLabel#toLabel {{
-            color: #64748b;
-            font-size: 9pt;
-            font-weight: 500;
-            padding-left: 2px;
-            margin-bottom: 4px;
-            margin-top: 8px;
-        }}
-
-
-        
         QCheckBox, QRadioButton {{
             padding: 10px 16px;
             spacing: 10px;
@@ -286,6 +273,26 @@ def apply_theme(app, theme_name="dark"):
 
         QTreeView::branch {{
             border-bottom: 1px solid #f1f5f9;
+        }}
+        QTreeView::branch:has-children:closed,
+        QTreeView::branch:closed:has-children:has-siblings,
+        QTreeView::branch:closed:has-children:!has-siblings {{
+            image: url({base_dir}/assets/tree_chevron_right.svg);
+        }}
+        QTreeView::branch:has-children:open,
+        QTreeView::branch:open:has-children:has-siblings,
+        QTreeView::branch:open:has-children:!has-siblings {{
+            image: url({base_dir}/assets/tree_chevron_down.svg);
+        }}
+        QTreeView::branch:has-children:hover:closed,
+        QTreeView::branch:hover:closed:has-children:has-siblings,
+        QTreeView::branch:hover:closed:has-children:!has-siblings {{
+            image: url({base_dir}/assets/tree_chevron_right_hover.svg);
+        }}
+        QTreeView::branch:has-children:hover:open,
+        QTreeView::branch:hover:open:has-children:has-siblings,
+        QTreeView::branch:hover:open:has-children:!has-siblings {{
+            image: url({base_dir}/assets/tree_chevron_down_hover.svg);
         }}
 
 
@@ -820,42 +827,9 @@ def apply_theme(app, theme_name="dark"):
         }}
 
         
-        QComboBox#dateRangeInput,
-        QDateEdit#dateRangeInput {{
-            border: 1.5px solid #e2e8f0;
-            border-radius: 6px;
-            padding: 10px 12px;
-            background-color: white;
-            color: #334155;
-            font-size: 9pt;
-            min-height: 20px;
-        }}
         
-        QComboBox#dateRangeInput:hover,
-        QDateEdit#dateRangeInput:hover {{
-            border-color: #cbd5e1;
-            background-color: #fafbfc;
-        }}
         
-        QComboBox#dateRangeInput:focus,
-        QDateEdit#dateRangeInput:focus {{
-            border-color: #2563eb;
-            background-color: white;
-        }}
         
-        QComboBox#dateRangeInput::drop-down,
-        QDateEdit#dateRangeInput::drop-down {{
-            border: none;
-            width: 30px;
-            padding-right: 8px;
-        }}
-        
-        QComboBox#dateRangeInput::down-arrow,
-        QDateEdit#dateRangeInput::down-arrow {{
-            image: url({base_dir}/assets/calendar.svg);
-            width: 16px;
-            height: 16px;
-        }}
         /* ── Scrollbars ──────────────────────────────────────────────────── */
         QScrollBar:vertical {{
             border: none;
