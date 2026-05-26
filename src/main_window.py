@@ -62,6 +62,10 @@ def descendant_like_sql(path, column="path"):
     return sql, patterns
 
 
+def case_insensitive_path_sql(column="path"):
+    return f"{column} = ? COLLATE NOCASE"
+
+
 def build_sort_order_clause(view_mode, sort_column, sort_desc):
     primary_dir = "DESC" if sort_desc else "ASC"
     age_dir = "ASC" if sort_desc else "DESC"
@@ -111,7 +115,10 @@ class DeleteThread(QThread):
                 self.delete_progress.emit(index, total, path)
                 try:
                     send2trash.send2trash(path)
-                    tool.conn.execute("DELETE FROM file_index WHERE path = ?", (path,))
+                    tool.conn.execute(
+                        f"DELETE FROM file_index WHERE {case_insensitive_path_sql()}",
+                        (path,),
+                    )
                     descendant_sql, descendant_params = descendant_like_sql(path)
                     tool.conn.execute(
                         f"DELETE FROM file_index WHERE {descendant_sql}",
@@ -134,6 +141,7 @@ class DeleteProgressDialog(QDialog):
 
     def __init__(self, total, parent=None):
         super().__init__(parent)
+        self._allow_close = False
         self.setWindowTitle("Deleting items")
         self.setModal(True)
         self.setFixedSize(520, 190)
@@ -185,11 +193,13 @@ class DeleteProgressDialog(QDialog):
         self.path_label.setText(path)
 
     def closeEvent(self, event):
+        if self._allow_close:
+            event.accept()
+            return
+
         if self.cancel_button.isEnabled():
             self._cancel()
-            event.ignore()
-        else:
-            event.ignore()
+        event.ignore()
 
 
 class LoadingDialog(QDialog):
@@ -404,21 +414,38 @@ class TotalsThread(QThread):
     totals_ready = pyqtSignal(int, dict)
     totals_failed = pyqtSignal(int, str)
 
+    class _Cancelled(Exception):
+        pass
+
     def __init__(self, request_id, options, parent=None):
         super().__init__(parent)
         self.request_id = request_id
         self.options = options
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def _raise_if_cancelled(self):
+        if self.is_cancelled:
+            raise TotalsThread._Cancelled()
 
     def run(self):
         try:
-            self.totals_ready.emit(self.request_id, self._compute())
+            result = self._compute()
+            if result is not None:
+                self.totals_ready.emit(self.request_id, result)
         except Exception as exc:
             self.totals_failed.emit(self.request_id, str(exc))
 
     def _sum_paths_total_size(self, cursor, paths):
         total_size = 0
         for path in paths:
-            cursor.execute("SELECT is_folder, size FROM file_index WHERE path = ?", (path,))
+            self._raise_if_cancelled()
+            cursor.execute(
+                f"SELECT is_folder, size FROM file_index WHERE {case_insensitive_path_sql()}",
+                (path,),
+            )
             row = cursor.fetchone()
             if not row:
                 continue
@@ -428,6 +455,7 @@ class TotalsThread(QThread):
                 total_size += size or 0
                 continue
 
+            self._raise_if_cancelled()
             descendant_sql, descendant_params = descendant_like_sql(path)
             cursor.execute(
                 f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({descendant_sql})",
@@ -443,6 +471,7 @@ class TotalsThread(QThread):
 
         total_size = 0
         for start in range(0, len(unique_paths), 900):
+            self._raise_if_cancelled()
             batch = unique_paths[start:start + 900]
             placeholders = ",".join("?" * len(batch))
             cursor.execute(
@@ -457,10 +486,11 @@ class TotalsThread(QThread):
         if not root_path:
             return 0
 
+        self._raise_if_cancelled()
         normalized = os.path.normpath(root_path).rstrip("\\/")
         descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
-            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR {descendant_sql})",
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({case_insensitive_path_sql()} OR {descendant_sql})",
             (normalized, *descendant_params),
         )
         return cursor.fetchone()[0] or 0
@@ -471,6 +501,7 @@ class TotalsThread(QThread):
         tool = FileIndexTool()
         cursor = tool.conn.cursor()
         try:
+            self._raise_if_cancelled()
             age_cutoff = self.options['age_cutoff']
 
             if age_cutoff is not None:
@@ -479,12 +510,14 @@ class TotalsThread(QThread):
                 cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 0")
             inactive_files = cursor.fetchone()[0] or 0
 
+            self._raise_if_cancelled()
             if age_cutoff is not None:
                 cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1 AND modified_time <= ?", (age_cutoff,))
             else:
                 cursor.execute("SELECT COUNT(*) FROM file_index WHERE is_folder = 1")
             inactive_folders = cursor.fetchone()[0] or 0
 
+            self._raise_if_cancelled()
             if age_cutoff is not None:
                 cursor.execute(
                     f"SELECT COUNT(*) FROM file_index WHERE {EMPTY_FOLDER_SQL} AND modified_time <= ?",
@@ -499,10 +532,15 @@ class TotalsThread(QThread):
             elif self.options['cached_folder_total'] is not None:
                 folder_total = self.options['cached_folder_total']
             else:
+                self._raise_if_cancelled()
                 folder_total = self._browse_folder_total_size(cursor, self.options['root_path'])
 
+            self._raise_if_cancelled()
             current_page_total = self._sum_file_paths_size(cursor, self.options['current_page_file_paths'])
+            self._raise_if_cancelled()
             selected_total = self._sum_paths_total_size(cursor, self.options['selected_paths'])
+        except TotalsThread._Cancelled:
+            return None
         finally:
             tool.close()
 
@@ -866,6 +904,8 @@ class MainWindow(QMainWindow):
         self.totals_thread = None
         self.totals_threads = []
         self.totals_request_id = 0
+        self.totals_refresh_pending = False
+        self.totals_refresh_options = None
         self.cached_folder_total = None
         self.cached_folder_total_root = None
         self.loading_dialog = None
@@ -1432,13 +1472,18 @@ class MainWindow(QMainWindow):
         if not self.tree_model:
             return
         self.bulk_delete_scope = None
-        def clear(parent=QModelIndex()):
+        indices = []
+
+        def collect(parent=QModelIndex()):
             for r in range(self.tree_model.rowCount(parent)):
                 idx = self.tree_model.index(r, 0, parent)
-                if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != Qt.CheckState.Unchecked:
-                    self.tree_model.set_check_state(idx, Qt.CheckState.Unchecked)
-                clear(idx)
-        clear()
+                indices.append(idx)
+                if self.tree_model.hasChildren(idx):
+                    collect(idx)
+
+        collect()
+        if indices:
+            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Unchecked, explicit=False)
         self._do_recount()
 
     def _discard_current_page_selection(self):
@@ -1830,7 +1875,10 @@ class MainWindow(QMainWindow):
         return list(dict.fromkeys(paths))
 
     def _path_subtree_size(self, cursor, path):
-        cursor.execute("SELECT is_folder, size FROM file_index WHERE path = ?", (path,))
+        cursor.execute(
+            f"SELECT is_folder, size FROM file_index WHERE {case_insensitive_path_sql()}",
+            (path,),
+        )
         row = cursor.fetchone()
         if not row:
             return 0
@@ -1871,7 +1919,7 @@ class MainWindow(QMainWindow):
         normalized = os.path.normpath(root_path).rstrip("\\/")
         descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
-            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR {descendant_sql})",
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({case_insensitive_path_sql()} OR {descendant_sql})",
             (normalized, *descendant_params),
         )
         return cursor.fetchone()[0] or 0
@@ -1926,6 +1974,9 @@ class MainWindow(QMainWindow):
         self.page_load_request_id += 1
         self.scan_refresh_timer.stop()
         self._hide_loading_dialog()
+        self._cancel_running_totals_thread()
+        self.totals_refresh_pending = False
+        self.totals_refresh_options = None
 
         # Reset pagination state
         self.current_page = 0
@@ -2009,6 +2060,7 @@ class MainWindow(QMainWindow):
         self.cached_folder_total = None
         self.cached_folder_total_root = self.current_scan_root
         self.totals_request_id += 1
+        self._cancel_running_totals_thread()
 
         self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
@@ -2227,25 +2279,21 @@ class MainWindow(QMainWindow):
     def _cleanup_totals_thread(self, thread):
         if thread in self.totals_threads:
             self.totals_threads.remove(thread)
+        if thread is self.totals_thread:
+            self.totals_thread = None
 
-    def _start_totals_refresh(self):
-        self.totals_request_id += 1
-        request_id = self.totals_request_id
-
+    def _cancel_running_totals_thread(self):
         if self.totals_thread and self.totals_thread.isRunning():
-            try:
-                self.totals_thread.totals_ready.disconnect()
-                self.totals_thread.totals_failed.disconnect()
-            except TypeError:
-                pass
+            self.totals_thread.cancel()
 
+    def _build_totals_refresh_options(self):
         age_secs = self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
         root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
         cached_folder_total = self.cached_folder_total if root_key and root_key == self.cached_folder_total_root else None
 
-        options = {
+        return {
             'age_cutoff': age_cutoff,
             'is_scanning': self.is_scanning,
             'root_path': root_path,
@@ -2254,12 +2302,37 @@ class MainWindow(QMainWindow):
             'selected_paths': self._checked_delete_paths(),
         }
 
-        self.totals_thread = TotalsThread(request_id, options)
-        self.totals_threads.append(self.totals_thread)
-        self.totals_thread.totals_ready.connect(self._on_totals_ready)
-        self.totals_thread.totals_failed.connect(self._on_totals_failed)
-        self.totals_thread.finished.connect(lambda: self._cleanup_totals_thread(self.sender()))
-        self.totals_thread.start()
+    def _start_totals_thread(self, request_id, options):
+        thread = TotalsThread(request_id, options)
+        self.totals_thread = thread
+        self.totals_threads.append(thread)
+        thread.totals_ready.connect(self._on_totals_ready)
+        thread.totals_failed.connect(self._on_totals_failed)
+        thread.finished.connect(lambda thread=thread: self._on_totals_thread_finished(thread))
+        thread.start()
+
+    def _on_totals_thread_finished(self, thread):
+        self._cleanup_totals_thread(thread)
+        pending_options = self.totals_refresh_options if self.totals_refresh_pending else None
+        self.totals_refresh_pending = False
+        self.totals_refresh_options = None
+        if pending_options:
+            request_id, options = pending_options
+            self._start_totals_thread(request_id, options)
+
+    def _start_totals_refresh(self):
+        self.totals_request_id += 1
+        request_id = self.totals_request_id
+        options = self._build_totals_refresh_options()
+        self.totals_refresh_options = (request_id, options)
+
+        if self.totals_thread and self.totals_thread.isRunning():
+            self.totals_refresh_pending = True
+            self._cancel_running_totals_thread()
+            return
+
+        self.totals_refresh_pending = False
+        self._start_totals_thread(request_id, options)
 
     def _set_loading_controls_enabled(self, enabled):
         self.controls_bar.setEnabled(enabled)
@@ -2556,7 +2629,10 @@ class MainWindow(QMainWindow):
         from src.file_index_tool import FileIndexTool
         tool = FileIndexTool()
         try:
-            tool.conn.execute("DELETE FROM file_index WHERE path = ?", (path,))
+            tool.conn.execute(
+                f"DELETE FROM file_index WHERE {case_insensitive_path_sql()}",
+                (path,),
+            )
             descendant_sql, descendant_params = descendant_like_sql(path)
             tool.conn.execute(
                 f"DELETE FROM file_index WHERE {descendant_sql}",
@@ -2597,7 +2673,7 @@ class MainWindow(QMainWindow):
                     paths.append(path)
                 elif folder_delete_mode == 'empty_only':
                     cursor.execute(
-                        "SELECT 1 FROM file_index WHERE parent_path = ? LIMIT 1",
+                        "SELECT 1 FROM file_index WHERE parent_path = ? COLLATE NOCASE LIMIT 1",
                         (path,),
                     )
                     if cursor.fetchone() is None:
@@ -2641,6 +2717,7 @@ class MainWindow(QMainWindow):
 
     def _on_delete_finished(self, deleted_count, errors, cancelled):
         if self.delete_progress:
+            self.delete_progress._allow_close = True
             self.delete_progress.hide()
             self.delete_progress.close()
             self.delete_progress = None

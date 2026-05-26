@@ -196,7 +196,7 @@ def apply_theme(app, theme_name="dark"):
         QCheckBox::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
-            image: url({base_dir}/assets/check.svg);
+            image: url("{base_dir}/assets/check.svg");
         }}
 
         
@@ -268,7 +268,7 @@ def apply_theme(app, theme_name="dark"):
         QTreeView::indicator:checked {{
             background-color: {accent};
             border-color: {accent};
-            image: url({base_dir}/assets/check.svg);
+            image: url("{base_dir}/assets/check.svg");
         }}
 
         QTreeView::branch {{
@@ -277,22 +277,22 @@ def apply_theme(app, theme_name="dark"):
         QTreeView::branch:has-children:closed,
         QTreeView::branch:closed:has-children:has-siblings,
         QTreeView::branch:closed:has-children:!has-siblings {{
-            image: url({base_dir}/assets/tree_chevron_right.svg);
+            image: url("{base_dir}/assets/tree_chevron_right.svg");
         }}
         QTreeView::branch:has-children:open,
         QTreeView::branch:open:has-children:has-siblings,
         QTreeView::branch:open:has-children:!has-siblings {{
-            image: url({base_dir}/assets/tree_chevron_down.svg);
+            image: url("{base_dir}/assets/tree_chevron_down.svg");
         }}
         QTreeView::branch:has-children:hover:closed,
         QTreeView::branch:hover:closed:has-children:has-siblings,
         QTreeView::branch:hover:closed:has-children:!has-siblings {{
-            image: url({base_dir}/assets/tree_chevron_right_hover.svg);
+            image: url("{base_dir}/assets/tree_chevron_right_hover.svg");
         }}
         QTreeView::branch:has-children:hover:open,
         QTreeView::branch:hover:open:has-children:has-siblings,
         QTreeView::branch:hover:open:has-children:!has-siblings {{
-            image: url({base_dir}/assets/tree_chevron_down_hover.svg);
+            image: url("{base_dir}/assets/tree_chevron_down_hover.svg");
         }}
 
 
@@ -454,11 +454,11 @@ def apply_theme(app, theme_name="dark"):
         }}
         QSpinBox::up-arrow {{
             width: 10px; height: 6px;
-            image: url({base_dir}/assets/up_arrow.svg);
+            image: url("{base_dir}/assets/up_arrow.svg");
         }}
         QSpinBox::down-arrow {{
             width: 10px; height: 6px;
-            image: url({base_dir}/assets/down_arrow.svg);
+            image: url("{base_dir}/assets/down_arrow.svg");
         }}
 
         /* ── Base button — tactile feedback ─────────────────────────────── */
@@ -686,7 +686,7 @@ def apply_theme(app, theme_name="dark"):
             padding: 6px 8px;
             font-size: 9pt;
             text-align: left;
-            qproperty-icon: url({base_dir}/assets/x-circle.svg);
+            qproperty-icon: url("{base_dir}/assets/x-circle.svg");
             qproperty-iconSize: 14px 14px;
         }}
         

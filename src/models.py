@@ -235,6 +235,8 @@ class WatchdogTreeModel(QAbstractItemModel):
             child_states = [item.child(row).checkState for row in range(item.childCount())]
             if item.explicitlyChecked:
                 state = Qt.CheckState.Checked
+            elif child_states and all(state == Qt.CheckState.Checked for state in child_states):
+                state = Qt.CheckState.Checked
             elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
                 state = Qt.CheckState.Unchecked
             else:
@@ -343,17 +345,29 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._reset()
 
+    def _sort_key(self, item_data, column):
+        if column == 4:
+            return item_data.get('size', 0) or 0
+        if column == 2:
+            return item_data.get('last_modified', 0) or 0
+        if column == 3:
+            ts = item_data.get('last_modified', 0) or 0
+            if not ts:
+                return float('inf')
+            return max(0.0, datetime.now().timestamp() - ts)
+        return None
+
     def lessThan(self, left, right):
         left_data = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
         right_data = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
         
         col = left.column()
-        # Sort by Size (column 4)
-        if col == 4:
-            return left_data.get('size', 0) < right_data.get('size', 0)
-        # Sort by Age / Last Modified (column 3 or 2)
-        if col in (2, 3):
-            return left_data.get('last_modified', 0) < right_data.get('last_modified', 0)
+        left_key = self._sort_key(left_data, col)
+        right_key = self._sort_key(right_data, col)
+        if left_key is not None and right_key is not None:
+            if left_key == right_key:
+                return (left_data.get('name', '') or '').lower() < (right_data.get('name', '') or '').lower()
+            return left_key < right_key
             
         return super().lessThan(left, right)
 

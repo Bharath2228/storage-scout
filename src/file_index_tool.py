@@ -177,7 +177,7 @@ class FileIndexTool:
             """
             SELECT path, is_folder, size, modified_time, name
             FROM file_index
-            WHERE parent_path = ?
+            WHERE parent_path = ? COLLATE NOCASE
             ORDER BY is_folder DESC, name ASC
             LIMIT ? OFFSET ?;
             """,
