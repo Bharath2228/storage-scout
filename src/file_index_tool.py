@@ -49,18 +49,41 @@ class FileIndexTool:
     def scan(
         self,
         root_folder: str,
-        inactive_years: int = 2,
+        inactive_months: int = 24,
+        inactive_years: int | None = None,
         batch_size: int = 1000,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         cancel_callback: Optional[Callable[[], bool]] = None,
     ) -> None:
         root_folder = str(Path(root_folder).resolve())
-        cutoff_timestamp = (datetime.now() - timedelta(days=365 * inactive_years)).timestamp()
+        if inactive_years is not None:
+            inactive_months = inactive_years * 12
+        cutoff_timestamp = (datetime.now() - timedelta(days=30 * inactive_months)).timestamp()
 
         stack = [root_folder]
         batch = []
         scanned_count = 0
         inserted_count = 0
+
+        try:
+            root_stat = os.stat(root_folder, follow_symlinks=False)
+            root_name = Path(root_folder).name or root_folder
+            batch.append(
+                (
+                    root_folder,
+                    root_folder,
+                    root_name,
+                    None,
+                    1,
+                    0,
+                    root_stat.st_mtime,
+                    "",
+                    1 if root_stat.st_mtime < cutoff_timestamp else 0,
+                )
+            )
+            scanned_count += 1
+        except (PermissionError, FileNotFoundError, OSError):
+            return
 
         while stack:
             if cancel_callback and cancel_callback():

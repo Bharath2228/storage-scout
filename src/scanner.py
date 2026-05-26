@@ -73,7 +73,7 @@ class ScannerThread(QThread):
 
         tool.scan(
             root_folder=start_path,
-            inactive_years=max(1, self.stale_months // 12),
+            inactive_months=self.stale_months,
             batch_size=1000,
             cancel_callback=cancel_cb,
             progress_callback=progress_cb

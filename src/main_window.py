@@ -29,6 +29,39 @@ EMPTY_FOLDER_SQL = (
 )
 
 
+def escape_sql_like(value):
+    return (
+        value
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+def descendant_like_patterns(path):
+    bases = {
+        str(path).rstrip("\\/"),
+        os.path.normpath(path).rstrip("\\/"),
+    }
+    patterns = []
+    for base in bases:
+        if not base:
+            continue
+        for separator in ("\\", "/"):
+            pattern = escape_sql_like(base + separator) + "%"
+            if pattern not in patterns:
+                patterns.append(pattern)
+    return patterns
+
+
+def descendant_like_sql(path, column="path"):
+    patterns = descendant_like_patterns(path)
+    if not patterns:
+        return "1=0", []
+    sql = " OR ".join(f"{column} LIKE ? ESCAPE '\\'" for _ in patterns)
+    return sql, patterns
+
+
 def build_sort_order_clause(view_mode, sort_column, sort_desc):
     primary_dir = "DESC" if sort_desc else "ASC"
     age_dir = "ASC" if sort_desc else "DESC"
@@ -79,7 +112,11 @@ class DeleteThread(QThread):
                 try:
                     send2trash.send2trash(path)
                     tool.conn.execute("DELETE FROM file_index WHERE path = ?", (path,))
-                    tool.conn.execute("DELETE FROM file_index WHERE path LIKE ?", (path + '\\%',))
+                    descendant_sql, descendant_params = descendant_like_sql(path)
+                    tool.conn.execute(
+                        f"DELETE FROM file_index WHERE {descendant_sql}",
+                        descendant_params,
+                    )
                     tool.conn.commit()
                     deleted_count += 1
                 except Exception as exc:
@@ -270,41 +307,42 @@ class PageLoadThread(QThread):
             count_query += where_sql
 
         tool = FileIndexTool()
-        cursor = tool.conn.cursor()
-        cursor.execute(count_query, params)
-        total_matches = cursor.fetchone()[0]
+        try:
+            cursor = tool.conn.cursor()
+            cursor.execute(count_query, params)
+            total_matches = cursor.fetchone()[0]
 
-        order_by_sql = build_sort_order_clause(
-            view_mode,
-            self.options['sort_column'],
-            self.options['sort_desc'],
-        )
-        query += f" ORDER BY {order_by_sql} LIMIT {limit} OFFSET {offset}"
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
+            order_by_sql = build_sort_order_clause(
+                view_mode,
+                self.options['sort_column'],
+                self.options['sort_desc'],
+            )
+            query += f" ORDER BY {order_by_sql} LIMIT {limit} OFFSET {offset}"
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
 
-        fetched_paths = {row[0] for row in rows}
-        missing_parents = set()
-        for row in rows:
-            parent_path = row[5]
-            while parent_path and parent_path not in fetched_paths and parent_path not in missing_parents:
-                missing_parents.add(parent_path)
-                parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
+            fetched_paths = {row[0] for row in rows}
+            missing_parents = set()
+            for row in rows:
+                parent_path = row[5]
+                while parent_path and parent_path not in fetched_paths and parent_path not in missing_parents:
+                    missing_parents.add(parent_path)
+                    parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
 
-        original_fetched_paths = {row[0] for row in rows}
+            original_fetched_paths = {row[0] for row in rows}
 
-        if missing_parents and view_mode == 'Tree':
-            parents_list = list(missing_parents)
-            for index in range(0, len(parents_list), 900):
-                batch = parents_list[index:index + 900]
-                placeholders = ','.join('?' * len(batch))
-                cursor.execute(
-                    f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path IN ({placeholders})",
-                    batch,
-                )
-                rows.extend(cursor.fetchall())
-
-        tool.close()
+            if missing_parents and view_mode == 'Tree':
+                parents_list = list(missing_parents)
+                for index in range(0, len(parents_list), 900):
+                    batch = parents_list[index:index + 900]
+                    placeholders = ','.join('?' * len(batch))
+                    cursor.execute(
+                        f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path IN ({placeholders})",
+                        batch,
+                    )
+                    rows.extend(cursor.fetchall())
+        finally:
+            tool.close()
 
         root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
         nodes_by_path = {}
@@ -358,9 +396,9 @@ class PageLoadThread(QThread):
         }
 
 
-# ────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Delegates
-# ────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class TotalsThread(QThread):
     totals_ready = pyqtSignal(int, dict)
@@ -390,11 +428,27 @@ class TotalsThread(QThread):
                 total_size += size or 0
                 continue
 
-            normalized = os.path.normpath(path).rstrip("\\/")
-            like_pattern = normalized + os.sep + "%"
+            descendant_sql, descendant_params = descendant_like_sql(path)
             cursor.execute(
-                "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND path LIKE ?",
-                (like_pattern,),
+                f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({descendant_sql})",
+                descendant_params,
+            )
+            total_size += cursor.fetchone()[0] or 0
+        return total_size
+
+    def _sum_file_paths_size(self, cursor, paths):
+        unique_paths = list(dict.fromkeys(paths))
+        if not unique_paths:
+            return 0
+
+        total_size = 0
+        for start in range(0, len(unique_paths), 900):
+            batch = unique_paths[start:start + 900]
+            placeholders = ",".join("?" * len(batch))
+            cursor.execute(
+                f"SELECT COALESCE(SUM(size), 0) FROM file_index "
+                f"WHERE is_folder = 0 AND path IN ({placeholders})",
+                batch,
             )
             total_size += cursor.fetchone()[0] or 0
         return total_size
@@ -404,10 +458,10 @@ class TotalsThread(QThread):
             return 0
 
         normalized = os.path.normpath(root_path).rstrip("\\/")
-        like_pattern = normalized + os.sep + "%"
+        descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
-            "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR path LIKE ?)",
-            (normalized, like_pattern),
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR {descendant_sql})",
+            (normalized, *descendant_params),
         )
         return cursor.fetchone()[0] or 0
 
@@ -447,7 +501,7 @@ class TotalsThread(QThread):
             else:
                 folder_total = self._browse_folder_total_size(cursor, self.options['root_path'])
 
-            current_page_total = self._sum_paths_total_size(cursor, self.options['current_page_paths'])
+            current_page_total = self._sum_file_paths_size(cursor, self.options['current_page_file_paths'])
             selected_total = self._sum_paths_total_size(cursor, self.options['selected_paths'])
         finally:
             tool.close()
@@ -536,7 +590,7 @@ class ActionDelegate(QStyledItemDelegate):
 
             painter.setFont(f)
             painter.setPen(QColor("#ef4444"))
-            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "✕ Queued")
+            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "X Queued")
         else:
             # Modern Small Outline Button for "Open"
             bg = QColor("#eff6ff") if is_hovered else QColor("transparent")
@@ -550,9 +604,9 @@ class ActionDelegate(QStyledItemDelegate):
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
-# ────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Filter Panel (standalone widget)
-# ────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class FilterPanel(QFrame):
     DEFAULT_STALE_MONTHS = 3
@@ -571,7 +625,7 @@ class FilterPanel(QFrame):
         outer.setContentsMargins(0, 16, 0, 16)
         outer.setSpacing(4)
 
-        # ── Section 1: Display Mode ──────────────────────────────────────────
+        # Section 1: Display Mode
         display_section = QWidget()
         display_section.setObjectName("displayModeSection")
         display_layout = QVBoxLayout(display_section)
@@ -597,7 +651,7 @@ class FilterPanel(QFrame):
         outer.addWidget(display_section)
         outer.addWidget(self._hline())
 
-        # ── Section 1.5: View Mode ───────────────────────────────────────────
+        # Section 1.5: View Mode
         view_section = QWidget()
         view_section.setObjectName("viewModeSection")
         view_layout = QVBoxLayout(view_section)
@@ -624,11 +678,11 @@ class FilterPanel(QFrame):
 
 
 
-        # ── Section 2: Date Range ────────────────────────────────────────────
+        # Section 2: Date Range
         
         
 
-        # ── Section 3: Stale Threshold ───────────────────────────────────────
+        # Section 3: Stale Threshold
         age_section = QWidget()
         age_section.setObjectName("ageThresholdSection")
         age_outer_layout = QVBoxLayout(age_section)
@@ -691,13 +745,13 @@ class FilterPanel(QFrame):
         self._update_age_label(self.slider.value())
         outer.addStretch()
 
-        # ── Section 4: Actions ───────────────────────────────────────────────
+        # Section 4: Actions
         action_box = QWidget()
         action_layout = QVBoxLayout(action_box)
         action_layout.setContentsMargins(16, 16, 16, 16)
         action_layout.setSpacing(10)
         
-        self.btn_reset = QPushButton("↺  Reset all filters")
+        self.btn_reset = QPushButton("Reset all filters")
         self.btn_reset.setObjectName("resetFilters")
 
         self.btn_reset.setToolTip("Reset all filters to their default values")
@@ -752,7 +806,7 @@ class FilterPanel(QFrame):
         v = self.age_input.value()
         if v == self.AGE_FILTER_DISABLED:
             return None
-        return v * 30 * 24 * 3600  # months → seconds (approximate)
+        return v * 30 * 24 * 3600  # months to seconds (approximate)
 
     def get_stale_months_for_scan(self):
         value = self.age_input.value()
@@ -793,14 +847,14 @@ class FilterPanel(QFrame):
         return line
 
 
-# ────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Main Window
-# ────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("IBMS Folder Watchdog — Exchange Drive Scanner")
+        self.setWindowTitle("IBMS Folder Watchdog - Exchange Drive Scanner")
         self.resize(1200, 720)
 
         self.scanner_thread = None
@@ -846,9 +900,9 @@ class MainWindow(QMainWindow):
         self.tree.header().sectionClicked.connect(self._on_header_sort_clicked)
         self._apply_sort_indicator()
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # UI
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _build_ui(self):
         root = QWidget()
@@ -857,7 +911,7 @@ class MainWindow(QMainWindow):
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
 
-        # ── Top bar ───────────────────────────────────────────────────────────
+        # Top bar
         topbar = QWidget()
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
@@ -872,13 +926,13 @@ class MainWindow(QMainWindow):
         self.txt_path = QLineEdit()
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.txt_path.setMinimumWidth(240)
-        self.txt_path.setPlaceholderText("Enter or browse a folder path…")
+        self.txt_path.setPlaceholderText("Enter or browse a folder path...")
         
         # Add folder icon to the left of the path input
         path_icon = QIcon.fromTheme("folder-open", QIcon.fromTheme("folder"))
         self.txt_path.addAction(path_icon, QLineEdit.ActionPosition.LeadingPosition)
 
-        btn_browse = QPushButton("📂  Browse")
+        btn_browse = QPushButton("Browse")
         btn_browse.setObjectName("primaryBtn")
         btn_browse.setToolTip("Browse folder")
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -886,7 +940,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.txt_path)
         tb.addWidget(btn_browse)
 
-        self.btn_rescan = QPushButton("⟳  Re-scan")
+        self.btn_rescan = QPushButton("Re-scan")
         self.btn_rescan.setObjectName("primaryBtn")
         self.btn_rescan.setToolTip("Start scanning the selected folder path")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -895,7 +949,7 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(self._vbar())
 
-        self.btn_filter = QPushButton("⚙  Filters")
+        self.btn_filter = QPushButton("Filters")
         self.btn_filter.setObjectName("ghostBtn")
         self.btn_filter.setCheckable(True)
         self.btn_filter.setToolTip("Toggle filter sidebar (Alt+F)")
@@ -910,18 +964,18 @@ class MainWindow(QMainWindow):
         self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_expand.clicked.connect(self._toggle_expand)
 
-        # ── Push Export + Delete to the far right ──────────────────────────
+        # Push Export + Delete to the far right
         tb.addStretch()
         tb.addWidget(self._vbar())
 
-        btn_export = QPushButton("📊  Export CSV")
+        btn_export = QPushButton("Export CSV")
         btn_export.setObjectName("primaryBtn")
         btn_export.setToolTip("Export the current view to CSV")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.clicked.connect(self._export_csv)
         tb.addWidget(btn_export)
 
-        self.btn_delete = QPushButton("🗑  Delete Selected")
+        self.btn_delete = QPushButton("Delete Selected")
         self.btn_delete.setObjectName("deleteBtn")
         self.btn_delete.setToolTip("Permanently delete selected items")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -931,12 +985,12 @@ class MainWindow(QMainWindow):
 
         vbox.addWidget(topbar)
 
-        # ── Main Content Area (Sidebar + Content) ──────────────────────────────
+        # Main Content Area (Sidebar + Content)
         main_area = QHBoxLayout()
         main_area.setContentsMargins(0, 0, 0, 0)
         main_area.setSpacing(0)
 
-        # ── Left Sidebar (Filters) ───────────────────────────────────────────
+        # Left Sidebar (Filters)
         self.fp = FilterPanel()
         self.fp.btn_close.clicked.connect(self._toggle_filters)
         self.fp.btn_reset.clicked.connect(self._reset_filters)
@@ -955,14 +1009,14 @@ class MainWindow(QMainWindow):
         self._apply_default_browse_preset(apply_now=False)
         main_area.addWidget(self.fp)
 
-        # ── Right Content Area ────────────────────────────────────────────────
+        # Right Content Area
         self.right_content = QWidget()
         self.right_content.setObjectName("contentArea")
         right_v = QVBoxLayout(self.right_content)
         right_v.setContentsMargins(24, 24, 24, 24)
         right_v.setSpacing(16)
 
-        # ── Controls row (above tree): expand / select all) ────────────────
+        # Controls row (above tree): expand / select all
         self.controls_bar = QWidget()
         controls_layout = QHBoxLayout(self.controls_bar)
         controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -1013,7 +1067,7 @@ class MainWindow(QMainWindow):
         self.controls_bar.setVisible(False)
         right_v.addWidget(self.controls_bar)
 
-        # ── Empty state + Tree wrapped in a stacked widget ───────────────────
+        # Empty state + Tree wrapped in a stacked widget
         self.content_stack = QStackedWidget()
 
         # Page 0: Empty state
@@ -1023,28 +1077,23 @@ class MainWindow(QMainWindow):
         ep_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ep_layout.setSpacing(16)
 
-        icon_lbl = QLabel("📁")
-        icon_lbl.setObjectName("emptyIcon")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        title_lbl = QLabel("READY TO SCAN")
+        title_lbl = QLabel("Choose a folder to scan")
         title_lbl.setObjectName("emptyTitle")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        sub_lbl = QLabel("Select a folder above to analyze its contents.\nInactive and empty folders will be highlighted automatically.")
+        sub_lbl = QLabel("Find old files, empty folders, videos, and large cleanup targets in one place.")
         sub_lbl.setObjectName("emptySub")
         sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub_lbl.setWordWrap(True)
         sub_lbl.setMaximumWidth(420)
 
-        btn_browse_cta = QPushButton("📂  Browse folder...")
+        btn_browse_cta = QPushButton("Browse folder...")
         btn_browse_cta.setObjectName("primaryBtn")
         btn_browse_cta.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse_cta.setFixedWidth(180)
         btn_browse_cta.clicked.connect(self._browse)
 
         ep_layout.addStretch()
-        ep_layout.addWidget(icon_lbl)
         ep_layout.addWidget(title_lbl)
         ep_layout.addWidget(sub_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
         ep_layout.addSpacing(8)
@@ -1089,7 +1138,7 @@ class MainWindow(QMainWindow):
         nr_layout = QVBoxLayout(no_results_page)
         nr_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         nr_layout.setSpacing(14)
-        nr_icon = QLabel("🔍")
+        nr_icon = QLabel("[Search]")
         nr_icon.setObjectName("emptyIcon")
         nr_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         nr_title = QLabel("No matching items")
@@ -1100,7 +1149,7 @@ class MainWindow(QMainWindow):
         self.nr_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.nr_sub.setWordWrap(True)
         self.nr_sub.setMaximumWidth(400)
-        btn_reset_nr = QPushButton("↺  Reset filters")
+        btn_reset_nr = QPushButton("Reset filters")
         btn_reset_nr.setObjectName("primaryBtn")
         btn_reset_nr.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_reset_nr.setFixedWidth(160)
@@ -1117,14 +1166,9 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.tree)       # index 1
         self.content_stack.addWidget(no_results_page) # index 2
 
-        right_v.addWidget(self.content_stack)
-
-
-        self.content_stack.addWidget(self.tree)        # index 1
-        self.content_stack.addWidget(no_results_page)  # index 2
         self.content_stack.setCurrentIndex(0)
 
-        # ── Wrap content_stack in container so we can overlay the floating button ─
+        # Wrap content_stack in container so we can overlay the floating button
         self.tree_container = QWidget()
         self.tree_container.setObjectName("tableCard")
         tc_layout = QVBoxLayout(self.tree_container)
@@ -1134,7 +1178,7 @@ class MainWindow(QMainWindow):
 
 
         # Floating scroll-to-top button (child of tree_container for z-order)
-        self.btn_scroll_top = QPushButton("↑")
+        self.btn_scroll_top = QPushButton("^")
         self.btn_scroll_top.setObjectName("scrollTopBtn")
         self.btn_scroll_top.setParent(self.tree_container)
         self.btn_scroll_top.setFixedSize(38, 38)
@@ -1154,14 +1198,14 @@ class MainWindow(QMainWindow):
 
         vbox.addLayout(main_area, 1)
 
-        # ── Status bar ────────────────────────────────────────────────────────
+        # Status bar
         sb = QWidget()
         sb.setObjectName("statusbar")
         sb.setFixedHeight(36)
         sbl = QHBoxLayout(sb)
         sbl.setContentsMargins(12, 0, 12, 0)
         sbl.setSpacing(12)
-        self.lbl_status = QLabel("Ready — select a folder and click Re-scan")
+        self.lbl_status = QLabel("Ready - select a folder and click Re-scan")
         self.lbl_status.setObjectName("statusMessage")
 
         sbl.addWidget(self.lbl_status)
@@ -1170,9 +1214,9 @@ class MainWindow(QMainWindow):
         self.chip_empty = self._chip("Empty: 0", "chipEmpty")
         self.chip_inactive_folders = self._chip("Inactive folders: 0", "chipInactive")
         self.chip_inactive_files = self._chip("Inactive files: 0", "chipInactive")
-        self.chip_browse_size = self._chip("Folder total: —", "chipSpace")
-        self.chip_page_size = self._chip("Current page: —", "chipSpace")
-        self.chip_selected_size = self._chip("Selected total: —", "chipSpace")
+        self.chip_browse_size = self._chip("Folder total: --", "chipSpace")
+        self.chip_page_size = self._chip("Current page: --", "chipSpace")
+        self.chip_selected_size = self._chip("Selected total: --", "chipSpace")
         
         sbl.addWidget(self._sep())
         sbl.addWidget(self.chip_empty)
@@ -1188,10 +1232,10 @@ class MainWindow(QMainWindow):
         sbl.addWidget(self.chip_selected_size)
         vbox.addWidget(sb)
 
-        # Do NOT auto-start scan — let the user enter a path first
+        # Do NOT auto-start scan - let the user enter a path first
 
     def _sep(self):
-        l = QLabel("•")
+        l = QLabel("-")
         l.setObjectName("statusSeparator")
         return l
 
@@ -1249,9 +1293,9 @@ class MainWindow(QMainWindow):
                 self._reposition_scroll_top_btn()
         return super().eventFilter(obj, event)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Filter panel
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _toggle_filters(self):
         from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
@@ -1354,7 +1398,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'btn_expand'):
             blocker = QSignalBlocker(self.btn_expand)
             self.btn_expand.setChecked(expanded)
-            self.btn_expand.setText("⬍  Collapse All" if expanded else "⬍  Expand All")
+            self.btn_expand.setText("Collapse All" if expanded else "Expand All")
             self.btn_expand.setEnabled(self._has_visible_rows())
             del blocker
 
@@ -1403,7 +1447,7 @@ class MainWindow(QMainWindow):
         self.btn_delete.setEnabled(False)
 
     def _on_filter_changed(self):
-        # User manually changed a filter control — clear selections and apply
+        # User manually changed a filter control - clear selections and apply
         self._discard_current_page_selection()
         self._apply_filters()
 
@@ -1428,7 +1472,7 @@ class MainWindow(QMainWindow):
             return False
         return os.path.splitext(item_data.get('name', ''))[1].lower() in VIDEO_EXTENSIONS
 
-    def _collect_bulk_target_indices(self, status=None, videos_only=False, include_context=True):
+    def _collect_bulk_target_indices(self, status=None, videos_only=False, include_context=False):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
             return []
 
@@ -1538,25 +1582,42 @@ class MainWindow(QMainWindow):
         from src.file_index_tool import FileIndexTool
         where_sql, params = self._build_bulk_where(status=status, videos_only=videos_only)
         tool = FileIndexTool()
-        cursor = tool.conn.cursor()
-        cursor.execute(
-            (
-                "SELECT COUNT(*), "
-                "SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END) "
-                "FROM file_index"
-            ) + where_sql,
-            params,
-        )
-        total, folders, files = cursor.fetchone()
-        tool.close()
+        try:
+            cursor = tool.conn.cursor()
+            cursor.execute(
+                (
+                    "SELECT COUNT(*), "
+                    "SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), "
+                    "SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END) "
+                    "FROM file_index"
+                ) + where_sql,
+                params,
+            )
+            total, folders, files = cursor.fetchone()
+        finally:
+            tool.close()
         return total or 0, folders or 0, files or 0, where_sql, params
+
+    def _bulk_folder_delete_mode(self, status=None, videos_only=False):
+        if videos_only:
+            return 'none'
+        if status == 'Empty' or self.fp.rb_empty.isChecked():
+            return 'all'
+        return 'empty_only'
 
     def _offer_all_pages_selection(self, label, current_page_count, status=None, videos_only=False):
         total, folders, files, where_sql, params = self._bulk_count(status=status, videos_only=videos_only)
         if total <= current_page_count:
             self.bulk_delete_scope = None
             return
+
+        folder_delete_mode = self._bulk_folder_delete_mode(status=status, videos_only=videos_only)
+        safety_note = ""
+        if folder_delete_mode == 'empty_only' and folders:
+            safety_note = (
+                "\n\nSafety: non-empty matching folders will not be deleted in all-pages mode "
+                "because they may contain files that do not match the current filter."
+            )
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Question)
@@ -1568,6 +1629,7 @@ class MainWindow(QMainWindow):
             f"Folders: {folders}\n"
             f"Files: {files}\n\n"
             "Choose whether Delete Selected should apply only to this page or to every matching item."
+            f"{safety_note}"
         )
         btn_current = msg.addButton("Current page only", QMessageBox.ButtonRole.RejectRole)
         btn_all = msg.addButton(f"All {total} matching", QMessageBox.ButtonRole.AcceptRole)
@@ -1582,6 +1644,7 @@ class MainWindow(QMainWindow):
                 'files': files,
                 'where_sql': where_sql,
                 'params': params,
+                'folder_delete_mode': folder_delete_mode,
             }
         else:
             self.bulk_delete_scope = None
@@ -1736,20 +1799,35 @@ class MainWindow(QMainWindow):
 
         return target_paths, total_folders, total_files
 
-    def _current_page_target_paths(self):
+    def _current_page_file_paths(self):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
             return []
 
-        indices = self._collect_bulk_target_indices(
-            videos_only=self._display_mode() == 'Videos',
-            include_context=False,
-        )
         paths = []
-        for index in indices:
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-            if item_data and item_data.get('path'):
-                paths.append(item_data['path'])
-        return self._prune_paths(paths)
+        exact_only = self.proxy_model.has_active_filters()
+
+        def walk(parent=QModelIndex()):
+            for row in range(self.proxy_model.rowCount(parent)):
+                proxy_index = self.proxy_model.index(row, 0, parent)
+                source_index = self.proxy_model.mapToSource(proxy_index)
+                item_data = self.tree_model.data(source_index, Qt.ItemDataRole.UserRole)
+                if item_data and item_data.get('path'):
+                    is_page_result = item_data.get(
+                        '_is_page_result',
+                        not item_data.get('_is_context_fetched', False),
+                    )
+                    is_exact_match = self.proxy_model.matches_source_index(source_index)
+                    if (
+                        is_page_result
+                        and not item_data.get('is_dir', False)
+                        and (not exact_only or is_exact_match)
+                    ):
+                        paths.append(item_data['path'])
+                if self.proxy_model.hasChildren(proxy_index):
+                    walk(proxy_index)
+
+        walk()
+        return list(dict.fromkeys(paths))
 
     def _path_subtree_size(self, cursor, path):
         cursor.execute("SELECT is_folder, size FROM file_index WHERE path = ?", (path,))
@@ -1761,11 +1839,10 @@ class MainWindow(QMainWindow):
         if not is_folder:
             return size or 0
 
-        normalized = os.path.normpath(path).rstrip("\\/")
-        like_pattern = normalized + os.sep + "%"
+        descendant_sql, descendant_params = descendant_like_sql(path)
         cursor.execute(
-            "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND path LIKE ?",
-            (like_pattern,),
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({descendant_sql})",
+            descendant_params,
         )
         return cursor.fetchone()[0] or 0
 
@@ -1792,10 +1869,10 @@ class MainWindow(QMainWindow):
             return 0
 
         normalized = os.path.normpath(root_path).rstrip("\\/")
-        like_pattern = normalized + os.sep + "%"
+        descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
-            "SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR path LIKE ?)",
-            (normalized, like_pattern),
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND (path = ? OR {descendant_sql})",
+            (normalized, *descendant_params),
         )
         return cursor.fetchone()[0] or 0
 
@@ -1832,9 +1909,9 @@ class MainWindow(QMainWindow):
     def _select_empty(self):
         self._select_by_status('Empty')
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Scan
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _reset_view(self):
         """Clear all displayed data and return to the empty/welcome page."""
@@ -1861,14 +1938,14 @@ class MainWindow(QMainWindow):
         self.chip_empty.setText("Empty: 0")
         self.chip_inactive_folders.setText("Inactive folders: 0")
         self.chip_inactive_files.setText("Inactive files: 0")
-        self.chip_browse_size.setText("Folder total: —")
-        self.chip_page_size.setText("Current page: —")
-        self.chip_selected_size.setText("Selected total: —")
+        self.chip_browse_size.setText("Folder total: --")
+        self.chip_page_size.setText("Current page: --")
+        self.chip_selected_size.setText("Selected total: --")
 
         # Hide controls, show empty page
         self.controls_bar.setVisible(False)
         self.content_stack.setCurrentIndex(0)
-        self.lbl_status.setText("Ready — select a folder and click Re-scan")
+        self.lbl_status.setText("Ready - select a folder and click Re-scan")
 
     def _browse(self):
         # Use native Windows Explorer dialog
@@ -1893,7 +1970,7 @@ class MainWindow(QMainWindow):
         # If currently scanning, this button acts as a Stop button
         if self.scanner_thread and self.scanner_thread.isRunning():
             self.scanner_thread.cancel()
-            self.lbl_status.setText("Stopping scan…")
+            self.lbl_status.setText("Stopping scan...")
             self.btn_rescan.setEnabled(False)
             return
 
@@ -1904,12 +1981,12 @@ class MainWindow(QMainWindow):
         
         # Normalize slashes but preserve UNC prefix (\\server\share)
         if path.startswith("\\\\") or path.startswith("//"):
-            # UNC path — keep as-is but normalize forward slashes to back
+            # UNC path - keep as-is but normalize forward slashes to back
             path = path.replace("/", "\\")
         else:
             path = os.path.normpath(path)
 
-        # Probe the path — use scandir which works reliably for both local and UNC
+        # Probe the path - use scandir which works reliably for both local and UNC
         try:
             with os.scandir(path):
                 pass   # path is accessible
@@ -1920,8 +1997,8 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"Path not found or not accessible: {path}")
             return
         
-        self.lbl_status.setText("Scanning…")
-        self.btn_rescan.setText("⏹  Stop")
+        self.lbl_status.setText("Scanning...")
+        self.btn_rescan.setText("Stop")
         self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
         self._set_size_totals_pending(browse=True, page=True, selected=True)
 
@@ -1941,8 +2018,14 @@ class MainWindow(QMainWindow):
         self.scanner_thread.start()
 
     def _on_progress(self, path):
-        s = ("…" + path[-72:]) if len(path) > 75 else path
+        s = ("..." + path[-72:]) if len(path) > 75 else path
         self.lbl_status.setText(f"Scanning: {s}")
+
+    def _set_match_status(self, total_matches):
+        if self.is_scanning:
+            self.lbl_status.setText(f"Scanning... Found {total_matches} matching items")
+        else:
+            self.lbl_status.setText(f"Found {total_matches} matching items")
 
     def _on_first_batch_ready(self):
         if self.current_page == 0 and self.content_stack.currentIndex() == 0:
@@ -1961,56 +2044,58 @@ class MainWindow(QMainWindow):
 
         from src.file_index_tool import FileIndexTool
         tool = FileIndexTool()
-        cursor = tool.conn.cursor()
+        try:
+            cursor = tool.conn.cursor()
 
-        # We need the same WHERE clause as _load_page
-        where_clauses = []
-        params = []
-        age_secs = self.fp.get_older_than_secs()
-        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
-        
-        # Determine status filter (simplified mirror of _load_page logic)
-        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked(): status_filter = None
-        elif self.fp.rb_empty.isChecked(): status_filter = 'Empty'
-        elif self.fp.rb_videos.isChecked(): status_filter = None
-        else: status_filter = 'Inactive'
+            # We need the same WHERE clause as _load_page
+            where_clauses = []
+            params = []
+            age_secs = self.fp.get_older_than_secs()
+            age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
 
-        if status_filter == 'Inactive':
-            if age_cutoff is not None:
-                where_clauses.append("modified_time <= ?")
-                params.append(age_cutoff)
-            else: where_clauses.append("1=1")
-        elif status_filter == 'Empty':
-            if age_cutoff is not None:
-                where_clauses.append("modified_time <= ?")
-                params.append(age_cutoff)
-        elif status_filter == 'Active':
-            if age_cutoff is not None:
-                where_clauses.append("modified_time > ?")
-                params.append(age_cutoff)
-            else: where_clauses.append("1=0")
-        
-        if status_filter == 'Empty': where_clauses.append(EMPTY_FOLDER_SQL)
+            # Determine status filter (simplified mirror of _load_page logic)
+            if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked(): status_filter = None
+            elif self.fp.rb_empty.isChecked(): status_filter = 'Empty'
+            elif self.fp.rb_videos.isChecked(): status_filter = None
+            else: status_filter = 'Inactive'
 
-        if self.fp.rb_videos.isChecked():
-            placeholders = ','.join('?' * len(VIDEO_EXTENSIONS))
-            where_clauses.append("is_folder = 0")
-            where_clauses.append(f"extension IN ({placeholders})")
-            params.extend(VIDEO_EXTENSIONS)
-            if age_cutoff is not None:
-                where_clauses.append("modified_time <= ?")
-                params.append(age_cutoff)
+            if status_filter == 'Inactive':
+                if age_cutoff is not None:
+                    where_clauses.append("modified_time <= ?")
+                    params.append(age_cutoff)
+                else: where_clauses.append("1=1")
+            elif status_filter == 'Empty':
+                if age_cutoff is not None:
+                    where_clauses.append("modified_time <= ?")
+                    params.append(age_cutoff)
+            elif status_filter == 'Active':
+                if age_cutoff is not None:
+                    where_clauses.append("modified_time > ?")
+                    params.append(age_cutoff)
+                else: where_clauses.append("1=0")
 
-        view_mode = self.fp.get_view_mode()
-        if view_mode == 'Files':
-            where_clauses.append("is_folder = 0")
-        elif view_mode == 'Folders':
-            where_clauses.append("is_folder = 1")
+            if status_filter == 'Empty': where_clauses.append(EMPTY_FOLDER_SQL)
 
-        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
-        total_matches = cursor.fetchone()[0]
-        tool.close()
+            if self.fp.rb_videos.isChecked():
+                placeholders = ','.join('?' * len(VIDEO_EXTENSIONS))
+                where_clauses.append("is_folder = 0")
+                where_clauses.append(f"extension IN ({placeholders})")
+                params.extend(VIDEO_EXTENSIONS)
+                if age_cutoff is not None:
+                    where_clauses.append("modified_time <= ?")
+                    params.append(age_cutoff)
+
+            view_mode = self.fp.get_view_mode()
+            if view_mode == 'Files':
+                where_clauses.append("is_folder = 0")
+            elif view_mode == 'Folders':
+                where_clauses.append("is_folder = 1")
+
+            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
+            total_matches = cursor.fetchone()[0]
+        finally:
+            tool.close()
 
         # Update UI controls
         limit = 2000
@@ -2025,11 +2110,11 @@ class MainWindow(QMainWindow):
             self.btn_prev_page.setEnabled(self.current_page > 0)
             self.btn_next_page.setEnabled(offset + limit < total_matches)
         
-        self.lbl_status.setText(f"Scanning... Found {total_matches} matching items")
+        self._set_match_status(total_matches)
 
     def _on_scan_done(self):
         self.btn_rescan.setEnabled(True)
-        self.btn_rescan.setText("⟳  Re-scan")
+        self.btn_rescan.setText("Re-scan")
         self.btn_rescan.setStyleSheet("") # reset style
         self.is_scanning = False
         
@@ -2165,7 +2250,7 @@ class MainWindow(QMainWindow):
             'is_scanning': self.is_scanning,
             'root_path': root_path,
             'cached_folder_total': cached_folder_total,
-            'current_page_paths': self._current_page_target_paths(),
+            'current_page_file_paths': self._current_page_file_paths(),
             'selected_paths': self._checked_delete_paths(),
         }
 
@@ -2212,212 +2297,6 @@ class MainWindow(QMainWindow):
         self.page_load_thread.finished.connect(lambda: self._cleanup_page_thread(self.sender()))
         self.page_load_thread.start()
         return
-
-        limit = 2000
-        offset = self.current_page * limit
-        
-        from src.file_index_tool import FileIndexTool
-        tool = FileIndexTool()
-        cursor = tool.conn.cursor()
-        
-        # Build SQL query based on active filters
-        query = "SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index"
-        count_query = "SELECT COUNT(*) FROM file_index"
-        
-        where_clauses = []
-        params = []
-        
-        age_secs = self.fp.get_older_than_secs()
-        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
-        
-        if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
-            status_filter = None
-        elif self.fp.rb_empty.isChecked():
-            status_filter = 'Empty'
-        elif self.fp.rb_videos.isChecked():
-            status_filter = None
-        else:
-            status_filter = 'Inactive'
-        
-        if status_filter == 'Inactive':
-            if age_cutoff is not None:
-                where_clauses.append("modified_time <= ?")
-                params.append(age_cutoff)
-            else:
-                where_clauses.append("1=1") # Everything is inactive if age limit is 0
-        elif status_filter == 'Empty':
-            if age_cutoff is not None:
-                where_clauses.append("modified_time <= ?")
-                params.append(age_cutoff)
-        elif status_filter == 'Active':
-            if age_cutoff is not None:
-                where_clauses.append("modified_time > ?")
-                params.append(age_cutoff)
-            else:
-                where_clauses.append("1=0") # Nothing is active
-                
-        if status_filter == 'Empty':
-            where_clauses.append(EMPTY_FOLDER_SQL)
-
-        if self.fp.rb_videos.isChecked():
-            placeholders = ','.join('?' * len(VIDEO_EXTENSIONS))
-            where_clauses.append("is_folder = 0")
-            where_clauses.append(f"extension IN ({placeholders})")
-            params.extend(VIDEO_EXTENSIONS)
-            if age_cutoff is not None:
-                where_clauses.append("modified_time <= ?")
-                params.append(age_cutoff)
-            
-        view_mode = self.fp.get_view_mode()
-        if view_mode == 'Files':
-            where_clauses.append("is_folder = 0")
-        elif view_mode == 'Folders':
-            where_clauses.append("is_folder = 1")
-            
-        if where_clauses:
-            where_sql = " WHERE " + " AND ".join(where_clauses)
-            query += where_sql
-            count_query += where_sql
-            
-        # Get total matching rows count
-        cursor.execute(count_query, params)
-        total_matches = cursor.fetchone()[0]
-        
-        order_by_sql = build_sort_order_clause(
-            view_mode,
-            self.sort_column,
-            self.sort_order == Qt.SortOrder.DescendingOrder,
-        )
-        query += f" ORDER BY {order_by_sql} LIMIT {limit} OFFSET {offset}"
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        
-        # --- Restore Tree Context by fetching missing parents ---
-        fetched_paths = {r[0] for r in rows}
-        missing_parents = set()
-        
-        for r in rows:
-            p_path = r[5]
-            while p_path and p_path not in fetched_paths and p_path not in missing_parents:
-                missing_parents.add(p_path)
-                p_path = os.path.dirname(p_path) if '\\' in p_path or '/' in p_path else None
-                
-        # Build a set of paths that were originally fetched so we can mark others as context
-        original_fetched_paths = {r[0] for r in rows}
-        
-        if missing_parents and view_mode == 'Tree':
-            # Fetch parents in batches to avoid SQLite variable limits
-            parents_list = list(missing_parents)
-            for i in range(0, len(parents_list), 900):
-                batch = parents_list[i:i+900]
-                placeholders = ','.join('?' * len(batch))
-                cursor.execute(f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path IN ({placeholders})", batch)
-                rows.extend(cursor.fetchall())
-        
-        tool.close()
-        
-        root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
-        nodes_by_path = {}
-        
-        for path, name, is_folder, size, modified_time, parent_path in rows:
-            is_stale = False
-            if age_cutoff and modified_time <= age_cutoff:
-                is_stale = True
-            elif not age_cutoff:
-                is_stale = True
-                
-            status = 'Inactive' if is_stale else 'Active'
-            if status_filter == 'Empty' and is_folder and path in original_fetched_paths:
-                status = 'Empty'
-            
-            is_context = (path not in original_fetched_paths) if view_mode == 'Tree' else False
-            actual_parent = parent_path if view_mode == 'Tree' else None
-            display_location = self._relative_display_location(parent_path) if view_mode != 'Tree' else None
-
-            node = {
-                'name': name,
-                'path': path,
-                'is_dir': bool(is_folder),
-                'size': size if not is_folder else 0,
-                'last_modified': modified_time,
-                'status': status,
-                'children': [],
-                '_parent_path': actual_parent,
-                '_is_context_fetched': is_context,
-                '_is_page_result': path in original_fetched_paths,
-                'location': parent_path if view_mode != 'Tree' else None,
-                'display_location': display_location,
-            }
-            nodes_by_path[path] = node
-
-        for path, node in nodes_by_path.items():
-            parent_path = node.pop('_parent_path', None)
-            parent_node = nodes_by_path.get(parent_path)
-            if parent_node:
-                parent_node['children'].append(node)
-            else:
-                # If parent isn't in the current page, attach it to root
-                root_node['children'].append(node)
-            
-        if not rows and self.current_page > 0:
-            self.current_page -= 1
-            return
-            
-        if not rows and self.current_page == 0:
-            if self.is_scanning:
-                # Still scanning, just wait
-                pass
-            else:
-                self.content_stack.setCurrentIndex(2) # No results page
-                self.controls_bar.setVisible(False)
-            return
-
-        # The proxy model now correctly handles contextual filtering and UI status overrides
-        self.tree_model = WatchdogTreeModel(root_node)
-        self.tree_model.view_mode = view_mode
-        self.proxy_model.setSourceModel(self.tree_model)
-        self.tree.setModel(self.proxy_model)
-        
-        # Update pagination controls
-        has_multiple_pages = total_matches > limit
-        self.btn_prev_page.setVisible(has_multiple_pages)
-        self.btn_next_page.setVisible(has_multiple_pages)
-        self.lbl_page_info.setVisible(has_multiple_pages)
-        
-        if has_multiple_pages:
-            self.lbl_page_info.setText(f"{offset + 1}-{min(offset + limit, total_matches)} of {total_matches}")
-            self.btn_prev_page.setEnabled(self.current_page > 0)
-            self.btn_next_page.setEnabled(offset + limit < total_matches)
-        
-        self.content_stack.setCurrentIndex(1)  # show tree
-        self.controls_bar.setVisible(True)
-        
-        hdr = self.tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for i in range(1, 7):
-            hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-            
-        if view_mode == 'Tree':
-            self.tree.setColumnWidth(0, 420)
-            self.tree.setColumnWidth(1, 74)
-        else:
-            self.tree.setColumnWidth(0, 250)
-            self.tree.setColumnWidth(1, 400)
-        self.tree.setColumnWidth(2, 116)
-        self.tree.setColumnWidth(3, 70)
-        self.tree.setColumnWidth(4, 96)
-        self.tree.setColumnWidth(5, 108)
-        self.tree.setColumnWidth(6, 98)
-        
-        # Expand top level
-        self._set_expand_state(True)
-        
-        self.lbl_status.setText(f"Found {total_matches} matching items")
-        self._update_chips_sql()
-        self._refresh_selection_buttons()
-        
-        self.tree_model.dataChanged.connect(self._on_checked)
-        self.tree_model.layoutChanged.connect(self._on_checked)
 
     def _on_page_load_ready(self, request_id, result):
         if request_id != self.page_load_request_id:
@@ -2484,7 +2363,7 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(6, 98)
 
         self._set_expand_state(True)
-        self.lbl_status.setText(f"Found {total_matches} matching items")
+        self._set_match_status(total_matches)
         self._update_chips_sql()
         self._refresh_selection_buttons()
         self.tree_model.dataChanged.connect(self._on_checked)
@@ -2529,13 +2408,13 @@ class MainWindow(QMainWindow):
         if request_id != self.totals_request_id:
             return
 
-        self.chip_browse_size.setText("Folder total: —")
-        self.chip_page_size.setText("Current page: —")
-        self.chip_selected_size.setText("Selected total: —")
+        self.chip_browse_size.setText("Folder total: --")
+        self.chip_page_size.setText("Current page: --")
+        self.chip_selected_size.setText("Selected total: --")
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Selection count (debounced)
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _on_checked(self, tl=None, br=None, roles=None):
         if roles is None or Qt.ItemDataRole.CheckStateRole in roles:
@@ -2551,7 +2430,7 @@ class MainWindow(QMainWindow):
         if self.bulk_delete_scope:
             scope = self.bulk_delete_scope
             self.btn_delete.setText(
-                f"🗑  Delete Selected (All pages: {scope['total']} items)"
+                f"Delete Selected (All pages: {scope['total']} items)"
             )
             self.btn_delete.setEnabled(scope['total'] > 0)
             self._refresh_selection_buttons()
@@ -2560,16 +2439,16 @@ class MainWindow(QMainWindow):
         paths, folder_count, file_count = self._checked_delete_summary()
         total = len(paths)
         if total:
-            self.btn_delete.setText(f"🗑  Delete Selected (Folders: {folder_count}, Files: {file_count})  [Current Page]")
+            self.btn_delete.setText(f"Delete Selected (Folders: {folder_count}, Files: {file_count})  [Current Page]")
         else:
             self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(total > 0)
         self._refresh_selection_buttons()
         self._update_chips_sql()
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Tree interactions
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _item_data(self, proxy_index):
         if not self.tree_model:
@@ -2645,10 +2524,10 @@ class MainWindow(QMainWindow):
             QMenu::item:selected { background:#3b82f6; }
             QMenu::separator { background:#334155; height:1px; margin:4px 0; }
         """)
-        a_open   = menu.addAction("📂  Open Location")
-        a_copy   = menu.addAction("📋  Copy Path")
+        a_open   = menu.addAction("Open Location")
+        a_copy   = menu.addAction("Copy Path")
         menu.addSeparator()
-        a_delete = menu.addAction("🗑  Delete  (Recycle Bin)")
+        a_delete = menu.addAction("Delete (Recycle Bin)")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen == a_open:
             self._open(d['path'], d.get('is_dir', True))
@@ -2669,17 +2548,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Delete
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _remove_path_from_db(self, path):
         from src.file_index_tool import FileIndexTool
         tool = FileIndexTool()
-        tool.conn.execute("DELETE FROM file_index WHERE path = ?", (path,))
-        tool.conn.execute("DELETE FROM file_index WHERE path LIKE ?", (path + '\\%',))
-        tool.conn.commit()
-        tool.close()
+        try:
+            tool.conn.execute("DELETE FROM file_index WHERE path = ?", (path,))
+            descendant_sql, descendant_params = descendant_like_sql(path)
+            tool.conn.execute(
+                f"DELETE FROM file_index WHERE {descendant_sql}",
+                descendant_params,
+            )
+            tool.conn.commit()
+        finally:
+            tool.close()
 
     def _delete_one(self, path):
         r = QMessageBox.question(self, "Confirm Delete",
@@ -2696,12 +2581,29 @@ class MainWindow(QMainWindow):
         from src.file_index_tool import FileIndexTool
         tool = FileIndexTool()
         cursor = tool.conn.cursor()
-        cursor.execute(
-            "SELECT path FROM file_index" + self.bulk_delete_scope['where_sql'],
-            self.bulk_delete_scope['params'],
-        )
-        paths = [row[0] for row in cursor.fetchall()]
-        tool.close()
+        try:
+            cursor.execute(
+                "SELECT path, is_folder FROM file_index" + self.bulk_delete_scope['where_sql'],
+                self.bulk_delete_scope['params'],
+            )
+            rows = cursor.fetchall()
+
+            paths = []
+            folder_delete_mode = self.bulk_delete_scope.get('folder_delete_mode', 'empty_only')
+            for path, is_folder in rows:
+                if not is_folder:
+                    paths.append(path)
+                elif folder_delete_mode == 'all':
+                    paths.append(path)
+                elif folder_delete_mode == 'empty_only':
+                    cursor.execute(
+                        "SELECT 1 FROM file_index WHERE parent_path = ? LIMIT 1",
+                        (path,),
+                    )
+                    if cursor.fetchone() is None:
+                        paths.append(path)
+        finally:
+            tool.close()
         return self._prune_paths(paths)
 
     def _short_path_for_progress(self, path):
@@ -2805,13 +2707,13 @@ class MainWindow(QMainWindow):
         if r == QMessageBox.StandardButton.Yes:
             self._start_delete(paths)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Export CSV
-    # ──────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     def _export_csv(self):
         if not self.proxy_model or not self.proxy_model.sourceModel():
-            QMessageBox.information(self, "Export", "Nothing to export — run a scan first.")
+            QMessageBox.information(self, "Export", "Nothing to export - run a scan first.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save Report", "", "CSV Files (*.csv)")
         if not path:
