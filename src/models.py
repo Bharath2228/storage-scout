@@ -209,7 +209,7 @@ class WatchdogTreeModel(QAbstractItemModel):
 
         self.layoutAboutToBeChanged.emit()
         try:
-            ancestors = []
+            ancestors = {}
             for index in indices:
                 if not index.isValid():
                     continue
@@ -221,10 +221,10 @@ class WatchdogTreeModel(QAbstractItemModel):
 
                 parent = index.parent()
                 while parent.isValid():
-                    ancestors.append(parent)
+                    ancestors[id(parent.internalPointer())] = parent
                     parent = parent.parent()
 
-            for index in ancestors:
+            for index in ancestors.values():
                 self._update_ancestor_states_for_direct_bulk(index)
         finally:
             self.layoutChanged.emit()
