@@ -2,6 +2,7 @@ import os
 import csv
 import subprocess
 import send2trash
+import time
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
-from .models import WatchdogTreeModel, WatchdogFilterProxyModel
+from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
 from .scanner import ScannerThread
 
 VIDEO_EXTENSIONS = (
@@ -89,7 +90,7 @@ def build_sort_order_clause(view_mode, sort_column, sort_desc):
 
 class DeleteThread(QThread):
     delete_progress = pyqtSignal(int, int, str)
-    delete_finished = pyqtSignal(int, list, bool)
+    delete_finished = pyqtSignal(int, list, bool, list)
 
     def __init__(self, paths, parent=None):
         super().__init__(parent)
@@ -104,6 +105,7 @@ class DeleteThread(QThread):
 
         deleted_count = 0
         errors = []
+        deleted_paths = []
         total = len(self.paths)
         tool = FileIndexTool()
 
@@ -126,6 +128,7 @@ class DeleteThread(QThread):
                     )
                     tool.conn.commit()
                     deleted_count += 1
+                    deleted_paths.append(path)
                 except Exception as exc:
                     errors.append(f"{path}: {exc}")
 
@@ -133,7 +136,7 @@ class DeleteThread(QThread):
         finally:
             tool.close()
 
-        self.delete_finished.emit(deleted_count, errors, self.is_cancelled)
+        self.delete_finished.emit(deleted_count, errors, self.is_cancelled, deleted_paths)
 
 
 class DeleteProgressDialog(QDialog):
@@ -203,9 +206,9 @@ class DeleteProgressDialog(QDialog):
 
 
 class LoadingDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, title="Loading", detail="Working...", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Loading")
+        self.setWindowTitle(title)
         self.setModal(True)
         self.setFixedSize(360, 122)
         self.setObjectName("loadingDialog")
@@ -214,19 +217,254 @@ class LoadingDialog(QDialog):
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(10)
 
-        title = QLabel("Loading results")
+        title = QLabel(title)
         title.setObjectName("loadingTitle")
         layout.addWidget(title)
 
-        detail = QLabel("Applying filters and preparing the table...")
-        detail.setObjectName("loadingDetail")
-        layout.addWidget(detail)
+        detail_label = QLabel(detail)
+        detail_label.setObjectName("loadingDetail")
+        layout.addWidget(detail_label)
 
         bar = QProgressBar()
         bar.setRange(0, 0)
         bar.setTextVisible(False)
         bar.setObjectName("loadingBar")
         layout.addWidget(bar)
+
+
+class DeletePreviewThread(QThread):
+    preview_ready = pyqtSignal(dict)
+    preview_failed = pyqtSignal(str)
+
+    def __init__(self, paths=None, bulk_scope=None, parent=None):
+        super().__init__(parent)
+        self.paths = list(paths or [])
+        self.bulk_scope = dict(bulk_scope or {}) if bulk_scope else None
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def _path_key(self, path):
+        return os.path.normcase(os.path.normpath(path))
+
+    def _prune_paths(self, paths):
+        pruned_paths = []
+        selected_roots = []
+        for path in sorted(paths, key=lambda value: (len(os.path.normpath(value)), value.lower())):
+            normalized = os.path.normcase(os.path.normpath(path))
+            if any(
+                normalized == root or normalized.startswith(root + os.sep)
+                for root in selected_roots
+            ):
+                continue
+            selected_roots.append(normalized)
+            pruned_paths.append(path)
+        return pruned_paths
+
+    def _count_selected_path_contents(self, cursor, path):
+        cursor.execute(
+            f"SELECT is_folder FROM file_index WHERE {case_insensitive_path_sql()}",
+            (path,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return (1, 0) if os.path.isdir(path) else (0, 1)
+
+        is_folder = row[0]
+        if not is_folder:
+            return 0, 1
+
+        descendant_sql, descendant_params = descendant_like_sql(path)
+        cursor.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), 0)
+            FROM file_index
+            WHERE {case_insensitive_path_sql()} OR ({descendant_sql})
+            """,
+            (path, *descendant_params),
+        )
+        folders, files = cursor.fetchone()
+        return folders or 0, files or 0
+
+    def _path_subtree_size(self, cursor, path):
+        cursor.execute(
+            f"SELECT is_folder, size FROM file_index WHERE {case_insensitive_path_sql()}",
+            (path,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return 0
+
+        is_folder, size = row
+        if not is_folder:
+            return size or 0
+
+        descendant_sql, descendant_params = descendant_like_sql(path)
+        cursor.execute(
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({descendant_sql})",
+            descendant_params,
+        )
+        return cursor.fetchone()[0] or 0
+
+    def _summarize_paths(self, cursor, paths):
+        pruned_paths = self._prune_paths(paths)
+        folders = 0
+        files = 0
+        total_size = 0
+        for path in pruned_paths:
+            path_folders, path_files = self._count_selected_path_contents(cursor, path)
+            folders += path_folders
+            files += path_files
+            total_size += self._path_subtree_size(cursor, path)
+        return pruned_paths, folders, files, total_size
+
+    def _build_bulk_paths(self, cursor):
+        where_sql = self.bulk_scope.get('where_sql', '')
+        params = self.bulk_scope.get('params', [])
+        folder_delete_mode = self.bulk_scope.get('folder_delete_mode', 'empty_only')
+
+        cursor.execute(
+            "SELECT path, is_folder FROM file_index" + where_sql,
+            params,
+        )
+        rows = cursor.fetchall()
+
+        paths = []
+        for path, is_folder in rows:
+            if self.is_cancelled:
+                return []
+            if not is_folder:
+                paths.append(path)
+            elif folder_delete_mode == 'all':
+                paths.append(path)
+            elif folder_delete_mode == 'empty_only':
+                cursor.execute(
+                    "SELECT 1 FROM file_index WHERE parent_path = ? COLLATE NOCASE LIMIT 1",
+                    (path,),
+                )
+                if cursor.fetchone() is None:
+                    paths.append(path)
+        return self._prune_paths(paths)
+
+    def run(self):
+        from src.file_index_tool import FileIndexTool
+
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            if self.bulk_scope:
+                where_sql = self.bulk_scope.get('where_sql', '')
+                params = self.bulk_scope.get('params', [])
+                cursor.execute(
+                    (
+                        "SELECT COUNT(*), "
+                        "SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), "
+                        "SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END) "
+                        "FROM file_index"
+                    ) + where_sql,
+                    params,
+                )
+                total, folders, files = cursor.fetchone()
+                paths = self._build_bulk_paths(cursor)
+            else:
+                total = len(self.paths)
+                paths = self._prune_paths(self.paths)
+                folders = 0
+                files = 0
+
+            if self.is_cancelled:
+                return
+
+            if not self.bulk_scope:
+                paths, folders, files, total_size = self._summarize_paths(cursor, paths)
+            else:
+                _, folders, files, total_size = self._summarize_paths(cursor, paths)
+
+            self.preview_ready.emit({
+                'paths': paths,
+                'total': total or len(paths),
+                'folders': folders or 0,
+                'files': files or 0,
+                'size': total_size or 0,
+            })
+        except Exception as exc:
+            self.preview_failed.emit(str(exc))
+        finally:
+            tool.close()
+
+
+class DeletePreviewDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Delete preview")
+        self.setModal(True)
+        self.setFixedSize(520, 230)
+        self.setObjectName("deleteProgressDialog")
+        self.preview_paths = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        self.title_label = QLabel("Preparing delete preview")
+        self.title_label.setObjectName("deleteProgressTitle")
+        layout.addWidget(self.title_label)
+
+        self.detail_label = QLabel("Calculating selected items and size...")
+        self.detail_label.setObjectName("deleteProgressCount")
+        layout.addWidget(self.detail_label)
+
+        self.path_label = QLabel("Please wait while we gather the delete summary.")
+        self.path_label.setObjectName("deleteProgressPath")
+        self.path_label.setWordWrap(True)
+        self.path_label.setMinimumHeight(42)
+        layout.addWidget(self.path_label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setObjectName("deleteProgressBar")
+        layout.addWidget(self.progress)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("deleteProgressCancel")
+        self.cancel_button.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_button)
+        self.delete_button = QPushButton("Delete Selected")
+        self.delete_button.setObjectName("primaryBtn")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self.accept)
+        btn_row.addWidget(self.delete_button)
+        layout.addLayout(btn_row)
+
+    def apply_preview(self, payload):
+        self.preview_paths = payload.get('paths', [])
+        total = payload.get('total', len(self.preview_paths))
+        folders = payload.get('folders', 0)
+        files = payload.get('files', 0)
+        size = payload.get('size')
+        self.detail_label.setText(f"Delete operations: {total}")
+        self.path_label.setText(
+            f"Matched items: {total}\n"
+            f"Folders: {folders}\n"
+            f"Files: {files}\n"
+            f"Size: {'Calculating...' if size is None else ('0 B' if size == 0 else format_size(size))}"
+        )
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.delete_button.setEnabled(size is not None)
+
+    def show_error(self, message):
+        self.detail_label.setText("Could not calculate delete preview.")
+        self.path_label.setText(message)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.delete_button.setEnabled(False)
 
 
 class PageLoadThread(QThread):
@@ -269,6 +507,7 @@ class PageLoadThread(QThread):
 
         limit = self.options['limit']
         offset = self.options['offset']
+        paginated = self.options.get('paginated', True)
         view_mode = self.options['view_mode']
         status_filter = self.options['status_filter']
         age_cutoff = self.options['age_cutoff']
@@ -296,6 +535,9 @@ class PageLoadThread(QThread):
                 params.append(age_cutoff)
             else:
                 where_clauses.append("1=0")
+        elif age_cutoff is not None and not videos_only:
+            where_clauses.append("modified_time <= ?")
+            params.append(age_cutoff)
 
         if videos_only:
             placeholders = ','.join('?' * len(VIDEO_EXTENSIONS))
@@ -327,9 +569,17 @@ class PageLoadThread(QThread):
                 self.options['sort_column'],
                 self.options['sort_desc'],
             )
-            query += f" ORDER BY {order_by_sql} LIMIT {limit} OFFSET {offset}"
+            if view_mode == 'Tree':
+                order_by_sql = "rowid ASC"
+            query += f" ORDER BY {order_by_sql}"
+            if paginated:
+                query += f" LIMIT {limit} OFFSET {offset}"
             cursor.execute(query, params)
             rows = cursor.fetchall()
+            original_fetched_order = {
+                os.path.normcase(os.path.normpath(row[0])): index
+                for index, row in enumerate(rows)
+            }
 
             fetched_paths = {row[0] for row in rows}
             missing_parents = set()
@@ -340,6 +590,10 @@ class PageLoadThread(QThread):
                     parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
 
             original_fetched_paths = {row[0] for row in rows}
+            original_fetched_path_keys = {
+                os.path.normcase(os.path.normpath(path))
+                for path in original_fetched_paths
+            }
 
             if missing_parents and view_mode == 'Tree':
                 parents_list = list(missing_parents)
@@ -347,7 +601,7 @@ class PageLoadThread(QThread):
                     batch = parents_list[index:index + 900]
                     placeholders = ','.join('?' * len(batch))
                     cursor.execute(
-                        f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path IN ({placeholders})",
+                        f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path COLLATE NOCASE IN ({placeholders})",
                         batch,
                     )
                     rows.extend(cursor.fetchall())
@@ -365,10 +619,11 @@ class PageLoadThread(QThread):
                 is_stale = True
 
             status = 'Inactive' if is_stale else 'Active'
-            if status_filter == 'Empty' and is_folder and path in original_fetched_paths:
+            path_key = os.path.normcase(os.path.normpath(path))
+            if status_filter == 'Empty' and is_folder and path_key in original_fetched_path_keys:
                 status = 'Empty'
 
-            is_context = (path not in original_fetched_paths) if view_mode == 'Tree' else False
+            is_context = (path_key not in original_fetched_path_keys) if view_mode == 'Tree' else False
             actual_parent = parent_path if view_mode == 'Tree' else None
             display_location = self._relative_display_location(parent_path) if view_mode != 'Tree' else None
 
@@ -380,9 +635,10 @@ class PageLoadThread(QThread):
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
+                '_page_order': original_fetched_order.get(path_key),
                 '_parent_path': actual_parent,
                 '_is_context_fetched': is_context,
-                '_is_page_result': path in original_fetched_paths,
+                '_is_page_result': path_key in original_fetched_path_keys,
                 'location': parent_path if view_mode != 'Tree' else None,
                 'display_location': display_location,
             }
@@ -395,6 +651,27 @@ class PageLoadThread(QThread):
             else:
                 root_node['children'].append(node)
 
+        def sort_tree_for_page(node):
+            children = node.get('children', [])
+            if not children:
+                return node.get('_page_order', float('inf'))
+
+            child_orders = [sort_tree_for_page(child) for child in children]
+            node_order = node.get('_page_order')
+            if node_order is None:
+                node_order = min(child_orders) if child_orders else float('inf')
+            node['_page_order'] = node_order
+
+            children.sort(key=lambda child: (
+                child.get('_page_order', float('inf')),
+                1 if child.get('_is_context_fetched') else 0,
+                str(child.get('path', '')).lower(),
+            ))
+            return node_order
+
+        if view_mode == 'Tree':
+            sort_tree_for_page(root_node)
+
         return {
             'root_node': root_node,
             'view_mode': view_mode,
@@ -403,6 +680,87 @@ class PageLoadThread(QThread):
             'limit': limit,
             'offset': offset,
             'page': self.options['page'],
+            'paginated': paginated,
+        }
+
+
+class BulkPageSelectThread(QThread):
+    bulk_ready = pyqtSignal(int, dict)
+    bulk_failed = pyqtSignal(int, str)
+
+    def __init__(self, request_id, options, where_sql, params, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.options = options
+        self.where_sql = where_sql or ""
+        self.params = list(params or [])
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def _raise_if_cancelled(self):
+        if self.is_cancelled:
+            raise RuntimeError("cancelled")
+
+    def run(self):
+        try:
+            result = self._load()
+            if result is not None:
+                self.bulk_ready.emit(self.request_id, result)
+        except Exception as exc:
+            if str(exc) != "cancelled":
+                self.bulk_failed.emit(self.request_id, str(exc))
+
+    def _load(self):
+        from src.file_index_tool import FileIndexTool
+
+        self._raise_if_cancelled()
+        limit = self.options['limit']
+        offset = self.options['offset']
+        view_mode = self.options['view_mode']
+        sort_column = self.options['sort_column']
+        sort_desc = self.options['sort_desc']
+
+        query = "SELECT path FROM file_index"
+        count_query = (
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), "
+            "COALESCE(SUM(size), 0) "
+            "FROM file_index"
+        )
+        if self.where_sql:
+            query += self.where_sql
+            count_query += self.where_sql
+
+        query += f" ORDER BY {build_sort_order_clause(view_mode, sort_column, sort_desc)} LIMIT ? OFFSET ?"
+
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            cursor.execute(count_query, self.params)
+            total_matches, folders, files, total_size = cursor.fetchone()
+            total_matches = total_matches or 0
+            folders = folders or 0
+            files = files or 0
+            total_size = total_size or 0
+
+            self._raise_if_cancelled()
+            cursor.execute(query, [*self.params, limit, offset])
+            paths = [row[0] for row in cursor.fetchall()]
+        finally:
+            tool.close()
+
+        return {
+            'paths': paths,
+            'total_matches': total_matches,
+            'folders': folders,
+            'files': files,
+            'total_size': total_size,
+            'current_page_count': len(paths),
+            'where_sql': self.where_sql,
+            'params': self.params,
         }
 
 
@@ -551,6 +909,70 @@ class TotalsThread(QThread):
             'folder_total': folder_total,
             'current_page_total': current_page_total,
             'selected_total': selected_total,
+        }
+
+
+class BulkSelectThread(QThread):
+    bulk_ready = pyqtSignal(int, dict)
+    bulk_failed = pyqtSignal(int, str)
+
+    class _Cancelled(Exception):
+        pass
+
+    def __init__(self, request_id, candidates, status=None, videos_only=False, include_context=False, exact_only=False, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.candidates = candidates
+        self.status = status
+        self.videos_only = videos_only
+        self.include_context = include_context
+        self.exact_only = exact_only
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def _raise_if_cancelled(self):
+        if self.is_cancelled:
+            raise BulkSelectThread._Cancelled()
+
+    def run(self):
+        try:
+            result = self._collect_targets()
+            if result is not None:
+                self.bulk_ready.emit(self.request_id, result)
+        except Exception as exc:
+            self.bulk_failed.emit(self.request_id, str(exc))
+
+    def _collect_targets(self):
+        targets = []
+        seen_paths = set()
+        all_checked = True
+
+        for item in self.candidates:
+            self._raise_if_cancelled()
+
+            path = item.get('path')
+            if not path or path in seen_paths:
+                continue
+            if not self.include_context and not item.get('is_page_result', True):
+                continue
+            if self.status is not None and item.get('status') != self.status:
+                continue
+            if self.videos_only and not item.get('is_video'):
+                continue
+            if self.exact_only and not item.get('is_exact_match'):
+                continue
+
+            seen_paths.add(path)
+            targets.append(path)
+            if not item.get('checked', False):
+                all_checked = False
+
+        return {
+            'paths': targets,
+            'all_checked': all_checked,
+            'count': len(targets),
         }
 
 
@@ -857,15 +1279,15 @@ class FilterPanel(QFrame):
         return 'Tree'
 
     def apply_default_browse_preset(self):
-        self.rb_inactive.setChecked(True)
+        self.rb_all.setChecked(True)
         self.rb_view_tree.setChecked(True)
-        self.slider.setValue(self.DEFAULT_STALE_MONTHS)
+        self.slider.setValue(self.AGE_FILTER_DISABLED)
         
         blocker = QSignalBlocker(self.age_input)
-        self.age_input.setValue(self.DEFAULT_STALE_MONTHS)
+        self.age_input.setValue(self.AGE_FILTER_DISABLED)
         del blocker
         
-        self._update_age_label(self.DEFAULT_STALE_MONTHS)
+        self._update_age_label(self.AGE_FILTER_DISABLED)
 
     # helpers
     def _make_section(self, title):
@@ -908,10 +1330,33 @@ class MainWindow(QMainWindow):
         self.totals_refresh_options = None
         self.cached_folder_total = None
         self.cached_folder_total_root = None
+        self.cached_selected_total = None
         self.loading_dialog = None
+        self.selection_loading_dialog = None
+        self.selection_loading_min_visible_until = 0.0
+        self.delete_preview_thread = None
+        self.pending_delete_preview_dialog = None
+        self.bulk_select_thread = None
+        self.bulk_select_request_id = 0
+        self.bulk_select_active = False
+        self.bulk_select_queue = []
+        self.bulk_select_state = Qt.CheckState.Unchecked
+        self.bulk_select_offer_all_pages = False
+        self.bulk_select_current_page_count = 0
+        self.bulk_select_label = ""
+        self.bulk_select_status = None
+        self.bulk_select_videos_only = False
+        self.bulk_select_precomputed_scope = None
+        self.source_index_by_path = {}
+        self.bulk_select_batch_size = 20
+        self.bulk_select_batch_delay_ms = 12
         self.tree_model     = None
         self.proxy_model    = WatchdogFilterProxyModel()
         self.bulk_delete_scope = None
+        self.selected_paths = {}
+        self.page_only_selected_paths = {}
+        self.excluded_paths = {}
+        self.page_only_selection_page = None
 
         self.sort_column = 3 # Default sort by Age
         self.sort_order = Qt.SortOrder.DescendingOrder
@@ -1039,7 +1484,7 @@ class MainWindow(QMainWindow):
         self.fp.rb_videos.toggled.connect(self._on_videos_mode_toggled)
         # Age controls: debounced
         self.fp.slider.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
-        self.fp.age_input.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
+        self.fp.age_input.editingFinished.connect(self._on_manual_age_finished)
         
         # View mode connections
         self.fp.rb_view_tree.toggled.connect(self._on_filter_changed)
@@ -1066,6 +1511,12 @@ class MainWindow(QMainWindow):
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_all.clicked.connect(self._select_all)
         controls_layout.addWidget(self.btn_select_all)
+
+        self.btn_clear_selection = QPushButton("Unselect All")
+        self.btn_clear_selection.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_selection.clicked.connect(self._unselect_all)
+        self.btn_clear_selection.setVisible(False)
+        controls_layout.addWidget(self.btn_clear_selection)
         
         self.btn_select_inactive = QPushButton("Select All Inactive")
         self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1171,6 +1622,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._update_status_column_visibility()
 
         # Page 2: No results (filter produced zero matches)
         no_results_page = QWidget()
@@ -1257,19 +1709,24 @@ class MainWindow(QMainWindow):
         self.chip_browse_size = self._chip("Folder total: --", "chipSpace")
         self.chip_page_size = self._chip("Current page: --", "chipSpace")
         self.chip_selected_size = self._chip("Selected total: --", "chipSpace")
-        
-        sbl.addWidget(self._sep())
+        self.sep_empty = self._sep()
+        self.sep_inactive_folders = self._sep()
+        self.sep_inactive_files = self._sep()
+        self.sep_browse_size = self._sep()
+        self.sep_page_size = self._sep()
+
+        sbl.addWidget(self.sep_empty)
         sbl.addWidget(self.chip_empty)
-        sbl.addWidget(self._sep())
+        sbl.addWidget(self.sep_inactive_folders)
         sbl.addWidget(self.chip_inactive_folders)
-        sbl.addWidget(self._sep())
+        sbl.addWidget(self.sep_inactive_files)
         sbl.addWidget(self.chip_inactive_files)
-        sbl.addWidget(self._sep())
+        sbl.addWidget(self.sep_browse_size)
         sbl.addWidget(self.chip_browse_size)
-        sbl.addWidget(self._sep())
+        sbl.addWidget(self.sep_page_size)
         sbl.addWidget(self.chip_page_size)
-        sbl.addWidget(self._sep())
         sbl.addWidget(self.chip_selected_size)
+        self._update_status_metrics_visibility()
         vbox.addWidget(sb)
 
         # Do NOT auto-start scan - let the user enter a path first
@@ -1363,6 +1820,7 @@ class MainWindow(QMainWindow):
 
     def _apply_filters(self):
         # 1. Update proxy model so it can format the Status column correctly
+        self._cancel_running_bulk_select_thread()
         age_secs = self.fp.get_older_than_secs()
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
@@ -1382,6 +1840,8 @@ class MainWindow(QMainWindow):
             older_than_secs=age_secs,
             status_filter=status_filter,
         )
+        self._update_status_column_visibility()
+        self._update_status_metrics_visibility()
 
         # 2. Fetch the paginated data from SQL
         self.current_page = 0
@@ -1400,8 +1860,31 @@ class MainWindow(QMainWindow):
             del blockers
 
         if apply_now:
+            self._cancel_running_bulk_select_thread()
             self._discard_current_page_selection()
             self._apply_filters()
+
+    def _update_status_column_visibility(self):
+        if not hasattr(self, 'tree') or not hasattr(self, 'fp'):
+            return
+
+        show_status = not (self.fp.rb_all.isChecked() or self.fp.rb_videos.isChecked())
+        self.tree.setColumnHidden(5, not show_status)
+
+    def _update_status_metrics_visibility(self):
+        if not hasattr(self, 'chip_empty'):
+            return
+
+        show_status = not (self.fp.rb_all.isChecked() or self.fp.rb_videos.isChecked())
+        for widget in (
+            self.sep_empty,
+            self.chip_empty,
+            self.sep_inactive_folders,
+            self.chip_inactive_folders,
+            self.sep_inactive_files,
+            self.chip_inactive_files,
+        ):
+            widget.setVisible(show_status)
 
     def _reset_filters(self):
         self._apply_default_browse_preset()
@@ -1445,7 +1928,8 @@ class MainWindow(QMainWindow):
     def _select_all(self):
         if not self.tree_model:
             return
-        indices = self._collect_bulk_target_indices(videos_only=self._display_mode() == 'Videos')
+        videos_only = self._display_mode() == 'Videos'
+        indices = self._collect_bulk_target_indices(videos_only=videos_only)
         if not indices:
             self._refresh_selection_buttons()
             return
@@ -1455,23 +1939,27 @@ class MainWindow(QMainWindow):
             if self._are_all_indices_checked(indices)
             else Qt.CheckState.Checked
         )
-        if target_state == Qt.CheckState.Checked:
-            self._clear_all_checks()
         self._set_indices_checked(indices, target_state, recursive=False)
-        if target_state == Qt.CheckState.Checked:
+        if target_state == Qt.CheckState.Checked and hasattr(self, 'lbl_page_info') and self.lbl_page_info.isVisible():
             self._offer_all_pages_selection(
-                label="videos" if self._display_mode() == 'Videos' else "items",
+                label="videos" if videos_only else "items",
                 current_page_count=len(indices),
-                videos_only=self._display_mode() == 'Videos',
+                videos_only=videos_only,
             )
         else:
             self.bulk_delete_scope = None
         self._do_recount()
 
     def _clear_all_checks(self):
-        if not self.tree_model:
-            return
         self.bulk_delete_scope = None
+        self.selected_paths.clear()
+        self.page_only_selected_paths.clear()
+        self.excluded_paths.clear()
+        self.page_only_selection_page = None
+        self.cached_selected_total = None
+        if not self.tree_model:
+            self._do_recount()
+            return
         indices = []
 
         def collect(parent=QModelIndex()):
@@ -1486,8 +1974,67 @@ class MainWindow(QMainWindow):
             self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Unchecked, explicit=False)
         self._do_recount()
 
+    def _clear_current_page_checks(self):
+        self.bulk_delete_scope = None
+        self.cached_selected_total = None
+        if not self.tree_model:
+            self._do_recount()
+            return
+
+        indices = self._collect_checked_source_indices()
+        if indices:
+            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Unchecked, explicit=False)
+        visible_keys = {
+            self._path_key(self.tree_model.data(idx, Qt.ItemDataRole.UserRole).get('path', ''))
+            for idx in indices
+            if self.tree_model.data(idx, Qt.ItemDataRole.UserRole)
+        }
+        self.selected_paths = {
+            key: path for key, path in self.selected_paths.items()
+            if self._path_key(path) not in visible_keys
+        }
+        for key in visible_keys:
+            path = self.source_index_by_path.get(key)
+            item_data = self.tree_model.data(path, Qt.ItemDataRole.UserRole) if path and path.isValid() else None
+            if item_data and self._has_any_selected_ancestor(item_data.get('path', ''), include_self=False):
+                self.excluded_paths[key] = item_data['path']
+        self.page_only_selected_paths.clear()
+        self.page_only_selection_page = None
+        self._do_recount()
+
+    def _unselect_all(self):
+        if not self.tree_model or not (self.selected_paths or self.page_only_selected_paths):
+            return
+
+        if not (hasattr(self, 'lbl_page_info') and self.lbl_page_info.isVisible()):
+            self._clear_all_checks()
+            return
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setWindowTitle("Clear selection")
+        msg.setText("Clear the current page or clear everything selected?")
+        msg.setInformativeText(
+            "Current page only clears the checked rows that are visible right now.\n"
+            "Clear everything removes the full selection across all pages."
+        )
+        btn_page = msg.addButton("Current page only", QMessageBox.ButtonRole.RejectRole)
+        btn_all = msg.addButton("Clear everything", QMessageBox.ButtonRole.AcceptRole)
+        msg.setDefaultButton(btn_page)
+        msg.exec()
+
+        if msg.clickedButton() == btn_all:
+            self._clear_all_checks()
+        else:
+            self._clear_current_page_checks()
+
     def _discard_current_page_selection(self):
         self.bulk_delete_scope = None
+        self.selected_paths.clear()
+        self.page_only_selected_paths.clear()
+        self.excluded_paths.clear()
+        self.page_only_selection_page = None
+        self.cached_selected_total = None
         self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(False)
 
@@ -1495,6 +2042,11 @@ class MainWindow(QMainWindow):
         # User manually changed a filter control - clear selections and apply
         self._discard_current_page_selection()
         self._apply_filters()
+
+    def _on_manual_age_finished(self):
+        if hasattr(self.fp, 'age_input'):
+            self.fp.age_input.interpretText()
+        self._on_filter_changed()
 
     def _on_videos_mode_toggled(self, checked):
         if not checked:
@@ -1553,20 +2105,162 @@ class MainWindow(QMainWindow):
         return targets
 
     def _are_all_indices_checked(self, indices):
-        return bool(indices) and all(
-            self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
-            for index in indices
+        if not indices:
+            return False
+        for index in indices:
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+            if not item_data or not item_data.get('path'):
+                return False
+            if not self._is_effectively_selected(item_data['path']):
+                return False
+        return True
+
+    def _path_key(self, path):
+        return os.path.normcase(os.path.normpath(path))
+
+    def _has_selected_ancestor(self, path, include_self=True):
+        normalized = self._path_key(path)
+        for selected_key in self.selected_paths:
+            if normalized == selected_key:
+                return include_self
+            if normalized.startswith(selected_key + os.sep):
+                return True
+        return False
+
+    def _has_any_selected_ancestor(self, path, include_self=True):
+        normalized = self._path_key(path)
+        for selected_key in (*self.selected_paths.keys(), *self.page_only_selected_paths.keys()):
+            if normalized == selected_key:
+                return include_self
+            if normalized.startswith(selected_key + os.sep):
+                return True
+        return False
+
+    def _is_descendant_of_selected_path(self, path):
+        return self._has_any_selected_ancestor(path, include_self=False)
+
+    def _has_excluded_ancestor(self, path, include_self=True):
+        normalized = self._path_key(path)
+        for excluded_key in self.excluded_paths:
+            if normalized == excluded_key:
+                return include_self
+            if normalized.startswith(excluded_key + os.sep):
+                return True
+        return False
+
+    def _has_excluded_descendant(self, path):
+        normalized = self._path_key(path)
+        return any(
+            excluded_key.startswith(normalized + os.sep)
+            for excluded_key in self.excluded_paths
         )
+
+    def _is_effectively_selected(self, path):
+        normalized = self._path_key(path)
+        page_selected = any(
+            normalized == selected_key or normalized.startswith(selected_key + os.sep)
+            for selected_key in self.page_only_selected_paths
+        )
+        return (
+            (self._has_selected_ancestor(path) or page_selected)
+            and not self._has_excluded_ancestor(path)
+        )
+
+    def _is_persistable_selection_index(self, index):
+        if not index.isValid():
+            return False
+        item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+        if not item_data or not item_data.get('path'):
+            return False
+        is_context_fetched = item_data.get('_is_context_fetched', False)
+        if self.proxy_model.sourceModel() is self.tree_model:
+            if self.proxy_model.is_context_only(index) or is_context_fetched:
+                return False
+        return True
+
+    def _sync_persistent_selection_from_model(self):
+        if not self.tree_model:
+            return
+
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
+            for row in range(self.tree_model.rowCount(parent)):
+                index = self.tree_model.index(row, 0, parent)
+                item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+                if item_data and item_data.get('path') and self._is_persistable_selection_index(index):
+                    key = self._path_key(item_data['path'])
+                    state = self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole)
+                    if state == Qt.CheckState.Checked:
+                        self.excluded_paths.pop(key, None)
+                        self.excluded_paths = {
+                            excluded_key: excluded_path
+                            for excluded_key, excluded_path in self.excluded_paths.items()
+                            if not excluded_key.startswith(key + os.sep)
+                        }
+                        if key in self.page_only_selected_paths:
+                            self.page_only_selected_paths[key] = item_data['path']
+                        elif not self._is_descendant_of_selected_path(item_data['path']):
+                            self.selected_paths[key] = item_data['path']
+                    elif state == Qt.CheckState.Unchecked:
+                        if self._has_any_selected_ancestor(item_data['path'], include_self=False):
+                            self.excluded_paths[key] = item_data['path']
+                        self.selected_paths.pop(key, None)
+                        self.page_only_selected_paths.pop(key, None)
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
+
+    def _restore_persistent_selection_to_model(self):
+        if not self.tree_model or not (self.selected_paths or self.page_only_selected_paths):
+            return
+
+        indices = []
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
+            for row in range(self.tree_model.rowCount(parent)):
+                index = self.tree_model.index(row, 0, parent)
+                item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+                if (
+                    item_data and item_data.get('path')
+                    and self._is_effectively_selected(item_data['path'])
+                    and self._is_persistable_selection_index(index)
+                ):
+                    indices.append(index)
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
+
+        if indices:
+            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Checked, explicit=True)
+
+    def _promote_current_page_selection_to_page_only(self):
+        if not self.tree_model:
+            return
+
+        checked_indices = self._collect_checked_source_indices()
+        if not checked_indices:
+            return
+
+        for index in checked_indices:
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+            if not item_data or not item_data.get('path'):
+                continue
+            key = self._path_key(item_data['path'])
+            self.page_only_selected_paths[key] = item_data['path']
+            self.selected_paths.pop(key, None)
+        self.page_only_selection_page = self.current_page
 
     def _set_indices_checked(self, indices, state, recursive=True):
         if not indices:
             return
         to_change = [idx for idx in indices if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != state]
         if to_change:
+            self.cached_selected_total = None
             if recursive:
                 self.tree_model.set_indices_check_state(to_change, state, explicit=True)
             else:
                 self.tree_model.set_indices_check_state_direct(to_change, state, explicit=True)
+            self._sync_persistent_selection_from_model()
 
     def _build_bulk_where(self, status=None, videos_only=False):
         where_clauses = []
@@ -1613,6 +2307,9 @@ class MainWindow(QMainWindow):
                 if age_cutoff is not None:
                     where_clauses.append("modified_time <= ?")
                     params.append(age_cutoff)
+            elif age_cutoff is not None:
+                where_clauses.append("modified_time <= ?")
+                params.append(age_cutoff)
 
         view_mode = self.fp.get_view_mode()
         if view_mode == 'Files':
@@ -1633,15 +2330,34 @@ class MainWindow(QMainWindow):
                 (
                     "SELECT COUNT(*), "
                     "SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), "
-                    "SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END) "
+                    "SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), "
+                    "COALESCE(SUM(size), 0) "
                     "FROM file_index"
                 ) + where_sql,
                 params,
             )
-            total, folders, files = cursor.fetchone()
+            total, folders, files, total_size = cursor.fetchone()
         finally:
             tool.close()
-        return total or 0, folders or 0, files or 0, where_sql, params
+        return total or 0, folders or 0, files or 0, total_size or 0, where_sql, params
+
+    def _effective_bulk_counts(self, where_sql, params, folder_delete_mode, total, folders, files, total_size):
+        if folder_delete_mode != 'empty_only' or not folders:
+            return total, folders, files, total_size
+
+        from src.file_index_tool import FileIndexTool
+
+        folder_clause = "is_folder = 1 AND NOT EXISTS (SELECT 1 FROM file_index child WHERE child.parent_path = file_index.path COLLATE NOCASE)"
+        effective_where = (where_sql + " AND " + folder_clause) if where_sql else (" WHERE " + folder_clause)
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM file_index" + effective_where, params)
+            deletable_folders = cursor.fetchone()[0] or 0
+        finally:
+            tool.close()
+
+        return files + deletable_folders, deletable_folders, files, total_size
 
     def _bulk_folder_delete_mode(self, status=None, videos_only=False):
         if videos_only:
@@ -1650,13 +2366,34 @@ class MainWindow(QMainWindow):
             return 'all'
         return 'empty_only'
 
-    def _offer_all_pages_selection(self, label, current_page_count, status=None, videos_only=False):
-        total, folders, files, where_sql, params = self._bulk_count(status=status, videos_only=videos_only)
+    def _offer_all_pages_selection(self, label, current_page_count, status=None, videos_only=False, precomputed=None):
+        if not (hasattr(self, 'lbl_page_info') and self.lbl_page_info.isVisible()):
+            self.bulk_delete_scope = None
+            return
+
+        if precomputed:
+            total = precomputed.get('total_matches', 0)
+            folders = precomputed.get('folders', 0)
+            files = precomputed.get('files', 0)
+            total_size = precomputed.get('total_size', 0)
+            where_sql = precomputed.get('where_sql', "")
+            params = precomputed.get('params', [])
+        else:
+            total, folders, files, total_size, where_sql, params = self._bulk_count(status=status, videos_only=videos_only)
         if total <= current_page_count:
             self.bulk_delete_scope = None
             return
 
         folder_delete_mode = self._bulk_folder_delete_mode(status=status, videos_only=videos_only)
+        effective_total, effective_folders, effective_files, effective_size = self._effective_bulk_counts(
+            where_sql,
+            params,
+            folder_delete_mode,
+            total,
+            folders,
+            files,
+            total_size,
+        )
         safety_note = ""
         if folder_delete_mode == 'empty_only' and folders:
             safety_note = (
@@ -1671,8 +2408,9 @@ class MainWindow(QMainWindow):
         msg.setInformativeText(
             "There are more matching items across all pages.\n\n"
             f"All pages: {total} items\n"
-            f"Folders: {folders}\n"
-            f"Files: {files}\n\n"
+            f"Delete targets: {effective_total}\n"
+            f"Folders: {effective_folders}\n"
+            f"Files: {effective_files}\n\n"
             "Choose whether Delete Selected should apply only to this page or to every matching item."
             f"{safety_note}"
         )
@@ -1684,14 +2422,17 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == btn_all:
             self.bulk_delete_scope = {
                 'label': label,
-                'total': total,
-                'folders': folders,
-                'files': files,
+                'total': effective_total,
+                'folders': effective_folders,
+                'files': effective_files,
+                'size': effective_size,
+                'matched_total': total,
                 'where_sql': where_sql,
                 'params': params,
                 'folder_delete_mode': folder_delete_mode,
             }
         else:
+            self._promote_current_page_selection_to_page_only()
             self.bulk_delete_scope = None
 
     def _set_status_filter(self, status):
@@ -1720,19 +2461,21 @@ class MainWindow(QMainWindow):
             return
 
         mode = self._display_mode()
+        has_selection = bool(self.selected_paths or self.page_only_selected_paths)
         all_targets = self._collect_bulk_target_indices(videos_only=mode == 'Videos')
         inactive_targets = self._collect_bulk_target_indices(status='Inactive')
         empty_targets = self._collect_bulk_target_indices(status='Empty')
 
-        self.btn_select_all.setText(
-            "Deselect All Videos"
-            if mode == 'Videos' and self._are_all_indices_checked(all_targets)
-            else "Select All Videos"
-            if mode == 'Videos'
-            else "Deselect All"
-            if self._are_all_indices_checked(all_targets)
-            else "Select All"
-        )
+        self.btn_select_all.setVisible(not has_selection)
+        self.btn_clear_selection.setVisible(has_selection)
+
+        if mode == 'Videos':
+            self.btn_select_all.setText("Select All Videos")
+        elif self._are_all_indices_checked(all_targets):
+            self.btn_select_all.setText("Deselect All")
+        else:
+            self.btn_select_all.setText("Select All")
+
         self.btn_select_inactive.setText(
             "Deselect All Inactive"
             if self._are_all_indices_checked(inactive_targets)
@@ -1745,8 +2488,9 @@ class MainWindow(QMainWindow):
         )
 
         self.btn_select_all.setEnabled(bool(all_targets) and mode in ('All', 'Videos'))
-        self.btn_select_inactive.setEnabled(bool(inactive_targets) and mode in ('All', 'Inactive'))
+        self.btn_select_inactive.setEnabled(bool(inactive_targets) and mode == 'Inactive')
         self.btn_select_empty.setEnabled(bool(empty_targets) and mode in ('All', 'Empty'))
+        self.btn_select_inactive.setVisible(mode != 'All')
 
     def _collect_checked_source_indices(self):
         if not self.tree_model:
@@ -1779,70 +2523,175 @@ class MainWindow(QMainWindow):
         return pruned_paths
 
     def _checked_delete_paths(self):
-        if not self.tree_model:
-            return []
+        combined = list(self.selected_paths.values()) + list(self.page_only_selected_paths.values())
+        pruned = self._prune_paths(combined)
+        if not pruned or not self.excluded_paths:
+            return pruned
+        return self._expand_selected_paths_around_exclusions(pruned)
 
-        paths = []
-        for index in self._collect_checked_source_indices():
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-            is_context_fetched = item_data and item_data.get('_is_context_fetched', False)
-            if (
-                self.proxy_model.sourceModel() is self.tree_model
-                and (self.proxy_model.is_context_only(index) or is_context_fetched)
-            ):
-                continue
-            if item_data and item_data.get('path'):
-                paths.append(item_data['path'])
-        return self._prune_paths(paths)
+    def _expand_selected_paths_around_exclusions(self, selected_roots):
+        from src.file_index_tool import FileIndexTool
 
-    def _checked_delete_summary(self):
-        """Return delete targets and effective folder/file totals."""
-        if not self.tree_model:
-            return [], 0, 0
+        expanded = []
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            for root_path in selected_roots:
+                root_key = self._path_key(root_path)
+                if not any(
+                    excluded_key == root_key or excluded_key.startswith(root_key + os.sep)
+                    for excluded_key in self.excluded_paths
+                ):
+                    expanded.append(root_path)
+                    continue
 
-        target_paths = self._checked_delete_paths()
-        if not target_paths:
-            return [], 0, 0
+                descendant_sql, descendant_params = descendant_like_sql(root_path)
+                cursor.execute(
+                    f"""
+                    SELECT path, is_folder
+                    FROM file_index
+                    WHERE {case_insensitive_path_sql()} OR ({descendant_sql})
+                    ORDER BY length(path) ASC, lower(path) ASC
+                    """,
+                    (root_path, *descendant_params),
+                )
+                for path, is_folder in cursor.fetchall():
+                    key = self._path_key(path)
+                    if self._has_excluded_ancestor(path):
+                        continue
+                    if is_folder and self._has_excluded_descendant(path):
+                        continue
+                    expanded.append(path)
+        finally:
+            tool.close()
 
-        # Build path map iteratively
-        path_to_index = {}
-        stack = [QModelIndex()]
-        while stack:
-            parent = stack.pop()
-            for row in range(self.tree_model.rowCount(parent)):
-                index = self.tree_model.index(row, 0, parent)
-                item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-                if item_data and item_data.get('path'):
-                    path_to_index[item_data['path']] = index
-                if self.tree_model.hasChildren(index):
-                    stack.append(index)
+        return self._prune_paths(expanded)
 
-        def count_subtree_iterative(root_index):
-            f_count = d_count = 0
-            s = [root_index]
-            while s:
-                curr = s.pop()
-                d = self.tree_model.data(curr, Qt.ItemDataRole.UserRole)
-                if not d: continue
-                if d.get('is_dir'): d_count += 1
-                else: f_count += 1
-                for r in range(self.tree_model.rowCount(curr)):
-                    s.append(self.tree_model.index(r, 0, curr))
-            return d_count, f_count
+    def _summarize_delete_paths(self, paths):
+        from src.file_index_tool import FileIndexTool
+
+        pruned_paths = self._prune_paths(paths)
+        if not pruned_paths:
+            return [], 0, 0, 0
 
         total_folders = 0
         total_files = 0
-        for path in target_paths:
-            idx = path_to_index.get(path)
-            if idx and idx.isValid():
-                fld, fil = count_subtree_iterative(idx)
-                total_folders += fld
-                total_files += fil
-            else:
-                if os.path.isdir(path): total_folders += 1
-                else: total_files += 1
+        total_size = 0
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            for path in pruned_paths:
+                folders, files = self._count_selected_path_contents(cursor, path)
+                total_folders += folders
+                total_files += files
+                total_size += self._path_subtree_size(cursor, path)
+        finally:
+            tool.close()
 
-        return target_paths, total_folders, total_files
+        return pruned_paths, total_folders, total_files, total_size
+
+    def _count_selected_path_contents(self, cursor, path):
+        cursor.execute(
+            f"SELECT is_folder FROM file_index WHERE {case_insensitive_path_sql()}",
+            (path,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return (1, 0) if os.path.isdir(path) else (0, 1)
+
+        is_folder = row[0]
+        if not is_folder:
+            return 0, 1
+
+        descendant_sql, descendant_params = descendant_like_sql(path)
+        cursor.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), 0)
+            FROM file_index
+            WHERE {case_insensitive_path_sql()} OR ({descendant_sql})
+            """,
+            (path, *descendant_params),
+        )
+        folders, files = cursor.fetchone()
+        return folders or 0, files or 0
+
+    def _checked_delete_summary(self):
+        """Return delete targets and effective folder/file totals."""
+        target_paths = self._checked_delete_paths()
+        return self._summarize_delete_paths(target_paths)
+
+    def _remove_deleted_paths_from_selection(self, deleted_paths):
+        if not deleted_paths:
+            return
+
+        deleted_keys = [self._path_key(path) for path in deleted_paths if path]
+        if not deleted_keys:
+            return
+
+        def is_deleted(path):
+            normalized = self._path_key(path)
+            for deleted_key in deleted_keys:
+                if normalized == deleted_key or normalized.startswith(deleted_key + os.sep):
+                    return True
+            return False
+
+        self.selected_paths = {
+            key: path for key, path in self.selected_paths.items()
+            if not is_deleted(path)
+        }
+        self.page_only_selected_paths = {
+            key: path for key, path in self.page_only_selected_paths.items()
+            if not is_deleted(path)
+        }
+        self.excluded_paths = {
+            key: path for key, path in self.excluded_paths.items()
+            if not is_deleted(path)
+        }
+
+    def _show_delete_preview(self, paths=None, bulk_scope=None):
+        dialog = DeletePreviewDialog(self)
+        dialog.preview_mode = 'bulk' if bulk_scope else 'direct'
+        if bulk_scope:
+            dialog.apply_preview({
+                'paths': [],
+                'total': bulk_scope.get('total', 0),
+                'folders': bulk_scope.get('folders', 0),
+                'files': bulk_scope.get('files', 0),
+                'size': bulk_scope.get('size'),
+            })
+        else:
+            preview = self._build_direct_delete_preview(paths or [])
+            dialog.apply_preview(preview)
+
+        self.pending_delete_preview_dialog = dialog
+        dialog.finished.connect(lambda *_: setattr(self, 'pending_delete_preview_dialog', None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        result = dialog.exec()
+        return result == QDialog.DialogCode.Accepted
+
+    def _build_direct_delete_preview(self, paths):
+        pruned_paths = self._prune_paths(paths)
+        folder_count = 0
+        file_count = 0
+        for path in pruned_paths:
+            index = self.source_index_by_path.get(self._path_key(path))
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole) if index and index.isValid() and self.tree_model else None
+            is_folder = item_data.get('is_dir') if item_data else os.path.isdir(path)
+            if is_folder:
+                folder_count += 1
+            else:
+                file_count += 1
+        return {
+            'paths': pruned_paths,
+            'total': len(pruned_paths),
+            'folders': folder_count,
+            'files': file_count,
+            'size': self.cached_selected_total,
+        }
 
     def _current_page_file_paths(self):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
@@ -1938,10 +2787,8 @@ class MainWindow(QMainWindow):
             if self._are_all_indices_checked(indices)
             else Qt.CheckState.Checked
         )
-        if target_state == Qt.CheckState.Checked:
-            self._clear_all_checks()
         self._set_indices_checked(indices, target_state, recursive=False)
-        if target_state == Qt.CheckState.Checked:
+        if target_state == Qt.CheckState.Checked and hasattr(self, 'lbl_page_info') and self.lbl_page_info.isVisible():
             self._offer_all_pages_selection(
                 label=f"{status.lower()} items",
                 current_page_count=len(indices),
@@ -1966,6 +2813,7 @@ class MainWindow(QMainWindow):
         # Stop any running scan first
         if self.scanner_thread and self.scanner_thread.isRunning():
             self.scanner_thread.cancel()
+        self._cancel_running_bulk_select_thread()
 
         # Clear the tree model
         self.tree_model = None
@@ -1977,6 +2825,11 @@ class MainWindow(QMainWindow):
         self._cancel_running_totals_thread()
         self.totals_refresh_pending = False
         self.totals_refresh_options = None
+        self.selected_paths.clear()
+        self.page_only_selected_paths.clear()
+        self.excluded_paths.clear()
+        self.page_only_selection_page = None
+        self.source_index_by_path = {}
 
         # Reset pagination state
         self.current_page = 0
@@ -1992,6 +2845,7 @@ class MainWindow(QMainWindow):
         self.chip_browse_size.setText("Folder total: --")
         self.chip_page_size.setText("Current page: --")
         self.chip_selected_size.setText("Selected total: --")
+        self._update_status_metrics_visibility()
 
         # Hide controls, show empty page
         self.controls_bar.setVisible(False)
@@ -2014,6 +2868,8 @@ class MainWindow(QMainWindow):
             else:
                 self.txt_path.setText(os.path.normpath(folder))
             self._apply_default_browse_preset()
+            self.fp.setVisible(True)
+            self.btn_filter.setChecked(True)
             # Automatically start a scan once the user has selected a folder
             self.start_scan()
 
@@ -2200,11 +3056,16 @@ class MainWindow(QMainWindow):
     def _apply_sort_indicator(self):
         hdr = self.tree.header()
         blocker = QSignalBlocker(hdr)
-        hdr.setSortIndicatorShown(True)
-        hdr.setSortIndicator(self.sort_column, self.sort_order)
+        if self.fp.get_view_mode() == 'Tree':
+            hdr.setSortIndicatorShown(False)
+        else:
+            hdr.setSortIndicatorShown(True)
+            hdr.setSortIndicator(self.sort_column, self.sort_order)
         del blocker
 
     def _on_header_sort_clicked(self, col):
+        if self.fp.get_view_mode() == 'Tree':
+            return
         if col >= 6:
             return
         if self.fp.get_view_mode() != 'Tree' and col == 1:
@@ -2235,6 +3096,8 @@ class MainWindow(QMainWindow):
     def _page_load_options(self):
         age_secs = self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+        view_mode = self.fp.get_view_mode()
+        paginated = True
 
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
@@ -2248,9 +3111,10 @@ class MainWindow(QMainWindow):
         limit = 2000
         return {
             'limit': limit,
-            'offset': self.current_page * limit,
-            'page': self.current_page,
-            'view_mode': self.fp.get_view_mode(),
+            'offset': self.current_page * limit if paginated else 0,
+            'page': self.current_page if paginated else 0,
+            'paginated': paginated,
+            'view_mode': view_mode,
             'status_filter': status_filter,
             'age_cutoff': age_cutoff,
             'videos_only': self.fp.rb_videos.isChecked(),
@@ -2262,8 +3126,13 @@ class MainWindow(QMainWindow):
     def _show_loading_dialog(self):
         if self.page_load_thread and self.page_load_thread.isRunning():
             if self.loading_dialog is None:
-                self.loading_dialog = LoadingDialog(self)
+                self.loading_dialog = LoadingDialog(
+                    "Loading results",
+                    "Applying filters and preparing the table...",
+                    self,
+                )
             self.loading_dialog.show()
+            QApplication.processEvents()
 
     def _hide_loading_dialog(self):
         self.loading_timer.stop()
@@ -2271,6 +3140,35 @@ class MainWindow(QMainWindow):
             self.loading_dialog.hide()
             self.loading_dialog.close()
             self.loading_dialog = None
+
+    def _show_selection_loading_dialog(self, label):
+        if self.selection_loading_dialog is None:
+            detail = (
+                "Matching videos and updating the current page..."
+                if label == "videos"
+                else "Matching items and updating the current page..."
+            )
+            self.selection_loading_dialog = LoadingDialog(
+                "Selecting items",
+                detail,
+                self,
+            )
+        self.selection_loading_min_visible_until = time.monotonic() + 0.25
+        self.selection_loading_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.selection_loading_dialog.show()
+        self.selection_loading_dialog.raise_()
+        self.selection_loading_dialog.activateWindow()
+        QApplication.processEvents()
+
+    def _hide_selection_loading_dialog(self):
+        if self.selection_loading_dialog:
+            remaining = self.selection_loading_min_visible_until - time.monotonic()
+            if remaining > 0:
+                QTimer.singleShot(int(remaining * 1000), self._hide_selection_loading_dialog)
+                return
+            self.selection_loading_dialog.hide()
+            self.selection_loading_dialog.close()
+            self.selection_loading_dialog = None
 
     def _cleanup_page_thread(self, thread):
         if thread in self.page_load_threads:
@@ -2282,9 +3180,214 @@ class MainWindow(QMainWindow):
         if thread is self.totals_thread:
             self.totals_thread = None
 
+    def _cleanup_bulk_select_thread(self, thread):
+        if thread is self.bulk_select_thread:
+            self.bulk_select_thread = None
+
+    def _cancel_running_bulk_select_thread(self):
+        self.bulk_select_request_id += 1
+        if self.bulk_select_thread and self.bulk_select_thread.isRunning():
+            self.bulk_select_thread.cancel()
+        if self.bulk_select_active:
+            self.bulk_select_active = False
+            self.bulk_select_queue = []
+            self.bulk_select_offer_all_pages = False
+            self.bulk_select_current_page_count = 0
+            self.bulk_select_label = ""
+            self.bulk_select_status = None
+            self.bulk_select_videos_only = False
+            self.bulk_select_precomputed_scope = None
+            self._set_bulk_selection_busy(False)
+
     def _cancel_running_totals_thread(self):
         if self.totals_thread and self.totals_thread.isRunning():
             self.totals_thread.cancel()
+
+    def _set_bulk_selection_busy(self, busy, label=""):
+        self.bulk_select_active = busy
+        if hasattr(self, 'fp'):
+            self.fp.setEnabled(not busy)
+        self._set_delete_controls_enabled(not busy)
+        if busy:
+            self.bulk_select_label = label
+            self.lbl_status.setText(f"Selecting {label}..." if label else "Selecting...")
+
+    def _rebuild_source_index_map(self):
+        self.source_index_by_path = {}
+        if not self.tree_model:
+            return
+
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
+            for row in range(self.tree_model.rowCount(parent)):
+                index = self.tree_model.index(row, 0, parent)
+                item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
+                if item_data and item_data.get('path'):
+                    self.source_index_by_path[self._path_key(item_data['path'])] = index
+                if self.tree_model.hasChildren(index):
+                    stack.append(index)
+
+    def _snapshot_bulk_candidates(self):
+        candidates = []
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            return candidates
+
+        def walk(parent=QModelIndex()):
+            for row in range(self.proxy_model.rowCount(parent)):
+                proxy_index = self.proxy_model.index(row, 0, parent)
+                source_index = self.proxy_model.mapToSource(proxy_index)
+                item_data = self.tree_model.data(source_index, Qt.ItemDataRole.UserRole) or {}
+                path = item_data.get('path')
+                if not path:
+                    continue
+                candidates.append({
+                    'path': path,
+                    'status': item_data.get('status'),
+                    'checked': self.tree_model.data(source_index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked,
+                    'is_video': self._is_video_item(item_data),
+                    'is_page_result': item_data.get('_is_page_result', not item_data.get('_is_context_fetched', False)),
+                    'is_exact_match': self.proxy_model.matches_source_index(source_index),
+                })
+                if self.proxy_model.hasChildren(proxy_index):
+                    walk(proxy_index)
+
+        walk()
+        return candidates
+
+    def _paths_to_indices(self, paths):
+        indices = []
+        seen = set()
+        for path in paths:
+            key = self._path_key(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            index = self.source_index_by_path.get(key)
+            if index and index.isValid():
+                indices.append(index)
+        return indices
+
+    def _begin_chunked_bulk_selection(self, indices, state, current_page_count=0, label="items", offer_all_pages=False, status=None, videos_only=False):
+        if not indices:
+            self.bulk_delete_scope = None
+            self._set_bulk_selection_busy(False)
+            return
+
+        self.bulk_select_active = True
+        self.bulk_select_queue = list(indices)
+        self.bulk_select_state = Qt.CheckState(state)
+        self.bulk_select_current_page_count = current_page_count
+        self.bulk_select_offer_all_pages = offer_all_pages
+        self.bulk_select_label = label
+        self.bulk_select_status = status
+        self.bulk_select_videos_only = videos_only
+        self._set_bulk_selection_busy(True, label)
+        QTimer.singleShot(60, self._apply_bulk_selection_batch)
+
+    def _apply_bulk_selection_batch(self):
+        if not self.bulk_select_active or not self.tree_model:
+            return
+
+        batch = self.bulk_select_queue[:self.bulk_select_batch_size]
+        self.bulk_select_queue = self.bulk_select_queue[self.bulk_select_batch_size:]
+        if batch:
+            self.tree_model.set_indices_check_state_direct(batch, self.bulk_select_state, explicit=True)
+
+        if self.bulk_select_queue:
+            QTimer.singleShot(self.bulk_select_batch_delay_ms, self._apply_bulk_selection_batch)
+        else:
+            self._finish_bulk_selection()
+
+    def _finish_bulk_selection(self):
+        if not self.bulk_select_active:
+            return
+
+        self.bulk_select_active = False
+        self.bulk_select_queue = []
+        self._sync_persistent_selection_from_model()
+        if self.bulk_select_state == Qt.CheckState.Checked and self.bulk_select_offer_all_pages:
+            self._offer_all_pages_selection(
+                label=self.bulk_select_label,
+                current_page_count=self.bulk_select_current_page_count,
+                status=self.bulk_select_status,
+                videos_only=self.bulk_select_videos_only,
+                precomputed=self.bulk_select_precomputed_scope,
+            )
+        else:
+            self.bulk_delete_scope = None
+        self._set_bulk_selection_busy(False)
+        if self.bulk_select_label == "videos":
+            self.lbl_status.setText("Video selection complete.")
+        else:
+            self.lbl_status.setText("Selection complete.")
+        self._refresh_selection_buttons()
+        self._do_recount()
+        self.bulk_select_precomputed_scope = None
+
+    def _start_page_bulk_select_async(self, status=None, videos_only=False, label="items"):
+        if self.bulk_select_thread and self.bulk_select_thread.isRunning():
+            return
+
+        where_sql, params = self._build_bulk_where(status=status, videos_only=videos_only)
+        if not where_sql and not params:
+            self._refresh_selection_buttons()
+            return
+
+        options = self._page_load_options()
+        options['limit'] = 2000
+        options['offset'] = self.current_page * options['limit']
+
+        self.bulk_select_request_id += 1
+        request_id = self.bulk_select_request_id
+        self.bulk_select_label = label
+        self.bulk_select_status = status
+        self.bulk_select_videos_only = videos_only
+        self._set_bulk_selection_busy(True, label)
+
+        thread = BulkPageSelectThread(request_id, options, where_sql, params, parent=self)
+        self.bulk_select_thread = thread
+        thread.bulk_ready.connect(self._on_bulk_page_select_ready)
+        thread.bulk_failed.connect(self._on_bulk_page_select_failed)
+        thread.finished.connect(lambda thread=thread: self._cleanup_bulk_select_thread(thread))
+        thread.start()
+
+    def _on_bulk_page_select_ready(self, request_id, result):
+        if request_id != self.bulk_select_request_id:
+            return
+
+        paths = result.get('paths', [])
+        if not paths:
+            self._set_bulk_selection_busy(False)
+            self.lbl_status.setText("No matching items on this page.")
+            self._refresh_selection_buttons()
+            self._do_recount()
+            return
+
+        all_checked = all(self._is_effectively_selected(path) for path in paths)
+        target_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
+        indices = self._paths_to_indices(result.get('paths', []))
+        self.bulk_select_precomputed_scope = result
+        self._begin_chunked_bulk_selection(
+            indices,
+            target_state,
+            current_page_count=result.get('current_page_count', len(indices)),
+            label=self.bulk_select_label,
+            offer_all_pages=(target_state == Qt.CheckState.Checked),
+            status=self.bulk_select_status,
+            videos_only=self.bulk_select_videos_only,
+        )
+
+    def _on_bulk_page_select_failed(self, request_id, error):
+        if request_id != self.bulk_select_request_id:
+            return
+
+        self._set_bulk_selection_busy(False)
+        self.bulk_select_precomputed_scope = None
+        self.lbl_status.setText("Selection failed.")
+        self._refresh_selection_buttons()
+        self._do_recount()
+        QMessageBox.critical(self, "Selection Error", error)
 
     def _build_totals_refresh_options(self):
         age_secs = self.fp.get_older_than_secs()
@@ -2340,6 +3443,10 @@ class MainWindow(QMainWindow):
         self.btn_delete.setEnabled(enabled and (self.btn_delete.isEnabled()))
 
     def _load_page(self):
+        self._cancel_running_bulk_select_thread()
+        if self.page_only_selection_page != self.current_page:
+            self.page_only_selected_paths.clear()
+            self.page_only_selection_page = None
         self.page_load_request_id += 1
         request_id = self.page_load_request_id
         options = self._page_load_options()
@@ -2403,6 +3510,8 @@ class MainWindow(QMainWindow):
         self.tree_model.view_mode = view_mode
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
+        self._rebuild_source_index_map()
+        self._restore_persistent_selection_to_model()
 
         has_multiple_pages = total_matches > limit
         self.btn_prev_page.setVisible(has_multiple_pages)
@@ -2418,26 +3527,27 @@ class MainWindow(QMainWindow):
         self.controls_bar.setVisible(True)
 
         hdr = self.tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for index in range(1, 7):
+        for index in range(0, 7):
             hdr.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._apply_sort_indicator()
 
         if view_mode == 'Tree':
-            self.tree.setColumnWidth(0, 420)
-            self.tree.setColumnWidth(1, 74)
+            self.tree.setColumnWidth(1, 78)
         else:
-            self.tree.setColumnWidth(0, 250)
-            self.tree.setColumnWidth(1, 400)
-        self.tree.setColumnWidth(2, 116)
-        self.tree.setColumnWidth(3, 70)
-        self.tree.setColumnWidth(4, 96)
-        self.tree.setColumnWidth(5, 108)
-        self.tree.setColumnWidth(6, 98)
+            self.tree.setColumnWidth(1, 380)
+        self.tree.setColumnWidth(2, 150)
+        self.tree.setColumnWidth(3, 82)
+        self.tree.setColumnWidth(4, 104)
+        self.tree.setColumnWidth(5, 116)
+        self.tree.setColumnWidth(6, 104)
 
         self._set_expand_state(True)
+        self._update_status_column_visibility()
+        self._update_status_metrics_visibility()
         self._set_match_status(total_matches)
         self._update_chips_sql()
+        self._do_recount()
         self._refresh_selection_buttons()
         self.tree_model.dataChanged.connect(self._on_checked)
         self.tree_model.layoutChanged.connect(self._on_checked)
@@ -2476,11 +3586,18 @@ class MainWindow(QMainWindow):
             self.chip_browse_size.setText(f"Folder total: {format_size(result['folder_total'])}")
         self.chip_page_size.setText(f"Current page: {format_size(result['current_page_total'])}")
         self.chip_selected_size.setText(f"Selected total: {format_size(result['selected_total'])}")
+        self.cached_selected_total = result['selected_total']
+        if (
+            self.pending_delete_preview_dialog
+            and getattr(self.pending_delete_preview_dialog, 'preview_mode', '') == 'direct'
+        ):
+            self.pending_delete_preview_dialog.apply_preview(self._build_direct_delete_preview(self._checked_delete_paths()))
 
     def _on_totals_failed(self, request_id, error):
         if request_id != self.totals_request_id:
             return
 
+        self.cached_selected_total = None
         self.chip_browse_size.setText("Folder total: --")
         self.chip_page_size.setText("Current page: --")
         self.chip_selected_size.setText("Selected total: --")
@@ -2491,6 +3608,9 @@ class MainWindow(QMainWindow):
 
     def _on_checked(self, tl=None, br=None, roles=None):
         if roles is None or Qt.ItemDataRole.CheckStateRole in roles:
+            if self.bulk_select_active:
+                return
+            self._sync_persistent_selection_from_model()
             self._set_size_totals_pending(selected=True)
             self.recount_timer.start(80)
 
@@ -2509,13 +3629,14 @@ class MainWindow(QMainWindow):
             self._refresh_selection_buttons()
             self._update_chips_sql()
             return
-        paths, folder_count, file_count = self._checked_delete_summary()
-        total = len(paths)
+        selected_paths = self._checked_delete_paths()
+        total = len(selected_paths)
         if total:
-            self.btn_delete.setText(f"Delete Selected (Folders: {folder_count}, Files: {file_count})  [Current Page]")
+            self.btn_delete.setText(f"Delete Selected ({total} item{'s' if total != 1 else ''})")
         else:
             self.btn_delete.setText("Delete Selected")
         self.btn_delete.setEnabled(total > 0)
+        self._set_size_totals_pending(selected=True)
         self._refresh_selection_buttons()
         self._update_chips_sql()
 
@@ -2715,7 +3836,8 @@ class MainWindow(QMainWindow):
             self.delete_progress.update_progress(done, total, current)
         self.lbl_status.setText(f"Deleting {done} of {total}...")
 
-    def _on_delete_finished(self, deleted_count, errors, cancelled):
+    def _on_delete_finished(self, deleted_count, errors, cancelled, deleted_paths):
+
         if self.delete_progress:
             self.delete_progress._allow_close = True
             self.delete_progress.hide()
@@ -2724,7 +3846,8 @@ class MainWindow(QMainWindow):
 
         self.delete_thread = None
         self.bulk_delete_scope = None
-        self._discard_current_page_selection()
+        if deleted_paths:
+            self._remove_deleted_paths_from_selection(deleted_paths)
         self._set_delete_controls_enabled(True)
         self._load_page()
 
@@ -2746,42 +3869,17 @@ class MainWindow(QMainWindow):
             return
         if self.bulk_delete_scope:
             scope = self.bulk_delete_scope
-            paths = self._bulk_delete_paths()
-            if not paths:
-                QMessageBox.information(self, "Delete", "No matching items found.")
-                self.bulk_delete_scope = None
-                self._do_recount()
-                return
-
-            r = QMessageBox.question(self, "Confirm Delete",
-                (
-                    "Send all matching items across all pages to the Recycle Bin?\n\n"
-                    f"Matching items: {scope['total']}\n"
-                    f"Folders: {scope['folders']}\n"
-                    f"Files: {scope['files']}\n\n"
-                    f"Delete operations after pruning nested selections: {len(paths)}"
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if r != QMessageBox.StandardButton.Yes:
-                return
-
-            self._start_delete(paths)
+            if self._show_delete_preview(bulk_scope=scope):
+                paths = self._bulk_delete_paths()
+                if paths:
+                    self._start_delete(paths)
             return
 
-        paths, folder_count, file_count = self._checked_delete_summary()
+        paths = self._checked_delete_paths()
         if not paths:
             QMessageBox.information(self, "Delete", "No items selected.")
             return
-        r = QMessageBox.question(self, "Confirm Delete",
-            (
-                "Send selected items to the Recycle Bin?\n\n"
-                f"Folders: {folder_count}\n"
-                f"Files: {file_count}"
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if r == QMessageBox.StandardButton.Yes:
+        if self._show_delete_preview(paths=paths):
             self._start_delete(paths)
 
     # -------------------------------------------------------------------------

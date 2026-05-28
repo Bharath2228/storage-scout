@@ -235,8 +235,6 @@ class WatchdogTreeModel(QAbstractItemModel):
             child_states = [item.child(row).checkState for row in range(item.childCount())]
             if item.explicitlyChecked:
                 state = Qt.CheckState.Checked
-            elif child_states and all(state == Qt.CheckState.Checked for state in child_states):
-                state = Qt.CheckState.Checked
             elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
                 state = Qt.CheckState.Unchecked
             else:
@@ -276,9 +274,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         while index.isValid():
             item = index.internalPointer()
             child_states = [item.child(row).checkState for row in range(item.childCount())]
-            if child_states and all(state == Qt.CheckState.Checked for state in child_states):
-                state = Qt.CheckState.Checked
-            elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
+            if child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
                 state = Qt.CheckState.Unchecked
             else:
                 state = Qt.CheckState.PartiallyChecked
@@ -410,7 +406,12 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         return self._accepts(source_row, source_parent)
 
     def flags(self, index):
-        return super().flags(index)
+        flags = super().flags(index)
+        if index.isValid() and index.column() == 0:
+            source_index = self.mapToSource(index)
+            if self.is_context_only(source_index):
+                flags &= ~Qt.ItemFlag.ItemIsUserCheckable
+        return flags
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -418,6 +419,8 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
 
         source_index = self.mapToSource(index)
         if self.is_context_only(source_index):
+            if role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
+                return None
             if role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
                 return "Context"
             if role == Qt.ItemDataRole.ToolTipRole:

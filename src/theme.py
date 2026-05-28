@@ -240,11 +240,15 @@ def apply_theme(app, theme_name="dark"):
             font-size: 11px;
         }}
         QTreeView {{
-            background-color: transparent;
+            background-color: {bg_main};
             alternate-background-color: rgba(248, 250, 252, 0.5);
             border: none;
             outline: none;
             color: {text};
+        }}
+        QTreeView::viewport,
+        QAbstractScrollArea::viewport {{
+            background-color: {bg_main};
         }}
         QTreeView::item {{ 
             padding: 10px 4px; 
@@ -360,6 +364,9 @@ def apply_theme(app, theme_name="dark"):
             background-color: #0353a4;
         }}
 
+        QHeaderView {{
+            background-color: #fafbfc;
+        }}
         QHeaderView::section {{
             background-color: #fafbfc;
             padding: 14px 16px;
