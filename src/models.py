@@ -8,6 +8,12 @@ ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 FOLDER_ICON = QIcon(os.path.join(ASSETS_DIR, "folder_blue.svg"))
 FILE_ICON = QIcon(os.path.join(ASSETS_DIR, "file_blue.svg"))
 
+VIDEO_EXTENSIONS = (
+    ".3g2", ".3gp", ".avi", ".divx", ".flv", ".m2ts", ".m4v",
+    ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".ogv",
+    ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
+)
+
 
 def format_size(size_bytes):
     if size_bytes == 0:
@@ -98,8 +104,12 @@ class WatchdogTreeModel(QAbstractItemModel):
             for child_data in data_node.get('children', []):
                 child_item = TreeItem(child_data, parent_item)
                 parent_item.appendChild(child_item)
-                if child_data.get('children'):
-                    stack.append((child_data, child_item))
+                if child_data.get('is_dir', False):
+                    if not child_data.get('children'):
+                        dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+                        child_item.appendChild(TreeItem(dummy_data, child_item))
+                    else:
+                        stack.append((child_data, child_item))
 
 
     def columnCount(self, parent=QModelIndex()):
@@ -116,11 +126,128 @@ class WatchdogTreeModel(QAbstractItemModel):
             parentItem = parent.internalPointer()
         return parentItem.childCount()
 
+    def hasChildren(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return self.rootItem.childCount() > 0
+        item = parent.internalPointer()
+        if not item.itemData.get('is_dir'):
+            return False
+        # If already loaded and empty, hide the expand chevron
+        if getattr(item, 'children_loaded', False) and item.childCount() == 0:
+            return False
+        return True
+
+    def load_children(self, parent_index):
+        if not parent_index.isValid():
+            return
+        
+        item = parent_index.internalPointer()
+        if getattr(item, 'children_loaded', False):
+            return
+            
+        item.children_loaded = True
+        path = item.itemData.get('path')
+        if not path:
+            return
+
+        # Remove dummy child if present
+        if item.childCount() == 1 and item.child(0).itemData.get('_is_dummy'):
+            self.beginRemoveRows(parent_index, 0, 0)
+            item.childItems.pop(0)
+            self.endRemoveRows()
+            
+        from .file_index_tool import FileIndexTool
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
+                "(SELECT 1 FROM file_index child WHERE child.parent_path = f.path LIMIT 1) "
+                "FROM file_index f WHERE f.parent_path = ? "
+                "ORDER BY f.is_folder DESC, f.name ASC",
+                (path,)
+            )
+            rows = cursor.fetchall()
+        except Exception:
+            rows = []
+        finally:
+            tool.close()
+            
+        if not rows:
+            # Emit layoutChanged to tell QTreeView that chevron should be hidden
+            self.layoutChanged.emit()
+            return
+            
+        options = getattr(self, 'options', {})
+        age_cutoff = options.get('age_cutoff')
+        status_filter = options.get('status_filter')
+        videos_only = options.get('videos_only', False)
+        
+        new_items = []
+        for c_path, c_name, c_is_folder, c_size, c_modified_time, c_parent_path, c_has_child in rows:
+            # Video filter
+            if videos_only and not c_is_folder:
+                ext = os.path.splitext(c_name)[1].lower()
+                if ext not in VIDEO_EXTENSIONS:
+                    continue
+            
+            # Age filter
+            is_stale = (c_modified_time <= age_cutoff) if age_cutoff else True
+            status = 'Inactive' if is_stale else 'Active'
+            
+            # Empty folder check using subquery result
+            if c_is_folder:
+                if c_has_child is None:
+                    status = 'Empty'
+            
+            # Status filter
+            if status_filter == 'Inactive' and status == 'Active':
+                continue
+            if status_filter == 'Empty' and status != 'Empty':
+                continue
+            if status_filter == 'Active' and status != 'Active':
+                continue
+                
+            child_data = {
+                'name': c_name,
+                'path': c_path,
+                'is_dir': bool(c_is_folder),
+                'size': c_size if not c_is_folder else 0,
+                'last_modified': c_modified_time,
+                'status': status,
+                'children': [],
+                '_is_page_result': True,
+                'location': c_parent_path,
+                'display_location': c_parent_path,
+            }
+            new_items.append(child_data)
+            
+        if not new_items:
+            # Emit layoutChanged to tell QTreeView that chevron should be hidden
+            self.layoutChanged.emit()
+            return
+            
+        self.beginInsertRows(parent_index, item.childCount(), item.childCount() + len(new_items) - 1)
+        for child_data in new_items:
+            child_item = TreeItem(child_data, item)
+            # Inherit parent checkstate
+            child_item.checkState = item.checkState
+            if child_data.get('is_dir'):
+                dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+                child_item.appendChild(TreeItem(dummy_data, child_item))
+            item.appendChild(child_item)
+        self.endInsertRows()
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
 
         item = index.internalPointer()
+        if item.itemData.get('_is_dummy'):
+            if role == Qt.ItemDataRole.DisplayRole and index.column() == 0:
+                return "Loading..."
+            return None
+
         col = index.column()
         is_tree = self.view_mode == 'Tree'
 
@@ -392,6 +519,17 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             self.older_than_cutoff_ts is not None,
         ))
 
+    def hasChildren(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return super().hasChildren(parent)
+        source_parent = self.mapToSource(parent)
+        if not source_parent.isValid():
+            return False
+        source_model = self.sourceModel()
+        if source_model is None:
+            return False
+        return source_model.hasChildren(source_parent)
+
     def matches_source_index(self, source_index):
         source_model = self.sourceModel()
         if source_model is None or not source_index.isValid():
@@ -489,6 +627,8 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
 
 
     def _matches(self, item_data):
+        if item_data.get('_is_dummy'):
+            return True
         status = item_data.get('status', '')
         ts = item_data.get('last_modified', 0)
 

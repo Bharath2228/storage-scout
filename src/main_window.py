@@ -1687,6 +1687,7 @@ class MainWindow(QMainWindow):
         self.tree.setItemDelegateForColumn(6, ActionDelegate(self.tree))
         self.tree.clicked.connect(self._on_click)
         self.tree.doubleClicked.connect(self._on_double_click)
+        self.tree.expanded.connect(self._on_tree_expanded)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
         self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
@@ -1827,15 +1828,23 @@ class MainWindow(QMainWindow):
     def _chip(self, text, obj_name):
         l = QLabel(text)
         l.setObjectName(obj_name)
+        l.setToolTip(text)
+        if obj_name == "chipSpace":
+            l.setMinimumWidth(170)
+            l.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         return l
+
+    def _set_chip_text(self, chip, text):
+        chip.setText(text)
+        chip.setToolTip(text)
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
-            self.chip_browse_size.setText("Folder total: Calculating...")
+            self._set_chip_text(self.chip_browse_size, "Folder total: Calculating...")
         if page:
-            self.chip_page_size.setText("Current page: Calculating...")
+            self._set_chip_text(self.chip_page_size, "Current page: Calculating...")
         if selected:
-            self.chip_selected_size.setText("Selected total: Calculating...")
+            self._set_chip_text(self.chip_selected_size, "Selected total: Calculating...")
 
     def _on_tree_scroll(self, value):
         """Show/hide the scroll-to-top button based on vertical scroll position."""
@@ -1993,7 +2002,11 @@ class MainWindow(QMainWindow):
         if expanded:
             if self.proxy_model and self.proxy_model.rowCount() > 0:
                 # Pages are capped at 2000 rows so expandAll is safe
-                self.tree.expandAll()
+                self.is_programmatic_expand = True
+                try:
+                    self.tree.expandAll()
+                finally:
+                    self.is_programmatic_expand = False
         else:
             self.tree.collapseAll()
 
@@ -3051,9 +3064,9 @@ class MainWindow(QMainWindow):
         self.chip_empty.setText("Empty: 0")
         self.chip_inactive_folders.setText("Inactive folders: 0")
         self.chip_inactive_files.setText("Inactive files: 0")
-        self.chip_browse_size.setText("Folder total: --")
-        self.chip_page_size.setText("Current page: --")
-        self.chip_selected_size.setText("Selected total: --")
+        self._set_chip_text(self.chip_browse_size, "Folder total: --")
+        self._set_chip_text(self.chip_page_size, "Current page: --")
+        self._set_chip_text(self.chip_selected_size, "Selected total: --")
         self._update_status_metrics_visibility()
 
         # Hide controls, show empty page
@@ -3766,6 +3779,7 @@ class MainWindow(QMainWindow):
 
         self.tree_model = WatchdogTreeModel(result['root_node'])
         self.tree_model.view_mode = view_mode
+        self.tree_model.options = self._page_load_options()
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
         self._rebuild_source_index_map()
@@ -3839,11 +3853,11 @@ class MainWindow(QMainWindow):
         self.chip_inactive_folders.setText(f"Inactive folders: {result['inactive_folders']}")
         self.chip_inactive_files.setText(f"Inactive files: {result['inactive_files']}")
         if result['folder_total'] is None:
-            self.chip_browse_size.setText("Folder total: Calculating...")
+            self._set_chip_text(self.chip_browse_size, "Folder total: Calculating...")
         else:
-            self.chip_browse_size.setText(f"Folder total: {format_size(result['folder_total'])}")
-        self.chip_page_size.setText(f"Current page: {format_size(result['current_page_total'])}")
-        self.chip_selected_size.setText(f"Selected total: {format_size(result['selected_total'])}")
+            self._set_chip_text(self.chip_browse_size, f"Folder total: {format_size(result['folder_total'])}")
+        self._set_chip_text(self.chip_page_size, f"Current page: {format_size(result['current_page_total'])}")
+        self._set_chip_text(self.chip_selected_size, f"Selected total: {format_size(result['selected_total'])}")
         self.cached_selected_total = result['selected_total']
         if (
             self.pending_delete_preview_dialog
@@ -3856,9 +3870,9 @@ class MainWindow(QMainWindow):
             return
 
         self.cached_selected_total = None
-        self.chip_browse_size.setText("Folder total: --")
-        self.chip_page_size.setText("Current page: --")
-        self.chip_selected_size.setText("Selected total: --")
+        self._set_chip_text(self.chip_browse_size, "Folder total: --")
+        self._set_chip_text(self.chip_page_size, "Current page: --")
+        self._set_chip_text(self.chip_selected_size, "Selected total: --")
 
     # -------------------------------------------------------------------------
     # Selection count (debounced)
@@ -3960,6 +3974,15 @@ class MainWindow(QMainWindow):
         d = self._item_data(index)
         if d:
             self._open(d['path'], d.get('is_dir', True))
+
+    def _on_tree_expanded(self, proxy_index):
+        if getattr(self, 'is_programmatic_expand', False):
+            return
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            return
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        if source_index.isValid():
+            self.tree_model.load_children(source_index)
 
     def _context_menu(self, pos):
         idx = self.tree.indexAt(pos)
