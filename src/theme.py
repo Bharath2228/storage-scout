@@ -223,7 +223,7 @@ def apply_theme(app, theme_name="dark"):
         QLabel#statusMessage {{
             color: #475569;
             font-weight: 500;
-            padding-right: 24px;
+            padding-right: 12px;
         }}
         QLabel#statusSeparator {{
             color: #cbd5e1;
@@ -233,11 +233,28 @@ def apply_theme(app, theme_name="dark"):
 
         
         QLabel#chipEmpty, QLabel#chipInactive, QLabel#chipSpace {{ 
-            background-color: transparent;
-            color: {text_muted};
-            padding: 0 4px;
+            background-color: #f8fafc;
+            color: #334155;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 4px 12px;
             font-weight: 600;
             font-size: 11px;
+        }}
+        QLabel#chipEmpty {{
+            color: #64748b;
+            background-color: transparent;
+            border: 1px dashed #cbd5e1;
+        }}
+        QLabel#chipInactive {{
+            color: #475569;
+            background-color: #f1f5f9;
+            border-color: #e2e8f0;
+        }}
+        QLabel#chipSpace {{
+            color: #0f172a;
+            background-color: #ffffff;
+            border-color: #cbd5e1;
         }}
         QTreeView {{
             background-color: {bg_main};

@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QAbstractItemView, QStackedWidget,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar
 )
-from PyQt6.QtCore import Qt, QRect, QModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
@@ -86,6 +86,117 @@ def build_sort_order_clause(view_mode, sort_column, sort_desc):
     if sort_column == 5:
         return f"modified_time {primary_dir}, is_folder DESC, lower(name) ASC"
     return f"lower(path) {primary_dir}"
+
+
+def tree_sort_value(node, sort_column):
+    if sort_column == 1:
+        return 0 if node.get('is_dir') else 1
+    if sort_column in (2, 3, 5):
+        return node.get('last_modified', 0) or 0
+    if sort_column == 4:
+        return node.get('size', 0) or 0
+    return (node.get('name', '') or '').lower()
+
+
+def sort_tree_siblings(node, sort_column, sort_desc):
+    children = node.get('children', [])
+    for child in children:
+        sort_tree_siblings(child, sort_column, sort_desc)
+
+    children.sort(key=lambda child: (
+        tree_sort_value(child, sort_column),
+        (child.get('name', '') or '').lower(),
+        (child.get('path', '') or '').lower(),
+    ), reverse=sort_desc)
+
+
+def prune_contained_paths(paths):
+    unique_paths = list(dict.fromkeys(path for path in paths if path))
+    sorted_paths = sorted(unique_paths, key=lambda value: len(os.path.normpath(value)))
+    kept = []
+    kept_keys = []
+
+    for path in sorted_paths:
+        normalized = os.path.normcase(os.path.normpath(path)).rstrip("\\/")
+        is_contained = any(
+            normalized.startswith(parent + "\\") or normalized.startswith(parent + "/")
+            for parent in kept_keys
+        )
+        if is_contained:
+            continue
+        kept.append(path)
+        kept_keys.append(normalized)
+
+    return kept
+
+
+def summarize_paths_batch(cursor, paths, cancel_check=None):
+    def check_cancelled():
+        if cancel_check:
+            cancel_check()
+
+    pruned_paths = prune_contained_paths(paths)
+    if not pruned_paths:
+        return [], 0, 0, 0
+
+    rows_by_key = {}
+    for start in range(0, len(pruned_paths), 900):
+        check_cancelled()
+        batch = pruned_paths[start:start + 900]
+        placeholders = ",".join("?" * len(batch))
+        cursor.execute(
+            f"SELECT path, is_folder, size FROM file_index WHERE path COLLATE NOCASE IN ({placeholders})",
+            batch,
+        )
+        for path, is_folder, size in cursor.fetchall():
+            rows_by_key[os.path.normcase(os.path.normpath(path))] = (path, is_folder, size)
+
+    folders = 0
+    files = 0
+    total_size = 0
+    folder_paths = []
+
+    for path in pruned_paths:
+        check_cancelled()
+        row = rows_by_key.get(os.path.normcase(os.path.normpath(path)))
+        if not row:
+            if os.path.isdir(path):
+                folders += 1
+                folder_paths.append(path)
+            else:
+                files += 1
+            continue
+
+        _, is_folder, size = row
+        if is_folder:
+            folder_paths.append(path)
+        else:
+            files += 1
+            total_size += size or 0
+
+    for start in range(0, len(folder_paths), 120):
+        check_cancelled()
+        batch = folder_paths[start:start + 120]
+        clauses = []
+        params = []
+        for folder_path in batch:
+            descendant_sql, descendant_params = descendant_like_sql(folder_path)
+            clauses.append(f"({case_insensitive_path_sql()} OR ({descendant_sql}))")
+            params.extend([folder_path, *descendant_params])
+        cursor.execute(
+            "SELECT "
+            "COALESCE(SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN is_folder = 0 THEN size ELSE 0 END), 0) "
+            "FROM file_index WHERE " + " OR ".join(clauses),
+            params,
+        )
+        batch_folders, batch_files, batch_size = cursor.fetchone()
+        folders += batch_folders or 0
+        files += batch_files or 0
+        total_size += batch_size or 0
+
+    return pruned_paths, folders, files, total_size
 
 
 class DeleteThread(QThread):
@@ -236,6 +347,9 @@ class DeletePreviewThread(QThread):
     preview_ready = pyqtSignal(dict)
     preview_failed = pyqtSignal(str)
 
+    class _Cancelled(Exception):
+        pass
+
     def __init__(self, paths=None, bulk_scope=None, excluded_paths=None, parent=None):
         super().__init__(parent)
         self.paths = list(paths or [])
@@ -364,16 +478,11 @@ class DeletePreviewThread(QThread):
         return cursor.fetchone()[0] or 0
 
     def _summarize_paths(self, cursor, paths):
-        pruned_paths = self._prune_paths(paths)
-        folders = 0
-        files = 0
-        total_size = 0
-        for path in pruned_paths:
-            path_folders, path_files = self._count_selected_path_contents(cursor, path)
-            folders += path_folders
-            files += path_files
-            total_size += self._path_subtree_size(cursor, path)
-        return pruned_paths, folders, files, total_size
+        return summarize_paths_batch(
+            cursor,
+            paths,
+            cancel_check=self._raise_if_cancelled,
+        )
 
     def _build_bulk_paths(self, cursor):
         where_sql = self.bulk_scope.get('where_sql', '')
@@ -440,10 +549,13 @@ class DeletePreviewThread(QThread):
             self.preview_ready.emit({
                 'paths': paths,
                 'total': total or len(paths),
+                'delete_operations': len(paths),
                 'folders': folders or 0,
                 'files': files or 0,
                 'size': total_size or 0,
             })
+        except DeletePreviewThread._Cancelled:
+            return
         except Exception as exc:
             self.preview_failed.emit(str(exc))
         finally:
@@ -499,15 +611,19 @@ class DeletePreviewDialog(QDialog):
     def apply_preview(self, payload):
         self.preview_paths = payload.get('paths', [])
         total = payload.get('total', len(self.preview_paths))
+        delete_operations = payload.get('delete_operations', len(self.preview_paths))
         folders = payload.get('folders', 0)
         files = payload.get('files', 0)
         size = payload.get('size')
-        self.detail_label.setText(f"Delete operations: {total}")
+        size_text = 'Calculating...' if size is None else ('0 B' if size == 0 else format_size(size))
+        self.detail_label.setText(
+            f"Delete operations: {delete_operations}    Total size: {size_text}"
+        )
         self.path_label.setText(
             f"Matched items: {total}\n"
+            f"Items sent to Recycle Bin: {delete_operations}\n"
             f"Folders: {folders}\n"
-            f"Files: {files}\n"
-            f"Size: {'Calculating...' if size is None else ('0 B' if size == 0 else format_size(size))}"
+            f"Files: {files}"
         )
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
@@ -566,6 +682,11 @@ class PageLoadThread(QThread):
         status_filter = self.options['status_filter']
         age_cutoff = self.options['age_cutoff']
         videos_only = self.options['videos_only']
+        lazy_show_all_tree = self.options.get('lazy_show_all_tree', False)
+        filtered_expanded_tree = self.options.get('filtered_expanded_tree', False)
+
+        if lazy_show_all_tree:
+            return self._load_lazy_show_all_tree()
 
         query = "SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index"
         count_query = "SELECT COUNT(*) FROM file_index"
@@ -573,6 +694,8 @@ class PageLoadThread(QThread):
         params = []
 
         if status_filter == 'Inactive':
+            if view_mode == 'Tree':
+                where_clauses.append("is_folder = 0")
             if age_cutoff is not None:
                 where_clauses.append("modified_time <= ?")
                 params.append(age_cutoff)
@@ -623,8 +746,6 @@ class PageLoadThread(QThread):
                 self.options['sort_column'],
                 self.options['sort_desc'],
             )
-            if view_mode == 'Tree':
-                order_by_sql = "rowid ASC"
             query += f" ORDER BY {order_by_sql}"
             if paginated:
                 query += f" LIMIT {limit} OFFSET {offset}"
@@ -689,6 +810,7 @@ class PageLoadThread(QThread):
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
+                '_children_loaded': bool(filtered_expanded_tree),
                 '_page_order': original_fetched_order.get(path_key),
                 '_parent_path': actual_parent,
                 '_is_context_fetched': is_context,
@@ -724,7 +846,12 @@ class PageLoadThread(QThread):
             return node_order
 
         if view_mode == 'Tree':
-            sort_tree_for_page(root_node)
+            self._hide_scan_root_context(root_node)
+            sort_tree_siblings(
+                root_node,
+                self.options['sort_column'],
+                self.options['sort_desc'],
+            )
 
         return {
             'root_node': root_node,
@@ -735,7 +862,143 @@ class PageLoadThread(QThread):
             'offset': offset,
             'page': self.options['page'],
             'paginated': paginated,
+            'lazy_show_all_tree': False,
+            'filtered_expanded_tree': filtered_expanded_tree,
         }
+
+    def _hide_scan_root_context(self, root_node):
+        scan_root = self.options.get('scan_root')
+        if not scan_root:
+            return
+
+        scan_root_key = os.path.normcase(os.path.normpath(scan_root))
+        children = root_node.get('children', [])
+        replacement_children = []
+
+        for child in children:
+            child_path = child.get('path')
+            if child_path and os.path.normcase(os.path.normpath(child_path)) == scan_root_key:
+                replacement_children.extend(child.get('children', []))
+            else:
+                replacement_children.append(child)
+
+        root_node['children'] = replacement_children
+
+    def _load_lazy_show_all_tree(self):
+        from src.file_index_tool import FileIndexTool
+
+        root_path = self.options.get('scan_root') or ""
+        root_path = os.path.normpath(root_path) if root_path else root_path
+
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM file_index")
+            total_rows = cursor.fetchone()[0] or 0
+            cursor.execute(
+                "SELECT 1 FROM file_index WHERE path = ? COLLATE NOCASE LIMIT 1",
+                (root_path,),
+            )
+            total_matches = max(total_rows - (1 if cursor.fetchone() else 0), 0)
+
+            cursor.execute(
+                "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
+                "(SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1) "
+                "FROM file_index f "
+                "WHERE f.parent_path = ? COLLATE NOCASE "
+                f"ORDER BY {build_sort_order_clause('Tree', self.options['sort_column'], self.options['sort_desc'])}",
+                (root_path,),
+            )
+            rows = cursor.fetchall()
+        finally:
+            tool.close()
+
+        root_node = {
+            'name': 'root',
+            'is_dir': True,
+            'path': root_path,
+            'status': 'Active',
+            'children': [],
+            '_children_loaded': True,
+        }
+
+        for path, name, is_folder, size, modified_time, parent_path, has_child in rows:
+            root_node['children'].append({
+                'name': name,
+                'path': path,
+                'is_dir': bool(is_folder),
+                'size': size if not is_folder else 0,
+                'last_modified': modified_time,
+                'status': 'Active',
+                'children': [],
+                '_children_loaded': not (is_folder and has_child),
+                '_is_page_result': True,
+                'location': parent_path,
+                'display_location': parent_path,
+            })
+
+        return {
+            'root_node': root_node,
+            'view_mode': 'Tree',
+            'rows_count': len(rows),
+            'total_matches': total_matches,
+            'limit': max(total_matches, len(rows), 1),
+            'offset': 0,
+            'page': 0,
+            'paginated': False,
+            'lazy_show_all_tree': True,
+        }
+
+
+class LazyChildrenLoadThread(QThread):
+    children_ready = pyqtSignal(int, str, list)
+    children_failed = pyqtSignal(int, str, str)
+
+    def __init__(self, request_id, folder_path, sort_column=0, sort_desc=False, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.folder_path = folder_path
+        self.sort_column = sort_column
+        self.sort_desc = sort_desc
+
+    def run(self):
+        from src.file_index_tool import FileIndexTool
+
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            cursor.execute(
+                "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
+                "(SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1) "
+                "FROM file_index f "
+                "WHERE f.parent_path = ? COLLATE NOCASE "
+                f"ORDER BY {build_sort_order_clause('Tree', self.sort_column, self.sort_desc)}",
+                (self.folder_path,),
+            )
+            rows = cursor.fetchall()
+        except Exception as exc:
+            self.children_failed.emit(self.request_id, self.folder_path, str(exc))
+            return
+        finally:
+            tool.close()
+
+        children = []
+        for path, name, is_folder, size, modified_time, parent_path, has_child in rows:
+            children.append({
+                'name': name,
+                'path': path,
+                'is_dir': bool(is_folder),
+                'size': size if not is_folder else 0,
+                'last_modified': modified_time,
+                'status': 'Active',
+                'children': [],
+                '_children_loaded': not (is_folder and has_child),
+                '_is_page_result': True,
+                'location': parent_path,
+                'display_location': parent_path,
+            })
+
+        self.children_ready.emit(self.request_id, self.folder_path, children)
 
 
 class BulkPageSelectThread(QThread):
@@ -873,6 +1136,7 @@ class TotalsThread(QThread):
             self.totals_failed.emit(self.request_id, str(exc))
 
     def _sum_paths_total_size(self, cursor, paths):
+        paths = self._prune_contained_paths(paths)
         total_size = 0
         for path in paths:
             self._raise_if_cancelled()
@@ -897,6 +1161,25 @@ class TotalsThread(QThread):
             )
             total_size += cursor.fetchone()[0] or 0
         return total_size
+
+    def _prune_contained_paths(self, paths):
+        unique_paths = list(dict.fromkeys(path for path in paths if path))
+        sorted_paths = sorted(unique_paths, key=lambda value: len(os.path.normpath(value)))
+        kept = []
+        kept_keys = []
+
+        for path in sorted_paths:
+            normalized = os.path.normcase(os.path.normpath(path)).rstrip("\\/")
+            is_contained = any(
+                normalized.startswith(parent + "\\") or normalized.startswith(parent + "/")
+                for parent in kept_keys
+            )
+            if is_contained:
+                continue
+            kept.append(path)
+            kept_keys.append(normalized)
+
+        return kept
 
     def _sum_file_paths_size(self, cursor, paths):
         unique_paths = list(dict.fromkeys(paths))
@@ -923,21 +1206,31 @@ class TotalsThread(QThread):
         self._raise_if_cancelled()
         normalized = os.path.normpath(root_path).rstrip("\\/")
         cursor.execute(
-            "SELECT COALESCE(SUM(size), 0) FROM file_index "
+            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM file_index "
             "WHERE is_folder = 0 AND root = ? COLLATE NOCASE",
             (normalized,),
         )
-        total = cursor.fetchone()[0] or 0
+        file_count, total = cursor.fetchone()
+        file_count = file_count or 0
+        total = total or 0
         if total:
-            return total
+            return total, file_count
 
         descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
-            f"SELECT COALESCE(SUM(size), 0) FROM file_index "
+            f"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM file_index "
             f"WHERE is_folder = 0 AND ({case_insensitive_path_sql()} OR {descendant_sql})",
             (normalized, *descendant_params),
         )
-        return cursor.fetchone()[0] or 0
+        file_count, total = cursor.fetchone()
+        file_count = file_count or 0
+        total = total or 0
+        if total or file_count:
+            return total, file_count
+
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0")
+        file_count, total = cursor.fetchone()
+        return total or 0, file_count or 0
 
     def _compute(self):
         from src.file_index_tool import FileIndexTool
@@ -973,16 +1266,14 @@ class TotalsThread(QThread):
 
             if self.options['is_scanning']:
                 folder_total = None
+                folder_file_count = None
             elif self.options['cached_folder_total'] is not None:
                 folder_total = self.options['cached_folder_total']
+                folder_file_count = None
             else:
                 self._raise_if_cancelled()
-                folder_total = self._browse_folder_total_size(cursor, self.options['root_path'])
+                folder_total, folder_file_count = self._browse_folder_total_size(cursor, self.options['root_path'])
 
-            self._raise_if_cancelled()
-            current_page_total = self._sum_file_paths_size(cursor, self.options['current_page_file_paths'])
-            self._raise_if_cancelled()
-            selected_total = self._sum_paths_total_size(cursor, self.options['selected_paths'])
         except TotalsThread._Cancelled:
             return None
         finally:
@@ -993,9 +1284,76 @@ class TotalsThread(QThread):
             'inactive_folders': inactive_folders,
             'inactive_files': inactive_files,
             'folder_total': folder_total,
-            'current_page_total': current_page_total,
-            'selected_total': selected_total,
+            'folder_file_count': folder_file_count,
         }
+
+
+class PathSizeThread(QThread):
+    total_ready = pyqtSignal(int, str, object)
+    total_failed = pyqtSignal(int, str, str)
+
+    class _Cancelled(Exception):
+        pass
+
+    def __init__(self, request_id, kind, paths, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.kind = kind
+        self.paths = list(paths)
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def _raise_if_cancelled(self):
+        if self.is_cancelled:
+            raise PathSizeThread._Cancelled()
+
+    def _prune_contained_paths(self, paths):
+        unique_paths = list(dict.fromkeys(path for path in paths if path))
+        sorted_paths = sorted(unique_paths, key=lambda value: len(os.path.normpath(value)))
+        kept = []
+        kept_keys = []
+
+        for path in sorted_paths:
+            normalized = os.path.normcase(os.path.normpath(path)).rstrip("\\/")
+            is_contained = any(
+                normalized.startswith(parent + "\\") or normalized.startswith(parent + "/")
+                for parent in kept_keys
+            )
+            if is_contained:
+                continue
+            kept.append(path)
+            kept_keys.append(normalized)
+
+        return kept
+
+    def _summarize_paths(self, cursor, paths):
+        _, folders, files, total_size = summarize_paths_batch(
+            cursor,
+            paths,
+            cancel_check=self._raise_if_cancelled,
+        )
+        return {
+            'folders': folders,
+            'files': files,
+            'size': total_size,
+        }
+
+    def run(self):
+        from src.file_index_tool import FileIndexTool
+
+        tool = FileIndexTool()
+        try:
+            total = self._summarize_paths(tool.conn.cursor(), self.paths)
+            self._raise_if_cancelled()
+            self.total_ready.emit(self.request_id, self.kind, total)
+        except PathSizeThread._Cancelled:
+            return
+        except Exception as exc:
+            self.total_failed.emit(self.request_id, self.kind, str(exc))
+        finally:
+            tool.close()
 
 
 class BulkSelectThread(QThread):
@@ -1409,14 +1767,20 @@ class MainWindow(QMainWindow):
         self.page_load_thread = None
         self.page_load_threads = []
         self.page_load_request_id = 0
+        self.lazy_child_threads = {}
+        self.lazy_child_request_id = 0
         self.totals_thread = None
         self.totals_threads = []
         self.totals_request_id = 0
         self.totals_refresh_pending = False
         self.totals_refresh_options = None
+        self.current_page_total_thread = None
+        self.selected_total_thread = None
+        self.path_total_threads = []
         self.cached_folder_total = None
         self.cached_folder_total_root = None
         self.cached_selected_total = None
+        self.saved_age_threshold_value = 0
         self.loading_dialog = None
         self.selection_loading_dialog = None
         self.selection_loading_min_visible_until = 0.0
@@ -1446,6 +1810,7 @@ class MainWindow(QMainWindow):
         self.excluded_paths = {}
         self.page_only_selection_page = None
         self.current_total_matches = 0
+        self.current_lazy_show_all_tree = False
 
         self.sort_column = 3 # Default sort by Age
         self.sort_order = Qt.SortOrder.DescendingOrder
@@ -1581,6 +1946,7 @@ class MainWindow(QMainWindow):
         self.fp.rb_view_folders.toggled.connect(self._on_filter_changed)
         
         self._apply_default_browse_preset(apply_now=False)
+        self._update_age_controls_enabled()
         main_area.addWidget(self.fp)
 
         # Right Content Area
@@ -1698,6 +2064,7 @@ class MainWindow(QMainWindow):
         self.tree.clicked.connect(self._on_click)
         self.tree.doubleClicked.connect(self._on_double_click)
         self.tree.expanded.connect(self._on_tree_expanded)
+        self.tree.collapsed.connect(self._on_tree_collapsed)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
         self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
@@ -1783,37 +2150,27 @@ class MainWindow(QMainWindow):
         # Status bar
         sb = QWidget()
         sb.setObjectName("statusbar")
-        sb.setFixedHeight(36)
+        sb.setFixedHeight(40)
         sbl = QHBoxLayout(sb)
-        sbl.setContentsMargins(12, 0, 12, 0)
-        sbl.setSpacing(12)
+        sbl.setContentsMargins(12, 5, 12, 5)
+        sbl.setSpacing(8)
         self.lbl_status = QLabel("Ready - select a folder and click Re-scan")
         self.lbl_status.setObjectName("statusMessage")
 
         sbl.addWidget(self.lbl_status)
         sbl.addStretch()
         
-        self.chip_empty = self._chip("Empty: 0", "chipEmpty")
-        self.chip_inactive_folders = self._chip("Inactive folders: 0", "chipInactive")
-        self.chip_inactive_files = self._chip("Inactive files: 0", "chipInactive")
-        self.chip_browse_size = self._chip("Folder total: --", "chipSpace")
-        self.chip_page_size = self._chip("Current page: --", "chipSpace")
-        self.chip_selected_size = self._chip("Selected total: --", "chipSpace")
-        self.sep_empty = self._sep()
-        self.sep_inactive_folders = self._sep()
-        self.sep_inactive_files = self._sep()
-        self.sep_browse_size = self._sep()
-        self.sep_page_size = self._sep()
+        self.chip_empty = self._chip("Empty 0", "chipEmpty")
+        self.chip_inactive_folders = self._chip("Inactive 0 folders", "chipInactive")
+        self.chip_inactive_files = self._chip("0 files", "chipInactive")
+        self.chip_browse_size = self._chip("Folder --", "chipSpace")
+        self.chip_page_size = self._chip("Page --", "chipSpace")
+        self.chip_selected_size = self._chip("Selected --", "chipSpace")
 
-        sbl.addWidget(self.sep_empty)
         sbl.addWidget(self.chip_empty)
-        sbl.addWidget(self.sep_inactive_folders)
         sbl.addWidget(self.chip_inactive_folders)
-        sbl.addWidget(self.sep_inactive_files)
         sbl.addWidget(self.chip_inactive_files)
-        sbl.addWidget(self.sep_browse_size)
         sbl.addWidget(self.chip_browse_size)
-        sbl.addWidget(self.sep_page_size)
         sbl.addWidget(self.chip_page_size)
         sbl.addWidget(self.chip_selected_size)
         self._update_status_metrics_visibility()
@@ -1840,7 +2197,7 @@ class MainWindow(QMainWindow):
         l.setObjectName(obj_name)
         l.setToolTip(text)
         if obj_name == "chipSpace":
-            l.setMinimumWidth(170)
+            l.setMinimumWidth(112)
             l.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         return l
 
@@ -1850,11 +2207,15 @@ class MainWindow(QMainWindow):
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
-            self._set_chip_text(self.chip_browse_size, "Folder total: Calculating...")
+            self._set_chip_text(self.chip_browse_size, "Folder calculating...")
         if page:
-            self._set_chip_text(self.chip_page_size, "Current page: Calculating...")
+            self._set_chip_text(self.chip_page_size, "Page calculating...")
         if selected:
-            self._set_chip_text(self.chip_selected_size, "Selected total: Calculating...")
+            if self._selected_roots_for_delete():
+                self._set_chip_text(self.chip_selected_size, "Selected calculating...")
+            else:
+                self.cached_selected_total = 0
+                self._set_chip_text(self.chip_selected_size, "Selected 0 B (0F 0f)")
 
     def _on_tree_scroll(self, value):
         """Show/hide the scroll-to-top button based on vertical scroll position."""
@@ -1919,7 +2280,8 @@ class MainWindow(QMainWindow):
     def _apply_filters(self):
         # 1. Update proxy model so it can format the Status column correctly
         self._cancel_running_bulk_select_thread()
-        age_secs = self.fp.get_older_than_secs()
+        self._update_age_controls_enabled()
+        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
         elif self.fp.rb_empty.isChecked():
@@ -1937,6 +2299,7 @@ class MainWindow(QMainWindow):
             empty_only=False,
             older_than_secs=age_secs,
             status_filter=status_filter,
+            view_mode=self.fp.get_view_mode(),
         )
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
@@ -1975,14 +2338,56 @@ class MainWindow(QMainWindow):
 
         show_status = not (self.fp.rb_all.isChecked() or self.fp.rb_videos.isChecked())
         for widget in (
-            self.sep_empty,
             self.chip_empty,
-            self.sep_inactive_folders,
             self.chip_inactive_folders,
-            self.sep_inactive_files,
             self.chip_inactive_files,
         ):
             widget.setVisible(show_status)
+
+    def _update_age_controls_enabled(self):
+        if not hasattr(self, 'fp'):
+            return
+
+        show_all = self.fp.rb_all.isChecked()
+        disabled_value = self.fp.AGE_FILTER_DISABLED
+        current_value = self.fp.age_input.value()
+
+        if show_all:
+            if current_value != disabled_value:
+                self.saved_age_threshold_value = current_value
+            if current_value != disabled_value or self.fp.slider.value() != disabled_value:
+                blockers = [
+                    QSignalBlocker(self.fp.slider),
+                    QSignalBlocker(self.fp.age_input),
+                ]
+                try:
+                    self.fp.slider.setValue(disabled_value)
+                    self.fp.age_input.setValue(disabled_value)
+                finally:
+                    del blockers
+                self.fp._update_age_label(disabled_value)
+        else:
+            restore_value = getattr(self, 'saved_age_threshold_value', disabled_value)
+            if current_value == disabled_value and restore_value != disabled_value:
+                blockers = [
+                    QSignalBlocker(self.fp.slider),
+                    QSignalBlocker(self.fp.age_input),
+                ]
+                try:
+                    self.fp.slider.setValue(min(restore_value, self.fp.MAX_STALE_MONTHS))
+                    self.fp.age_input.setValue(restore_value)
+                finally:
+                    del blockers
+                self.fp._update_age_label(restore_value)
+
+        enabled = not show_all
+        self.fp.slider.setEnabled(enabled)
+        self.fp.age_input.setEnabled(enabled)
+        self.fp.lbl_pill.setEnabled(enabled)
+        self.fp.lbl_val.setEnabled(enabled)
+        cursor = Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
+        self.fp.slider.setCursor(cursor)
+        self.fp.age_input.setCursor(cursor)
 
     def _reset_filters(self):
         self._apply_default_browse_preset()
@@ -2005,7 +2410,7 @@ class MainWindow(QMainWindow):
             return False
         return self.proxy_model.rowCount(QModelIndex()) > 0
 
-    def _set_expand_state(self, expanded):
+    def _set_expand_state(self, expanded, remember=True):
         if not hasattr(self, 'tree'):
             return
 
@@ -2018,7 +2423,11 @@ class MainWindow(QMainWindow):
                 finally:
                     self.is_programmatic_expand = False
         else:
-            self.tree.collapseAll()
+            self.is_programmatic_expand = True
+            try:
+                self.tree.collapseAll()
+            finally:
+                self.is_programmatic_expand = False
 
         if hasattr(self, 'btn_expand'):
             blocker = QSignalBlocker(self.btn_expand)
@@ -2141,20 +2550,7 @@ class MainWindow(QMainWindow):
         self._on_filter_changed()
 
     def _on_videos_mode_toggled(self, checked):
-        if not checked:
-            return
-
-        blockers = [
-            QSignalBlocker(self.fp.slider),
-            QSignalBlocker(self.fp.age_input),
-        ]
-        try:
-            self.fp.slider.setValue(self.fp.AGE_FILTER_DISABLED)
-            self.fp.age_input.setValue(self.fp.AGE_FILTER_DISABLED)
-        finally:
-            del blockers
-
-        self.fp._update_age_label(self.fp.AGE_FILTER_DISABLED)
+        self._update_age_controls_enabled()
 
     def _is_video_item(self, item_data):
         if not item_data or item_data.get('is_dir', False):
@@ -2220,13 +2616,7 @@ class MainWindow(QMainWindow):
         return False
 
     def _has_any_selected_ancestor(self, path, include_self=True):
-        normalized = self._path_key(path)
-        for selected_key in (*self.selected_paths.keys(), *self.page_only_selected_paths.keys()):
-            if normalized == selected_key:
-                return include_self
-            if normalized.startswith(selected_key + os.sep):
-                return True
-        return False
+        return self._has_selected_ancestor(path, include_self=include_self)
 
     def _is_descendant_of_selected_path(self, path):
         return self._has_any_selected_ancestor(path, include_self=False)
@@ -2248,13 +2638,8 @@ class MainWindow(QMainWindow):
         )
 
     def _is_effectively_selected(self, path):
-        normalized = self._path_key(path)
-        page_selected = any(
-            normalized == selected_key or normalized.startswith(selected_key + os.sep)
-            for selected_key in self.page_only_selected_paths
-        )
         return (
-            (self._has_selected_ancestor(path) or page_selected)
+            self._has_selected_ancestor(path)
             and not self._has_excluded_ancestor(path)
         )
 
@@ -2290,20 +2675,17 @@ class MainWindow(QMainWindow):
                             for excluded_key, excluded_path in self.excluded_paths.items()
                             if not excluded_key.startswith(key + os.sep)
                         }
-                        if key in self.page_only_selected_paths:
-                            self.page_only_selected_paths[key] = item_data['path']
-                        elif not self._is_descendant_of_selected_path(item_data['path']):
+                        if not self._is_descendant_of_selected_path(item_data['path']):
                             self.selected_paths[key] = item_data['path']
                     elif state == Qt.CheckState.Unchecked:
                         if self._has_any_selected_ancestor(item_data['path'], include_self=False):
                             self.excluded_paths[key] = item_data['path']
                         self.selected_paths.pop(key, None)
-                        self.page_only_selected_paths.pop(key, None)
                 if self.tree_model.hasChildren(index):
                     stack.append(index)
 
     def _restore_persistent_selection_to_model(self):
-        if not self.tree_model or not (self.selected_paths or self.page_only_selected_paths):
+        if not self.tree_model or not self.selected_paths:
             return
 
         indices = []
@@ -2353,9 +2735,8 @@ class MainWindow(QMainWindow):
             if not item_data or not item_data.get('path'):
                 continue
             key = self._path_key(item_data['path'])
-            self.page_only_selected_paths[key] = item_data['path']
-            self.selected_paths.pop(key, None)
-        self.page_only_selection_page = self.current_page
+            if key not in self.selected_paths:
+                self.selected_paths[key] = item_data['path']
 
     def _set_indices_checked(self, indices, state, recursive=True):
         if not indices:
@@ -2372,10 +2753,13 @@ class MainWindow(QMainWindow):
     def _build_bulk_where(self, status=None, videos_only=False):
         where_clauses = []
         params = []
-        age_secs = self.fp.get_older_than_secs()
+        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+        view_mode = self.fp.get_view_mode()
 
         if status == 'Inactive':
+            if view_mode == 'Tree':
+                where_clauses.append("is_folder = 0")
             if age_cutoff is not None:
                 where_clauses.append("modified_time <= ?")
                 params.append(age_cutoff)
@@ -2401,6 +2785,8 @@ class MainWindow(QMainWindow):
                     params.append(age_cutoff)
                 where_clauses.append(EMPTY_FOLDER_SQL)
             elif self.fp.rb_inactive.isChecked():
+                if view_mode == 'Tree':
+                    where_clauses.append("is_folder = 0")
                 if age_cutoff is not None:
                     where_clauses.append("modified_time <= ?")
                     params.append(age_cutoff)
@@ -2418,7 +2804,6 @@ class MainWindow(QMainWindow):
                 where_clauses.append("modified_time <= ?")
                 params.append(age_cutoff)
 
-        view_mode = self.fp.get_view_mode()
         if view_mode == 'Files':
             where_clauses.append("is_folder = 0")
         elif view_mode == 'Folders':
@@ -2824,17 +3209,10 @@ class MainWindow(QMainWindow):
         if not pruned_paths:
             return [], 0, 0, 0
 
-        total_folders = 0
-        total_files = 0
-        total_size = 0
         tool = FileIndexTool()
         try:
             cursor = tool.conn.cursor()
-            for path in pruned_paths:
-                folders, files = self._count_selected_path_contents(cursor, path)
-                total_folders += folders
-                total_files += files
-                total_size += self._path_subtree_size(cursor, path)
+            pruned_paths, total_folders, total_files, total_size = summarize_paths_batch(cursor, pruned_paths)
         finally:
             tool.close()
 
@@ -2961,6 +3339,7 @@ class MainWindow(QMainWindow):
 
         paths = []
         exact_only = self.proxy_model.has_active_filters()
+        view_mode = self.fp.get_view_mode()
 
         def walk(parent=QModelIndex()):
             for row in range(self.proxy_model.rowCount(parent)):
@@ -2973,13 +3352,13 @@ class MainWindow(QMainWindow):
                         not item_data.get('_is_context_fetched', False),
                     )
                     is_exact_match = self.proxy_model.matches_source_index(source_index)
-                    if (
-                        is_page_result
-                        and not item_data.get('is_dir', False)
-                        and (not exact_only or is_exact_match)
-                    ):
+                    is_chargeable = is_page_result and (not exact_only or is_exact_match)
+                    if is_chargeable:
                         paths.append(item_data['path'])
-                if self.proxy_model.hasChildren(proxy_index):
+                        if view_mode == 'Tree' and item_data.get('is_dir', False):
+                            continue
+
+                if view_mode == 'Tree' and self.proxy_model.hasChildren(proxy_index):
                     walk(proxy_index)
 
         walk()
@@ -3014,10 +3393,8 @@ class MainWindow(QMainWindow):
 
         tool = FileIndexTool()
         cursor = tool.conn.cursor()
-        total_size = 0
         try:
-            for path in pruned_paths:
-                total_size += self._path_subtree_size(cursor, path)
+            _, _, _, total_size = summarize_paths_batch(cursor, pruned_paths)
         finally:
             tool.close()
         return total_size
@@ -3079,6 +3456,8 @@ class MainWindow(QMainWindow):
         self.excluded_paths.clear()
         self.page_only_selection_page = None
         self.source_index_by_path = {}
+        self.lazy_child_request_id += 1
+        self.current_lazy_show_all_tree = False
 
         # Reset pagination state
         self.current_page = 0
@@ -3088,12 +3467,12 @@ class MainWindow(QMainWindow):
         self.totals_request_id += 1
 
         # Reset status chips
-        self.chip_empty.setText("Empty: 0")
-        self.chip_inactive_folders.setText("Inactive folders: 0")
-        self.chip_inactive_files.setText("Inactive files: 0")
-        self._set_chip_text(self.chip_browse_size, "Folder total: --")
-        self._set_chip_text(self.chip_page_size, "Current page: --")
-        self._set_chip_text(self.chip_selected_size, "Selected total: --")
+        self.chip_empty.setText("Empty 0")
+        self.chip_inactive_folders.setText("Inactive 0 folders")
+        self.chip_inactive_files.setText("0 files")
+        self._set_chip_text(self.chip_browse_size, "Folder --")
+        self._set_chip_text(self.chip_page_size, "Page --")
+        self._set_chip_text(self.chip_selected_size, "Selected --")
         self._update_status_metrics_visibility()
 
         # Hide controls, show empty page
@@ -3185,6 +3564,8 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"Found {total_matches} matching items")
 
     def _on_first_batch_ready(self):
+        if self._page_load_options().get('defer_tree_load_until_scan_done'):
+            return
         if self.current_page == 0 and self.content_stack.currentIndex() == 0:
             self._load_page()
 
@@ -3207,16 +3588,19 @@ class MainWindow(QMainWindow):
             # We need the same WHERE clause as _load_page
             where_clauses = []
             params = []
-            age_secs = self.fp.get_older_than_secs()
-            age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
-
             # Determine status filter (simplified mirror of _load_page logic)
             if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked(): status_filter = None
             elif self.fp.rb_empty.isChecked(): status_filter = 'Empty'
             elif self.fp.rb_videos.isChecked(): status_filter = None
             else: status_filter = 'Inactive'
 
+            view_mode = self.fp.get_view_mode()
+            age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+            age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+
             if status_filter == 'Inactive':
+                if view_mode == 'Tree':
+                    where_clauses.append("is_folder = 0")
                 if age_cutoff is not None:
                     where_clauses.append("modified_time <= ?")
                     params.append(age_cutoff)
@@ -3242,7 +3626,6 @@ class MainWindow(QMainWindow):
                     where_clauses.append("modified_time <= ?")
                     params.append(age_cutoff)
 
-            view_mode = self.fp.get_view_mode()
             if view_mode == 'Files':
                 where_clauses.append("is_folder = 0")
             elif view_mode == 'Folders':
@@ -3304,16 +3687,11 @@ class MainWindow(QMainWindow):
     def _apply_sort_indicator(self):
         hdr = self.tree.header()
         blocker = QSignalBlocker(hdr)
-        if self.fp.get_view_mode() == 'Tree':
-            hdr.setSortIndicatorShown(False)
-        else:
-            hdr.setSortIndicatorShown(True)
-            hdr.setSortIndicator(self.sort_column, self.sort_order)
+        hdr.setSortIndicatorShown(True)
+        hdr.setSortIndicator(self.sort_column, self.sort_order)
         del blocker
 
     def _on_header_sort_clicked(self, col):
-        if self.fp.get_view_mode() == 'Tree':
-            return
         if col >= 6:
             return
         if self.fp.get_view_mode() != 'Tree' and col == 1:
@@ -3342,8 +3720,6 @@ class MainWindow(QMainWindow):
         self._load_page()
 
     def _page_load_options(self):
-        age_secs = self.fp.get_older_than_secs()
-        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
         view_mode = self.fp.get_view_mode()
         paginated = True
 
@@ -3356,7 +3732,24 @@ class MainWindow(QMainWindow):
         else:
             status_filter = 'Inactive'
 
+        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+        age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
+
         limit = 2000
+        lazy_show_all_tree = (
+            view_mode == 'Tree'
+            and status_filter is None
+            and not self.fp.rb_videos.isChecked()
+            and age_cutoff is None
+        )
+        filtered_expanded_tree = (
+            view_mode == 'Tree'
+            and (
+                status_filter in ('Inactive', 'Empty')
+                or self.fp.rb_videos.isChecked()
+            )
+        )
+        defer_tree_load_until_scan_done = lazy_show_all_tree or filtered_expanded_tree
         return {
             'limit': limit,
             'offset': self.current_page * limit if paginated else 0,
@@ -3369,6 +3762,9 @@ class MainWindow(QMainWindow):
             'sort_column': self.sort_column,
             'sort_desc': self.sort_order == Qt.SortOrder.DescendingOrder,
             'scan_root': getattr(self, 'current_scan_root', os.path.normpath(self.txt_path.text().strip() or "")),
+            'lazy_show_all_tree': lazy_show_all_tree,
+            'filtered_expanded_tree': filtered_expanded_tree,
+            'defer_tree_load_until_scan_done': defer_tree_load_until_scan_done,
         }
 
     def _show_loading_dialog(self):
@@ -3422,11 +3818,22 @@ class MainWindow(QMainWindow):
         if thread in self.page_load_threads:
             self.page_load_threads.remove(thread)
 
+    def _cleanup_lazy_child_thread(self, request_id):
+        self.lazy_child_threads.pop(request_id, None)
+
     def _cleanup_totals_thread(self, thread):
         if thread in self.totals_threads:
             self.totals_threads.remove(thread)
         if thread is self.totals_thread:
             self.totals_thread = None
+
+    def _cleanup_path_total_thread(self, thread):
+        if thread in self.path_total_threads:
+            self.path_total_threads.remove(thread)
+        if thread is self.current_page_total_thread:
+            self.current_page_total_thread = None
+        if thread is self.selected_total_thread:
+            self.selected_total_thread = None
 
     def _cleanup_bulk_select_thread(self, thread):
         if thread is self.bulk_select_thread:
@@ -3452,6 +3859,10 @@ class MainWindow(QMainWindow):
     def _cancel_running_totals_thread(self):
         if self.totals_thread and self.totals_thread.isRunning():
             self.totals_thread.cancel()
+        if self.current_page_total_thread and self.current_page_total_thread.isRunning():
+            self.current_page_total_thread.cancel()
+        if self.selected_total_thread and self.selected_total_thread.isRunning():
+            self.selected_total_thread.cancel()
 
     def _set_bulk_selection_busy(self, busy, label=""):
         self.bulk_select_active = busy
@@ -3685,7 +4096,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Selection Error", error)
 
     def _build_totals_refresh_options(self):
-        age_secs = self.fp.get_older_than_secs()
+        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
         root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
@@ -3709,28 +4120,41 @@ class MainWindow(QMainWindow):
         thread.finished.connect(lambda thread=thread: self._on_totals_thread_finished(thread))
         thread.start()
 
+    def _start_path_total_thread(self, request_id, kind, paths):
+        if not paths:
+            if kind == 'page':
+                self._set_chip_text(self.chip_page_size, "Page 0 B")
+            else:
+                self.cached_selected_total = 0
+                self._set_chip_text(self.chip_selected_size, "Selected 0 B (0F 0f)")
+            return
+
+        thread = PathSizeThread(request_id, kind, paths, parent=self)
+        if kind == 'page':
+            self.current_page_total_thread = thread
+        else:
+            self.selected_total_thread = thread
+        self.path_total_threads.append(thread)
+        thread.total_ready.connect(self._on_path_total_ready)
+        thread.total_failed.connect(self._on_path_total_failed)
+        thread.finished.connect(lambda thread=thread: self._cleanup_path_total_thread(thread))
+        thread.start()
+
     def _on_totals_thread_finished(self, thread):
         self._cleanup_totals_thread(thread)
-        pending_options = self.totals_refresh_options if self.totals_refresh_pending else None
         self.totals_refresh_pending = False
         self.totals_refresh_options = None
-        if pending_options:
-            request_id, options = pending_options
-            self._start_totals_thread(request_id, options)
 
     def _start_totals_refresh(self):
         self.totals_request_id += 1
         request_id = self.totals_request_id
         options = self._build_totals_refresh_options()
-        self.totals_refresh_options = (request_id, options)
-
-        if self.totals_thread and self.totals_thread.isRunning():
-            self.totals_refresh_pending = True
-            self._cancel_running_totals_thread()
-            return
-
+        self._cancel_running_totals_thread()
         self.totals_refresh_pending = False
+        self.totals_refresh_options = None
         self._start_totals_thread(request_id, options)
+        self._start_path_total_thread(request_id, 'page', options['current_page_file_paths'])
+        self._start_path_total_thread(request_id, 'selected', options['selected_paths'])
 
     def _set_loading_controls_enabled(self, enabled):
         self.controls_bar.setEnabled(enabled)
@@ -3739,9 +4163,6 @@ class MainWindow(QMainWindow):
 
     def _load_page(self):
         self._cancel_running_bulk_select_thread()
-        if self.page_only_selection_page != self.current_page:
-            self.page_only_selected_paths.clear()
-            self.page_only_selection_page = None
         self.page_load_request_id += 1
         request_id = self.page_load_request_id
         options = self._page_load_options()
@@ -3787,6 +4208,8 @@ class MainWindow(QMainWindow):
         limit = result['limit']
         offset = result['offset']
         view_mode = result['view_mode']
+        lazy_show_all_tree = result.get('lazy_show_all_tree', False)
+        self.current_lazy_show_all_tree = lazy_show_all_tree
 
         if rows_count == 0 and self.current_page > 0:
             self.current_page -= 1
@@ -3811,7 +4234,7 @@ class MainWindow(QMainWindow):
         self._restore_persistent_selection_to_model()
         self._restore_bulk_scope_selection_to_model()
 
-        has_multiple_pages = total_matches > limit
+        has_multiple_pages = (total_matches > limit) and not lazy_show_all_tree
         self.btn_prev_page.setVisible(has_multiple_pages)
         self.btn_next_page.setVisible(has_multiple_pages)
         self.lbl_page_info.setVisible(has_multiple_pages)
@@ -3840,7 +4263,7 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(5, 116)
         self.tree.setColumnWidth(6, 104)
 
-        self._set_expand_state(True)
+        self._set_expand_state(False if lazy_show_all_tree else True, remember=False)
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
         self._set_match_status(total_matches)
@@ -3871,36 +4294,71 @@ class MainWindow(QMainWindow):
 
         root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
-        if result['folder_total'] is not None and root_key:
+        folder_file_count = result.get('folder_file_count')
+        folder_total_is_real_zero = result['folder_total'] == 0 and folder_file_count == 0
+        folder_total_is_unknown_zero = result['folder_total'] == 0 and folder_file_count not in (0, None)
+        if result['folder_total'] is not None and root_key and not folder_total_is_unknown_zero:
             self.cached_folder_total = result['folder_total']
             self.cached_folder_total_root = root_key
 
-        self.chip_empty.setText(f"Empty: {result['empty_n']}")
-        self.chip_inactive_folders.setText(f"Inactive folders: {result['inactive_folders']}")
-        self.chip_inactive_files.setText(f"Inactive files: {result['inactive_files']}")
+        self._set_chip_text(self.chip_empty, f"Empty {result['empty_n']}")
+        self._set_chip_text(self.chip_inactive_folders, f"Inactive {result['inactive_folders']} folders")
+        self._set_chip_text(self.chip_inactive_files, f"{result['inactive_files']} files")
         if result['folder_total'] is None:
-            self._set_chip_text(self.chip_browse_size, "Folder total: Calculating...")
+            self._set_chip_text(self.chip_browse_size, "Folder calculating...")
+        elif folder_total_is_unknown_zero:
+            self.cached_folder_total = None
+            self._set_chip_text(self.chip_browse_size, "Folder calculating...")
         else:
             folder_total = result['folder_total']
-            folder_total_text = "0 B" if folder_total == 0 else format_size(folder_total)
-            self._set_chip_text(self.chip_browse_size, f"Folder total: {folder_total_text}")
-        self._set_chip_text(self.chip_page_size, f"Current page: {format_size(result['current_page_total'])}")
-        self._set_chip_text(self.chip_selected_size, f"Selected total: {format_size(result['selected_total'])}")
-        self.cached_selected_total = result['selected_total']
+            folder_total_text = "0 B" if folder_total_is_real_zero else format_size(folder_total)
+            self._set_chip_text(self.chip_browse_size, f"Folder {folder_total_text}")
+    def _on_path_total_ready(self, request_id, kind, total):
+        from .models import format_size
+
+        if request_id != self.totals_request_id:
+            return
+
+        if isinstance(total, dict):
+            size = total.get('size', 0)
+            folders = total.get('folders', 0)
+            files = total.get('files', 0)
+        else:
+            size = total
+            folders = 0
+            files = 0
+
+        if kind == 'page':
+            self._set_chip_text(self.chip_page_size, f"Page {format_size(size)}")
+            return
+
+        self.cached_selected_total = size
+        self._set_chip_text(
+            self.chip_selected_size,
+            f"Selected {format_size(size)} ({folders}F {files}f)",
+        )
         if (
             self.pending_delete_preview_dialog
             and getattr(self.pending_delete_preview_dialog, 'preview_mode', '') == 'direct'
         ):
             self.pending_delete_preview_dialog.apply_preview(self._build_direct_delete_preview(self._selected_roots_for_delete()))
 
+    def _on_path_total_failed(self, request_id, kind, error):
+        if request_id != self.totals_request_id:
+            return
+
+        if kind == 'page':
+            self._set_chip_text(self.chip_page_size, "Page --")
+            return
+
+        self.cached_selected_total = None
+        self._set_chip_text(self.chip_selected_size, "Selected --")
+
     def _on_totals_failed(self, request_id, error):
         if request_id != self.totals_request_id:
             return
 
-        self.cached_selected_total = None
-        self._set_chip_text(self.chip_browse_size, "Folder total: --")
-        self._set_chip_text(self.chip_page_size, "Current page: --")
-        self._set_chip_text(self.chip_selected_size, "Selected total: --")
+        self._set_chip_text(self.chip_browse_size, "Folder --")
 
     # -------------------------------------------------------------------------
     # Selection count (debounced)
@@ -4010,7 +4468,71 @@ class MainWindow(QMainWindow):
             return
         source_index = self.proxy_model.mapToSource(proxy_index)
         if source_index.isValid():
-            self.tree_model.load_children(source_index)
+            if self.current_lazy_show_all_tree:
+                self._start_lazy_child_load(source_index)
+            else:
+                self.tree_model.load_children(source_index)
+
+    def _on_tree_collapsed(self, proxy_index):
+        pass
+
+    def _start_lazy_child_load(self, source_index):
+        folder_path = self.tree_model.begin_async_child_load(source_index)
+        if not folder_path:
+            return
+
+        self.lazy_child_request_id += 1
+        request_id = self.lazy_child_request_id
+        thread = LazyChildrenLoadThread(
+            request_id,
+            folder_path,
+            sort_column=self.sort_column,
+            sort_desc=self.sort_order == Qt.SortOrder.DescendingOrder,
+            parent=self,
+        )
+        self.lazy_child_threads[request_id] = {
+            'thread': thread,
+            'index': QPersistentModelIndex(source_index),
+            'path': folder_path,
+            'model': self.tree_model,
+        }
+        thread.children_ready.connect(self._on_lazy_children_ready)
+        thread.children_failed.connect(self._on_lazy_children_failed)
+        thread.finished.connect(lambda request_id=request_id: self._cleanup_lazy_child_thread(request_id))
+        thread.start()
+
+    def _on_lazy_children_ready(self, request_id, folder_path, children):
+        state = self.lazy_child_threads.get(request_id)
+        if not state or state.get('path') != folder_path:
+            return
+        persistent_index = state.get('index')
+        if (
+            not persistent_index
+            or not persistent_index.isValid()
+            or not self.tree_model
+            or state.get('model') is not self.tree_model
+        ):
+            return
+
+        self.tree_model.finish_async_child_load(QModelIndex(persistent_index), children)
+        self._rebuild_source_index_map()
+        self._restore_persistent_selection_to_model()
+        self._restore_bulk_scope_selection_to_model()
+        self._refresh_selection_buttons()
+
+    def _on_lazy_children_failed(self, request_id, folder_path, error):
+        state = self.lazy_child_threads.get(request_id)
+        if not state or state.get('path') != folder_path:
+            return
+        persistent_index = state.get('index')
+        if (
+            persistent_index
+            and persistent_index.isValid()
+            and self.tree_model
+            and state.get('model') is self.tree_model
+        ):
+            self.tree_model.fail_async_child_load(QModelIndex(persistent_index))
+        self.lbl_status.setText("Failed to load folder contents.")
 
     def _context_menu(self, pos):
         idx = self.tree.indexAt(pos)

@@ -43,6 +43,8 @@ class TreeItem:
         self.childItems = []
         self.checkState = Qt.CheckState.Unchecked
         self.explicitlyChecked = False
+        self.children_loaded = False
+        self.children_loading = False
 
     def appendChild(self, item):
         self.childItems.append(item)
@@ -104,8 +106,9 @@ class WatchdogTreeModel(QAbstractItemModel):
             for child_data in data_node.get('children', []):
                 child_item = TreeItem(child_data, parent_item)
                 parent_item.appendChild(child_item)
+                child_item.children_loaded = bool(child_data.get('_children_loaded', False))
                 if child_data.get('is_dir', False):
-                    if not child_data.get('children'):
+                    if not child_data.get('children') and not child_item.children_loaded:
                         dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
                         child_item.appendChild(TreeItem(dummy_data, child_item))
                     else:
@@ -237,6 +240,79 @@ class WatchdogTreeModel(QAbstractItemModel):
                 child_item.appendChild(TreeItem(dummy_data, child_item))
             item.appendChild(child_item)
         self.endInsertRows()
+
+    def begin_async_child_load(self, parent_index):
+        if not parent_index.isValid():
+            return None
+
+        item = parent_index.internalPointer()
+        if (
+            not item.itemData.get('is_dir')
+            or item.children_loaded
+            or item.children_loading
+        ):
+            return None
+
+        item.children_loading = True
+        path = item.itemData.get('path')
+
+        if item.childCount() == 1 and item.child(0).itemData.get('_is_dummy'):
+            self.beginRemoveRows(parent_index, 0, 0)
+            item.childItems.pop(0)
+            self.endRemoveRows()
+
+        if path:
+            loading_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+            self.beginInsertRows(parent_index, 0, 0)
+            item.appendChild(TreeItem(loading_data, item))
+            self.endInsertRows()
+            return path
+
+        item.children_loading = False
+        item.children_loaded = True
+        return None
+
+    def finish_async_child_load(self, parent_index, child_nodes):
+        if not parent_index.isValid():
+            return
+
+        item = parent_index.internalPointer()
+
+        if item.childCount() == 1 and item.child(0).itemData.get('_is_dummy'):
+            self.beginRemoveRows(parent_index, 0, 0)
+            item.childItems.pop(0)
+            self.endRemoveRows()
+
+        item.children_loading = False
+        item.children_loaded = True
+
+        if not child_nodes:
+            self.layoutChanged.emit()
+            return
+
+        self.beginInsertRows(parent_index, item.childCount(), item.childCount() + len(child_nodes) - 1)
+        for child_data in child_nodes:
+            child_item = TreeItem(child_data, item)
+            child_item.checkState = item.checkState
+            child_item.children_loaded = bool(child_data.get('_children_loaded', False))
+            if child_data.get('is_dir') and not child_item.children_loaded:
+                dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+                child_item.appendChild(TreeItem(dummy_data, child_item))
+            item.appendChild(child_item)
+        self.endInsertRows()
+
+    def fail_async_child_load(self, parent_index):
+        if not parent_index.isValid():
+            return
+
+        item = parent_index.internalPointer()
+        item.children_loading = False
+
+        if item.childCount() == 0:
+            dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+            self.beginInsertRows(parent_index, 0, 0)
+            item.appendChild(TreeItem(dummy_data, item))
+            self.endInsertRows()
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -499,11 +575,13 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         self.status_filter = None   # None = all, 'Active', 'Inactive', 'Empty'
         self.older_than_secs = None
         self.older_than_cutoff_ts = None
+        self.view_mode = 'Tree'
         self._accepts_cache = {}
 
-    def set_filters(self, empty_only, older_than_secs=None, status_filter=None):
+    def set_filters(self, empty_only, older_than_secs=None, status_filter=None, view_mode='Tree'):
         self.empty_only = empty_only
         self.status_filter = status_filter
+        self.view_mode = view_mode
         self.older_than_secs = older_than_secs
         self.older_than_cutoff_ts = (
             datetime.now().timestamp() - older_than_secs
@@ -629,6 +707,12 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
     def _matches(self, item_data):
         if item_data.get('_is_dummy'):
             return True
+        if (
+            self.view_mode == 'Tree'
+            and self.status_filter == 'Inactive'
+            and item_data.get('is_dir', False)
+        ):
+            return False
         status = item_data.get('status', '')
         ts = item_data.get('last_modified', 0)
 
