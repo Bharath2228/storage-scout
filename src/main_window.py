@@ -922,9 +922,19 @@ class TotalsThread(QThread):
 
         self._raise_if_cancelled()
         normalized = os.path.normpath(root_path).rstrip("\\/")
+        cursor.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM file_index "
+            "WHERE is_folder = 0 AND root = ? COLLATE NOCASE",
+            (normalized,),
+        )
+        total = cursor.fetchone()[0] or 0
+        if total:
+            return total
+
         descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
-            f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({case_insensitive_path_sql()} OR {descendant_sql})",
+            f"SELECT COALESCE(SUM(size), 0) FROM file_index "
+            f"WHERE is_folder = 0 AND ({case_insensitive_path_sql()} OR {descendant_sql})",
             (normalized, *descendant_params),
         )
         return cursor.fetchone()[0] or 0
@@ -2315,6 +2325,21 @@ class MainWindow(QMainWindow):
         if indices:
             self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Checked, explicit=True)
 
+    def _restore_bulk_scope_selection_to_model(self):
+        if not self.tree_model or not self.bulk_delete_scope:
+            return
+
+        indices = self._collect_bulk_target_indices(
+            status=self.bulk_delete_scope.get('status'),
+            videos_only=self.bulk_delete_scope.get('videos_only', False),
+        )
+        indices = [
+            index for index in indices
+            if self._is_persistable_selection_index(index)
+        ]
+        if indices:
+            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Checked, explicit=True)
+
     def _promote_current_page_selection_to_page_only(self):
         if not self.tree_model:
             return
@@ -2549,6 +2574,8 @@ class MainWindow(QMainWindow):
             'where_sql': where_sql,
             'params': params,
             'folder_delete_mode': folder_delete_mode,
+            'status': status,
+            'videos_only': videos_only,
         }
 
     def _choose_select_scope(self, label, current_page_count=0):
@@ -2636,7 +2663,7 @@ class MainWindow(QMainWindow):
             return
 
         mode = self._display_mode()
-        has_selection = bool(self.selected_paths or self.page_only_selected_paths)
+        has_selection = bool(self.bulk_delete_scope or self.selected_paths or self.page_only_selected_paths)
         all_targets, inactive_targets, empty_targets = self._collect_selection_button_targets(mode)
 
         self.btn_select_all.setVisible(not has_selection)
@@ -3262,12 +3289,10 @@ class MainWindow(QMainWindow):
             
     def _prev_page(self):
         if self.current_page > 0:
-            self.bulk_delete_scope = None
             self.current_page -= 1
             self._load_page()
 
     def _next_page(self):
-        self.bulk_delete_scope = None
         self.current_page += 1
         self._load_page()
 
@@ -3784,6 +3809,7 @@ class MainWindow(QMainWindow):
         self.tree.setModel(self.proxy_model)
         self._rebuild_source_index_map()
         self._restore_persistent_selection_to_model()
+        self._restore_bulk_scope_selection_to_model()
 
         has_multiple_pages = total_matches > limit
         self.btn_prev_page.setVisible(has_multiple_pages)
@@ -3855,7 +3881,9 @@ class MainWindow(QMainWindow):
         if result['folder_total'] is None:
             self._set_chip_text(self.chip_browse_size, "Folder total: Calculating...")
         else:
-            self._set_chip_text(self.chip_browse_size, f"Folder total: {format_size(result['folder_total'])}")
+            folder_total = result['folder_total']
+            folder_total_text = "0 B" if folder_total == 0 else format_size(folder_total)
+            self._set_chip_text(self.chip_browse_size, f"Folder total: {folder_total_text}")
         self._set_chip_text(self.chip_page_size, f"Current page: {format_size(result['current_page_total'])}")
         self._set_chip_text(self.chip_selected_size, f"Selected total: {format_size(result['selected_total'])}")
         self.cached_selected_total = result['selected_total']
