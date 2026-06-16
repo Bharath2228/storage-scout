@@ -2,6 +2,7 @@ import os
 import stat
 from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
+from .folder_cache import FolderCache
 
 class ScannerThread(QThread):
     scan_started = pyqtSignal()
@@ -16,6 +17,7 @@ class ScannerThread(QThread):
         self.stale_months = stale_months
         self.is_cancelled = False
         self.last_emit_time = 0
+        self.cache = FolderCache()
         
     def run(self):
         self.scan_started.emit()
@@ -63,11 +65,11 @@ class ScannerThread(QThread):
             if current_time - self.last_emit_time > 0.3:
                 self.scan_progress.emit(current_folder)
                 self.last_emit_time = current_time
-            if inserted >= 2000 and not self.initial_batch_emitted:
+            if inserted >= 500 and not self.initial_batch_emitted:
                 self.initial_batch_emitted = True
                 self.first_batch_ready.emit()
                 self.last_emitted_count = inserted
-            elif self.initial_batch_emitted and (inserted - self.last_emitted_count) >= 2000:
+            elif self.initial_batch_emitted and (inserted - self.last_emitted_count) >= 500:
                 self.last_emitted_count = inserted
                 self.batch_ready.emit()
 
@@ -75,6 +77,7 @@ class ScannerThread(QThread):
             root_folder=start_path,
             inactive_months=self.stale_months,
             batch_size=1000,
+            cache=self.cache,
             cancel_callback=cancel_cb,
             progress_callback=progress_cb
         )

@@ -114,6 +114,26 @@ class WatchdogTreeModel(QAbstractItemModel):
                     else:
                         stack.append((child_data, child_item))
 
+    def update_sizes_from_cache(self, cache):
+        if cache is None:
+            return
+
+        changed = False
+        stack = [self.rootItem]
+        while stack:
+            item = stack.pop()
+            item_data = item.itemData
+            if item_data.get('is_dir') and item_data.get('path'):
+                key = cache._key(item_data.get('path'))
+                if key in cache.folder_sizes:
+                    new_size = cache.folder_sizes.get(key, 0) or 0
+                    if item_data.get('size', 0) != new_size:
+                        item_data['size'] = new_size
+                        changed = True
+            stack.extend(item.childItems)
+
+        if changed:
+            self.layoutChanged.emit()
 
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():

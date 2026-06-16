@@ -917,6 +917,33 @@ class PageLoadThread(QThread):
 
         root_path = self.options.get('scan_root') or ""
         root_path = os.path.normpath(root_path) if root_path else root_path
+        cache = self.options.get('folder_cache')
+        cached_children = cache.children_for(
+            root_path,
+            self.options['sort_column'],
+            self.options['sort_desc'],
+        ) if cache and cache.has_children_for(root_path) else None
+        if cached_children is not None:
+            total_matches = max(cache.item_count() - 1, 0)
+            root_node = {
+                'name': 'root',
+                'is_dir': True,
+                'path': root_path,
+                'status': 'Active',
+                'children': cached_children,
+                '_children_loaded': True,
+            }
+            return {
+                'root_node': root_node,
+                'view_mode': 'Tree',
+                'rows_count': len(cached_children),
+                'total_matches': total_matches,
+                'limit': max(total_matches, len(cached_children), 1),
+                'offset': 0,
+                'page': 0,
+                'paginated': False,
+                'lazy_show_all_tree': True,
+            }
 
         tool = FileIndexTool()
         try:
@@ -984,7 +1011,7 @@ class LazyChildrenLoadThread(QThread):
     children_ready = pyqtSignal(int, str, list)
     children_failed = pyqtSignal(int, str, str)
 
-    def __init__(self, request_id, folder_path, sort_column=0, sort_desc=False, options=None, parent=None):
+    def __init__(self, request_id, folder_path, sort_column=0, sort_desc=False, options=None, cache=None, parent=None):
         super().__init__(parent)
         self.request_id = request_id
         self.folder_path = folder_path
@@ -992,6 +1019,7 @@ class LazyChildrenLoadThread(QThread):
         self.sort_desc = sort_desc
         self.options = dict(options or {})
         self.apply_filter_options = options is not None
+        self.cache = cache
 
     def _child_paths_with_children(self, cursor, child_paths):
         folders_with_children = set()
@@ -1046,6 +1074,23 @@ class LazyChildrenLoadThread(QThread):
         return True
 
     def run(self):
+        if self.cache and self.cache.has_children_for(self.folder_path):
+            children = self.cache.children_for(self.folder_path, self.sort_column, self.sort_desc)
+            if self.apply_filter_options:
+                filtered = []
+                for child in children:
+                    status = self._status_for_child(
+                        child.get('is_dir', False),
+                        child.get('last_modified', 0),
+                        not child.get('_children_loaded', True),
+                    )
+                    if self._child_matches_options(child.get('name', ''), child.get('is_dir', False), status):
+                        child['status'] = status
+                        filtered.append(child)
+                children = filtered
+            self.children_ready.emit(self.request_id, self.folder_path, children)
+            return
+
         from src.file_index_tool import FileIndexTool
 
         tool = FileIndexTool()
@@ -1879,6 +1924,7 @@ class MainWindow(QMainWindow):
         self.cached_folder_total = None
         self.cached_folder_total_root = None
         self.cached_selected_total = None
+        self.folder_cache = None
         self.saved_age_threshold_value = 0
         self.loading_dialog = None
         self.selection_loading_dialog = None
@@ -3638,6 +3684,7 @@ class MainWindow(QMainWindow):
         self.source_index_by_path = {}
         self.lazy_child_request_id += 1
         self.current_lazy_show_all_tree = False
+        self.folder_cache = None
 
         # Reset pagination state
         self.current_page = 0
@@ -3732,6 +3779,7 @@ class MainWindow(QMainWindow):
         self._cancel_running_totals_thread()
 
         self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
+        self.folder_cache = self.scanner_thread.cache
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_progress.connect(self._on_progress)
         self.scanner_thread.first_batch_ready.connect(self._on_first_batch_ready)
@@ -3751,16 +3799,33 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"Found {total_matches} matching items")
 
     def _on_first_batch_ready(self):
-        if self._page_load_options().get('defer_tree_load_until_scan_done'):
+        options = self._page_load_options()
+        if options.get('defer_tree_load_until_scan_done') and not self._can_live_load_from_cache(options):
             return
         if self.current_page == 0 and self.content_stack.currentIndex() in (0, 3):
             self._load_page()
 
     def _on_batch_ready(self):
-        """Called during scanning when a new batch of 2,000 items is indexed."""
+        """Called during scanning when a new batch of items is indexed."""
         # Counting matches can be expensive on large scans, so throttle it.
+        if self.content_stack.currentIndex() == 3:
+            options = self._page_load_options()
+            if self._can_live_load_from_cache(options):
+                self._load_page()
+            return
         if self.content_stack.currentIndex() == 1 and not self.scan_refresh_timer.isActive():
             self.scan_refresh_timer.start()
+
+    def _can_live_load_from_cache(self, options):
+        cache = options.get('folder_cache')
+        root_path = options.get('scan_root')
+        return bool(
+            options.get('lazy_show_all_tree')
+            and cache
+            and root_path
+            and cache.has_children_for(root_path)
+            and cache.child_count(root_path) > 0
+        )
 
     def _refresh_pagination_only(self):
         """Update pagination buttons/info without reloading the whole tree."""
@@ -3828,7 +3893,7 @@ class MainWindow(QMainWindow):
         self.current_total_matches = total_matches or 0
         limit = 2000
         offset = self.current_page * limit
-        has_multiple_pages = total_matches > limit
+        has_multiple_pages = total_matches > limit and not self._page_load_options().get('lazy_show_all_tree')
         self.btn_prev_page.setVisible(has_multiple_pages)
         self.btn_next_page.setVisible(has_multiple_pages)
         self.lbl_page_info.setVisible(has_multiple_pages)
@@ -3854,7 +3919,11 @@ class MainWindow(QMainWindow):
         if self.content_stack.currentIndex() in (0, 3):
             self._load_page()
         elif self.content_stack.currentIndex() == 1:
-            self.scan_refresh_timer.start()
+            if self.current_lazy_show_all_tree:
+                if self.tree_model:
+                    self.tree_model.update_sizes_from_cache(self.folder_cache)
+            else:
+                self.scan_refresh_timer.start()
             self._update_chips_sql()
             
     def _prev_page(self):
@@ -3949,6 +4018,7 @@ class MainWindow(QMainWindow):
             'sort_column': self.sort_column,
             'sort_desc': self.sort_order == Qt.SortOrder.DescendingOrder,
             'scan_root': getattr(self, 'current_scan_root', os.path.normpath(self.txt_path.text().strip() or "")),
+            'folder_cache': self.folder_cache,
             'lazy_show_all_tree': lazy_show_all_tree,
             'filtered_expanded_tree': filtered_expanded_tree,
             'defer_tree_load_until_scan_done': defer_tree_load_until_scan_done,
@@ -4677,6 +4747,7 @@ class MainWindow(QMainWindow):
             sort_column=self.sort_column,
             sort_desc=self.sort_order == Qt.SortOrder.DescendingOrder,
             options=None if self.current_lazy_show_all_tree else getattr(self.tree_model, 'options', {}),
+            cache=self.folder_cache,
             parent=self,
         )
         self.lazy_child_threads[request_id] = {

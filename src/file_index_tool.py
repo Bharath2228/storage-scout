@@ -18,6 +18,7 @@ class FileIndexTool:
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self.conn.execute("PRAGMA temp_store=MEMORY;")
+        self.conn.execute("PRAGMA cache_size=-65536;")
         self.create_tables()
 
     def create_tables(self) -> None:
@@ -55,6 +56,7 @@ class FileIndexTool:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_inactive ON file_index(inactive);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_folder ON file_index(is_folder);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_extension ON file_index(extension);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON file_index(size DESC);")
         self.conn.commit()
 
     def clear_index(self) -> None:
@@ -75,6 +77,7 @@ class FileIndexTool:
         inactive_years: int | None = None,
         batch_size: int = 1000,
         max_workers: int | None = None,
+        cache=None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         cancel_callback: Optional[Callable[[], bool]] = None,
     ) -> None:
@@ -82,6 +85,7 @@ class FileIndexTool:
         if inactive_years is not None:
             inactive_months = inactive_years * 12
         cutoff_timestamp = (datetime.now() - timedelta(days=30 * inactive_months)).timestamp()
+        self._active_cache = cache
 
         max_workers = max_workers or self._default_worker_count(root_folder)
         scanned_count = 0
@@ -167,6 +171,16 @@ class FileIndexTool:
             root_name = Path(root_folder).name or root_folder
             with summary_lock:
                 ensure_folder(root_folder, None, root_stat.st_mtime)
+                if cache:
+                    cache.add_item(
+                        root_folder,
+                        root_name,
+                        True,
+                        0,
+                        root_stat.st_mtime,
+                        None,
+                        'Active',
+                    )
             rows_queue.put([
                 (
                     root_folder,
@@ -212,6 +226,7 @@ class FileIndexTool:
                             modified_time = stat.st_mtime
                             extension = "" if is_folder else Path(name).suffix.lower()
                             inactive = 1 if modified_time < cutoff_timestamp else 0
+                            status = "Inactive" if inactive else "Active"
 
                             local_batch.append(
                                 (
@@ -234,6 +249,8 @@ class FileIndexTool:
                             with summary_lock:
                                 current_info = ensure_folder(current_folder)
                                 current_info["child_count"] += 1
+                                if cache:
+                                    cache.add_item(path, name, is_folder, size, modified_time, current_folder, status)
                                 if is_folder:
                                     ensure_folder(path, current_folder, modified_time)
                                     if name not in {"venv", "__pycache__", "node_modules", ".git"}:
@@ -275,7 +292,10 @@ class FileIndexTool:
         rows_queue.put(stop_writer)
         writer.join()
 
-        self._write_folder_summaries(folder_info)
+        try:
+            self._write_folder_summaries(folder_info)
+        finally:
+            self._active_cache = None
 
         if progress_callback:
             progress_callback(scanned_count, inserted_count, root_folder)
@@ -300,6 +320,17 @@ class FileIndexTool:
                 parent_item["total_size"] += item["total_size"]
                 parent_item["file_count"] += item["file_count"]
                 parent_item["folder_count"] += item["folder_count"]
+
+        cache = getattr(self, "_active_cache", None)
+        if cache:
+            for item in summaries:
+                cache.set_folder_summary(
+                    item["path"],
+                    item["total_size"],
+                    item["file_count"],
+                    item["folder_count"],
+                    item["child_count"],
+                )
 
         rows = [
             (
@@ -346,6 +377,30 @@ class FileIndexTool:
         )
         self.conn.commit()
         return len(batch)
+
+    def warm_cache(self, cache) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT path, name, is_folder, size, modified_time, parent_path,
+                   CASE WHEN modified_time > 0 THEN inactive ELSE 0 END
+            FROM file_index
+            """
+        )
+        for path, name, is_folder, size, modified_time, parent_path, inactive in cursor.fetchall():
+            cache.add_item(
+                path,
+                name,
+                bool(is_folder),
+                size or 0,
+                modified_time,
+                parent_path,
+                "Inactive" if inactive else "Active",
+            )
+
+        cursor.execute("SELECT path, total_size, file_count, folder_count, child_count FROM folder_summary")
+        for path, total_size, file_count, folder_count, child_count in cursor.fetchall():
+            cache.set_folder_summary(path, total_size, file_count, folder_count, child_count)
 
     def children_of_folder(self, folder_path: str, limit: int = 500, offset: int = 0) -> list[tuple]:
         folder_path = str(Path(folder_path).resolve())
