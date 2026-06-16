@@ -1,7 +1,10 @@
 import argparse
 import os
+import queue
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -34,6 +37,17 @@ class FileIndexTool:
             );
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS folder_summary (
+                path TEXT PRIMARY KEY,
+                total_size INTEGER DEFAULT 0,
+                file_count INTEGER DEFAULT 0,
+                folder_count INTEGER DEFAULT 0,
+                child_count INTEGER DEFAULT 0
+            );
+            """
+        )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON file_index(name);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON file_index(parent_path);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_nocase ON file_index(parent_path COLLATE NOCASE);")
@@ -45,7 +59,14 @@ class FileIndexTool:
 
     def clear_index(self) -> None:
         self.conn.execute("DELETE FROM file_index;")
+        self.conn.execute("DELETE FROM folder_summary;")
         self.conn.commit()
+
+    def _default_worker_count(self, root_folder: str) -> int:
+        cpu_count = os.cpu_count() or 4
+        if root_folder.startswith("\\\\") or root_folder.startswith("//"):
+            return max(2, min(6, cpu_count))
+        return max(4, min(16, cpu_count * 2))
 
     def scan(
         self,
@@ -53,6 +74,7 @@ class FileIndexTool:
         inactive_months: int = 24,
         inactive_years: int | None = None,
         batch_size: int = 1000,
+        max_workers: int | None = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         cancel_callback: Optional[Callable[[], bool]] = None,
     ) -> None:
@@ -61,15 +83,91 @@ class FileIndexTool:
             inactive_months = inactive_years * 12
         cutoff_timestamp = (datetime.now() - timedelta(days=30 * inactive_months)).timestamp()
 
-        stack = [root_folder]
-        batch = []
+        max_workers = max_workers or self._default_worker_count(root_folder)
         scanned_count = 0
         inserted_count = 0
+        latest_folder = root_folder
+
+        rows_queue: queue.Queue = queue.Queue(maxsize=max_workers * 4)
+        work_queue: queue.Queue = queue.Queue()
+        stop_writer = object()
+        pending_lock = threading.Lock()
+        progress_lock = threading.Lock()
+        summary_lock = threading.Lock()
+        pending_folders = 0
+        folder_info: dict[str, dict] = {}
+
+        def path_key(value: str) -> str:
+            return os.path.normcase(os.path.normpath(value))
+
+        def ensure_folder(path: str, parent_path: str | None = None, modified_time: float = 0) -> dict:
+            key = path_key(path)
+            info = folder_info.get(key)
+            if info is None:
+                info = {
+                    "path": path,
+                    "parent": parent_path,
+                    "total_size": 0,
+                    "file_count": 0,
+                    "folder_count": 1,
+                    "child_count": 0,
+                    "modified_time": modified_time,
+                }
+                folder_info[key] = info
+            else:
+                if parent_path is not None:
+                    info["parent"] = parent_path
+                if modified_time:
+                    info["modified_time"] = modified_time
+            return info
+
+        def queue_folder(folder_path: str) -> None:
+            nonlocal pending_folders
+            with pending_lock:
+                pending_folders += 1
+            work_queue.put(folder_path)
+
+        def mark_folder_done() -> None:
+            nonlocal pending_folders
+            with pending_lock:
+                pending_folders -= 1
+
+        def is_done() -> bool:
+            with pending_lock:
+                return pending_folders <= 0
+
+        def report_progress(current_folder: str) -> None:
+            if not progress_callback:
+                return
+            progress_callback(scanned_count, inserted_count, current_folder)
+
+        def writer_loop() -> None:
+            nonlocal inserted_count
+            batch = []
+            while True:
+                item = rows_queue.get()
+                if item is stop_writer:
+                    break
+                batch.extend(item)
+                if len(batch) >= batch_size:
+                    inserted = self._insert_batch(batch)
+                    with progress_lock:
+                        inserted_count += inserted
+                        report_progress(latest_folder)
+                    batch.clear()
+
+            if batch:
+                inserted = self._insert_batch(batch)
+                with progress_lock:
+                    inserted_count += inserted
+                    report_progress(latest_folder)
 
         try:
             root_stat = os.stat(root_folder, follow_symlinks=False)
             root_name = Path(root_folder).name or root_folder
-            batch.append(
+            with summary_lock:
+                ensure_folder(root_folder, None, root_stat.st_mtime)
+            rows_queue.put([
                 (
                     root_folder,
                     root_folder,
@@ -81,17 +179,22 @@ class FileIndexTool:
                     "",
                     1 if root_stat.st_mtime < cutoff_timestamp else 0,
                 )
-            )
-            scanned_count += 1
+            ])
+            with progress_lock:
+                scanned_count += 1
         except (PermissionError, FileNotFoundError, OSError):
             return
 
-        while stack:
+        writer = threading.Thread(target=writer_loop, name="file-index-writer", daemon=True)
+        writer.start()
+        queue_folder(root_folder)
+
+        def scan_folder(current_folder: str) -> None:
+            nonlocal scanned_count, latest_folder
             if cancel_callback and cancel_callback():
-                break
-
-            current_folder = stack.pop()
-
+                mark_folder_done()
+                return
+            local_batch = []
             try:
                 with os.scandir(current_folder) as entries:
                     for entry in entries:
@@ -110,7 +213,7 @@ class FileIndexTool:
                             extension = "" if is_folder else Path(name).suffix.lower()
                             inactive = 1 if modified_time < cutoff_timestamp else 0
 
-                            batch.append(
+                            local_batch.append(
                                 (
                                     root_folder,
                                     path,
@@ -124,31 +227,103 @@ class FileIndexTool:
                                 )
                             )
 
-                            scanned_count += 1
+                            with progress_lock:
+                                scanned_count += 1
+                                latest_folder = current_folder
 
-                            if is_folder:
-                                if name not in {"venv", "__pycache__", "node_modules", ".git"}:
-                                    stack.append(path)
+                            with summary_lock:
+                                current_info = ensure_folder(current_folder)
+                                current_info["child_count"] += 1
+                                if is_folder:
+                                    ensure_folder(path, current_folder, modified_time)
+                                    if name not in {"venv", "__pycache__", "node_modules", ".git"}:
+                                        queue_folder(path)
+                                else:
+                                    current_info["total_size"] += size or 0
+                                    current_info["file_count"] += 1
 
-                            if len(batch) >= batch_size:
-                                inserted_count += self._insert_batch(batch)
-                                batch.clear()
-
-                                if progress_callback:
-                                    progress_callback(scanned_count, inserted_count, current_folder)
+                            if len(local_batch) >= batch_size:
+                                rows_queue.put(local_batch)
+                                local_batch = []
 
                         except (PermissionError, FileNotFoundError, OSError):
                             continue
 
             except (PermissionError, FileNotFoundError, OSError):
-                continue
+                pass
+            finally:
+                if local_batch:
+                    rows_queue.put(local_batch)
+                mark_folder_done()
 
-        if batch:
-            inserted_count += self._insert_batch(batch)
-            batch.clear()
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="scan-worker") as executor:
+            futures = []
+            while True:
+                if cancel_callback and cancel_callback():
+                    break
+                try:
+                    folder = work_queue.get(timeout=0.05)
+                except queue.Empty:
+                    if is_done():
+                        break
+                    continue
+                futures.append(executor.submit(scan_folder, folder))
+
+            for future in futures:
+                future.result()
+
+        rows_queue.put(stop_writer)
+        writer.join()
+
+        self._write_folder_summaries(folder_info)
 
         if progress_callback:
             progress_callback(scanned_count, inserted_count, root_folder)
+
+    def _write_folder_summaries(self, folder_info: dict[str, dict]) -> None:
+        if not folder_info:
+            return
+
+        summaries = list(folder_info.values())
+        summaries.sort(key=lambda item: len(os.path.normpath(item["path"])), reverse=True)
+        by_key = {
+            os.path.normcase(os.path.normpath(item["path"])): item
+            for item in summaries
+        }
+
+        for item in summaries:
+            parent = item.get("parent")
+            if not parent:
+                continue
+            parent_item = by_key.get(os.path.normcase(os.path.normpath(parent)))
+            if parent_item:
+                parent_item["total_size"] += item["total_size"]
+                parent_item["file_count"] += item["file_count"]
+                parent_item["folder_count"] += item["folder_count"]
+
+        rows = [
+            (
+                item["path"],
+                item["total_size"],
+                item["file_count"],
+                item["folder_count"],
+                item["child_count"],
+            )
+            for item in summaries
+        ]
+        self.conn.executemany(
+            """
+            INSERT OR REPLACE INTO folder_summary
+            (path, total_size, file_count, folder_count, child_count)
+            VALUES (?, ?, ?, ?, ?);
+            """,
+            rows,
+        )
+        self.conn.executemany(
+            "UPDATE file_index SET size = ? WHERE path = ? AND is_folder = 1;",
+            [(item["total_size"], item["path"]) for item in summaries],
+        )
+        self.conn.commit()
 
     def _insert_batch(self, batch: list[tuple]) -> int:
         self.conn.executemany(

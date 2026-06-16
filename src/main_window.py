@@ -175,9 +175,36 @@ def summarize_paths_batch(cursor, paths, cancel_check=None):
             files += 1
             total_size += size or 0
 
-    for start in range(0, len(folder_paths), 120):
+    remaining_folder_paths = []
+    for start in range(0, len(folder_paths), 900):
         check_cancelled()
-        batch = folder_paths[start:start + 120]
+        batch = folder_paths[start:start + 900]
+        placeholders = ",".join("?" * len(batch))
+        cursor.execute(
+            f"""
+            SELECT path, total_size, file_count, folder_count
+            FROM folder_summary
+            WHERE path COLLATE NOCASE IN ({placeholders})
+            """,
+            batch,
+        )
+        summary_by_key = {
+            os.path.normcase(os.path.normpath(path)): (total_size, file_count, folder_count)
+            for path, total_size, file_count, folder_count in cursor.fetchall()
+        }
+        for folder_path in batch:
+            summary = summary_by_key.get(os.path.normcase(os.path.normpath(folder_path)))
+            if summary:
+                summary_size, summary_files, summary_folders = summary
+                folders += summary_folders or 0
+                files += summary_files or 0
+                total_size += summary_size or 0
+            else:
+                remaining_folder_paths.append(folder_path)
+
+    for start in range(0, len(remaining_folder_paths), 120):
+        check_cancelled()
+        batch = remaining_folder_paths[start:start + 120]
         clauses = []
         params = []
         for folder_path in batch:
@@ -807,7 +834,7 @@ class PageLoadThread(QThread):
                 'name': name,
                 'path': path,
                 'is_dir': bool(is_folder),
-                'size': size if not is_folder else 0,
+                'size': size or 0,
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
@@ -928,7 +955,7 @@ class PageLoadThread(QThread):
                 'name': name,
                 'path': path,
                 'is_dir': bool(is_folder),
-                'size': size if not is_folder else 0,
+                'size': size or 0,
                 'last_modified': modified_time,
                 'status': 'Active',
                 'children': [],
@@ -1051,7 +1078,7 @@ class LazyChildrenLoadThread(QThread):
                 'name': name,
                 'path': path,
                 'is_dir': is_folder,
-                'size': size if not is_folder else 0,
+                'size': size or 0,
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
@@ -1268,6 +1295,15 @@ class TotalsThread(QThread):
 
         self._raise_if_cancelled()
         normalized = os.path.normpath(root_path).rstrip("\\/")
+        cursor.execute(
+            "SELECT total_size, file_count FROM folder_summary WHERE path = ? COLLATE NOCASE",
+            (normalized,),
+        )
+        summary = cursor.fetchone()
+        if summary:
+            total, file_count = summary
+            return total or 0, file_count or 0
+
         cursor.execute(
             "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM file_index "
             "WHERE is_folder = 0 AND root = ? COLLATE NOCASE",
@@ -3541,6 +3577,14 @@ class MainWindow(QMainWindow):
             return 0
 
         normalized = os.path.normpath(root_path).rstrip("\\/")
+        cursor.execute(
+            "SELECT total_size FROM folder_summary WHERE path = ? COLLATE NOCASE",
+            (normalized,),
+        )
+        summary = cursor.fetchone()
+        if summary:
+            return summary[0] or 0
+
         descendant_sql, descendant_params = descendant_like_sql(normalized)
         cursor.execute(
             f"SELECT COALESCE(SUM(size), 0) FROM file_index WHERE is_folder = 0 AND ({case_insensitive_path_sql()} OR {descendant_sql})",

@@ -215,7 +215,7 @@ class WatchdogTreeModel(QAbstractItemModel):
                 'name': c_name,
                 'path': c_path,
                 'is_dir': bool(c_is_folder),
-                'size': c_size if not c_is_folder else 0,
+                'size': c_size or 0,
                 'last_modified': c_modified_time,
                 'status': status,
                 'children': [],
