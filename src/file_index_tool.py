@@ -36,6 +36,7 @@ class FileIndexTool:
         )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON file_index(name);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON file_index(parent_path);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_nocase ON file_index(parent_path COLLATE NOCASE);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_modified ON file_index(modified_time);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_inactive ON file_index(inactive);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_folder ON file_index(is_folder);")

@@ -1,5 +1,6 @@
 import os
 import csv
+import html
 import subprocess
 import send2trash
 import time
@@ -937,6 +938,8 @@ class PageLoadThread(QThread):
                 'display_location': parent_path,
             })
 
+        self._hide_scan_root_context(root_node)
+
         return {
             'root_node': root_node,
             'view_mode': 'Tree',
@@ -954,12 +957,66 @@ class LazyChildrenLoadThread(QThread):
     children_ready = pyqtSignal(int, str, list)
     children_failed = pyqtSignal(int, str, str)
 
-    def __init__(self, request_id, folder_path, sort_column=0, sort_desc=False, parent=None):
+    def __init__(self, request_id, folder_path, sort_column=0, sort_desc=False, options=None, parent=None):
         super().__init__(parent)
         self.request_id = request_id
         self.folder_path = folder_path
         self.sort_column = sort_column
         self.sort_desc = sort_desc
+        self.options = dict(options or {})
+        self.apply_filter_options = options is not None
+
+    def _child_paths_with_children(self, cursor, child_paths):
+        folders_with_children = set()
+        for start in range(0, len(child_paths), 900):
+            batch = child_paths[start:start + 900]
+            if not batch:
+                continue
+            placeholders = ",".join("?" * len(batch))
+            cursor.execute(
+                f"""
+                SELECT DISTINCT parent_path
+                FROM file_index
+                WHERE parent_path COLLATE NOCASE IN ({placeholders})
+                """,
+                batch,
+            )
+            folders_with_children.update(
+                os.path.normcase(os.path.normpath(path))
+                for (path,) in cursor.fetchall()
+                if path
+            )
+        return folders_with_children
+
+    def _status_for_child(self, is_folder, modified_time, has_child):
+        if not self.apply_filter_options:
+            return 'Active'
+
+        options = self.options
+        age_cutoff = options.get('age_cutoff')
+
+        is_stale = (modified_time <= age_cutoff) if age_cutoff else True
+        status = 'Inactive' if is_stale else 'Active'
+        if is_folder and not has_child:
+            status = 'Empty'
+        return status
+
+    def _child_matches_options(self, name, is_folder, status):
+        options = self.options
+        status_filter = options.get('status_filter')
+        videos_only = options.get('videos_only', False)
+
+        if videos_only and not is_folder:
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in VIDEO_EXTENSIONS:
+                return False
+        if status_filter == 'Inactive' and status == 'Active':
+            return False
+        if status_filter == 'Empty' and status != 'Empty':
+            return False
+        if status_filter == 'Active' and status != 'Active':
+            return False
+        return True
 
     def run(self):
         from src.file_index_tool import FileIndexTool
@@ -968,14 +1025,15 @@ class LazyChildrenLoadThread(QThread):
         try:
             cursor = tool.conn.cursor()
             cursor.execute(
-                "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
-                "(SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1) "
-                "FROM file_index f "
-                "WHERE f.parent_path = ? COLLATE NOCASE "
+                "SELECT path, name, is_folder, size, modified_time, parent_path "
+                "FROM file_index "
+                "WHERE parent_path = ? COLLATE NOCASE "
                 f"ORDER BY {build_sort_order_clause('Tree', self.sort_column, self.sort_desc)}",
                 (self.folder_path,),
             )
             rows = cursor.fetchall()
+            child_folder_paths = [path for path, _name, is_folder, _size, _modified_time, _parent_path in rows if is_folder]
+            folders_with_children = self._child_paths_with_children(cursor, child_folder_paths)
         except Exception as exc:
             self.children_failed.emit(self.request_id, self.folder_path, str(exc))
             return
@@ -983,14 +1041,19 @@ class LazyChildrenLoadThread(QThread):
             tool.close()
 
         children = []
-        for path, name, is_folder, size, modified_time, parent_path, has_child in rows:
+        for path, name, is_folder, size, modified_time, parent_path in rows:
+            is_folder = bool(is_folder)
+            has_child = os.path.normcase(os.path.normpath(path)) in folders_with_children
+            status = self._status_for_child(is_folder, modified_time, has_child)
+            if not self._child_matches_options(name, is_folder, status):
+                continue
             children.append({
                 'name': name,
                 'path': path,
-                'is_dir': bool(is_folder),
+                'is_dir': is_folder,
                 'size': size if not is_folder else 0,
                 'last_modified': modified_time,
-                'status': 'Active',
+                'status': status,
                 'children': [],
                 '_children_loaded': not (is_folder and has_child),
                 '_is_page_result': True,
@@ -2013,7 +2076,7 @@ class MainWindow(QMainWindow):
         self.controls_bar.setVisible(False)
         right_v.addWidget(self.controls_bar)
 
-        # Empty state + Tree wrapped in a stacked widget
+        # Empty state + Tree + Scanning state wrapped in a stacked widget
         self.content_stack = QStackedWidget()
 
         # Page 0: Empty state
@@ -2045,6 +2108,56 @@ class MainWindow(QMainWindow):
         ep_layout.addSpacing(8)
         ep_layout.addWidget(btn_browse_cta, alignment=Qt.AlignmentFlag.AlignCenter)
         ep_layout.addStretch()
+
+        # Page 1: Scanning state
+        scanning_page = QWidget()
+        scanning_page.setObjectName("emptyState")
+        sp_layout = QVBoxLayout(scanning_page)
+        sp_layout.setContentsMargins(24, 36, 24, 36)
+        sp_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sp_layout.setSpacing(18)
+
+        sp_title = QLabel("Scanning in progress")
+        sp_title.setObjectName("emptyTitle")
+        sp_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.scan_detail = QLabel("Preparing the index and waiting for the first batch of results.")
+        self.scan_detail.setObjectName("emptySub")
+        self.scan_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scan_detail.setWordWrap(True)
+        self.scan_detail.setMaximumWidth(520)
+        self.scan_detail.setMinimumHeight(52)
+
+        self.scan_path = QLabel()
+        self.scan_path.setObjectName("scanPathValue")
+        self.scan_path.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.scan_path.setWordWrap(True)
+        self.scan_path.setMaximumWidth(760)
+        self.scan_path.setMinimumHeight(72)
+        self.scan_path.setTextFormat(Qt.TextFormat.RichText)
+
+        self.scan_progress = QProgressBar()
+        self.scan_progress.setRange(0, 0)
+        self.scan_progress.setTextVisible(False)
+        self.scan_progress.setObjectName("loadingBar")
+        self.scan_progress.setFixedWidth(360)
+        self.scan_progress.setFixedHeight(18)
+
+        scan_hint = QLabel("You can keep this window open while the scan runs in the background.")
+        scan_hint.setObjectName("emptySub")
+        scan_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scan_hint.setWordWrap(True)
+        scan_hint.setMaximumWidth(520)
+
+        sp_layout.addStretch()
+        sp_layout.addWidget(sp_title)
+        sp_layout.addWidget(self.scan_detail, alignment=Qt.AlignmentFlag.AlignCenter)
+        sp_layout.addWidget(self.scan_path, alignment=Qt.AlignmentFlag.AlignCenter)
+        sp_layout.addSpacing(4)
+        sp_layout.addWidget(self.scan_progress, alignment=Qt.AlignmentFlag.AlignCenter)
+        sp_layout.addSpacing(4)
+        sp_layout.addWidget(scan_hint, alignment=Qt.AlignmentFlag.AlignCenter)
+        sp_layout.addStretch()
 
         # Page 1: Tree view
         self.tree = QTreeView()
@@ -2114,6 +2227,7 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(empty_page)      # index 0
         self.content_stack.addWidget(self.tree)       # index 1
         self.content_stack.addWidget(no_results_page) # index 2
+        self.content_stack.addWidget(scanning_page)   # index 3
 
         self.content_stack.setCurrentIndex(0)
 
@@ -2204,6 +2318,28 @@ class MainWindow(QMainWindow):
     def _set_chip_text(self, chip, text):
         chip.setText(text)
         chip.setToolTip(text)
+
+    def _scan_path_html(self, path):
+        if not path:
+            return (
+                "<div><span style='font-weight:600;color:#0f172a;'>Current folder</span></div>"
+                "<div style='margin-top:6px;color:#64748b;'>--</div>"
+            )
+
+        escaped = html.escape(path)
+        for separator in ("\\", "/", "_", "-", "."):
+            escaped = escaped.replace(separator, f"{separator}<wbr>")
+        return (
+            "<div><span style='font-weight:600;color:#0f172a;'>Current folder</span></div>"
+            f"<div style='margin-top:6px;color:#475569;'>{escaped}</div>"
+        )
+
+    def _set_scanning_panel(self, path=None, detail=None):
+        if hasattr(self, 'scan_path'):
+            self.scan_path.setText(self._scan_path_html(path))
+            self.scan_path.setToolTip(path or "")
+        if detail and hasattr(self, 'scan_detail'):
+            self.scan_detail.setText(detail)
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
@@ -2410,7 +2546,7 @@ class MainWindow(QMainWindow):
             return False
         return self.proxy_model.rowCount(QModelIndex()) > 0
 
-    def _set_expand_state(self, expanded, remember=True):
+    def _set_expand_state(self, expanded):
         if not hasattr(self, 'tree'):
             return
 
@@ -3536,6 +3672,11 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("Stop")
         self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
         self._set_size_totals_pending(browse=True, page=True, selected=True)
+        self.content_stack.setCurrentIndex(3)
+        self._set_scanning_panel(
+            path=path,
+            detail="Preparing the index and waiting for the first batch of results.",
+        )
 
         self.current_page = 0
         self.total_scanned = 0
@@ -3556,6 +3697,8 @@ class MainWindow(QMainWindow):
     def _on_progress(self, path):
         s = ("..." + path[-72:]) if len(path) > 75 else path
         self.lbl_status.setText(f"Scanning: {s}")
+        if self.content_stack.currentIndex() == 3:
+            self._set_scanning_panel(path=s)
 
     def _set_match_status(self, total_matches):
         if self.is_scanning:
@@ -3566,7 +3709,7 @@ class MainWindow(QMainWindow):
     def _on_first_batch_ready(self):
         if self._page_load_options().get('defer_tree_load_until_scan_done'):
             return
-        if self.current_page == 0 and self.content_stack.currentIndex() == 0:
+        if self.current_page == 0 and self.content_stack.currentIndex() in (0, 3):
             self._load_page()
 
     def _on_batch_ready(self):
@@ -3664,7 +3807,7 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_status.setText("Scan complete.")
 
-        if self.content_stack.currentIndex() == 0:
+        if self.content_stack.currentIndex() in (0, 3):
             self._load_page()
         elif self.content_stack.currentIndex() == 1:
             self.scan_refresh_timer.start()
@@ -4219,6 +4362,10 @@ class MainWindow(QMainWindow):
         if rows_count == 0 and self.current_page == 0:
             if self.is_scanning:
                 self.lbl_status.setText("Scanning... waiting for matching results")
+                self.content_stack.setCurrentIndex(3)
+                self._set_scanning_panel(
+                    detail="Indexing is still running. The first batch will replace this panel as soon as it is ready.",
+                )
             else:
                 self.content_stack.setCurrentIndex(2)
                 self.controls_bar.setVisible(False)
@@ -4263,7 +4410,7 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(5, 116)
         self.tree.setColumnWidth(6, 104)
 
-        self._set_expand_state(False if lazy_show_all_tree else True, remember=False)
+        self._set_expand_state(False if lazy_show_all_tree else True)
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
         self._set_match_status(total_matches)
@@ -4468,10 +4615,7 @@ class MainWindow(QMainWindow):
             return
         source_index = self.proxy_model.mapToSource(proxy_index)
         if source_index.isValid():
-            if self.current_lazy_show_all_tree:
-                self._start_lazy_child_load(source_index)
-            else:
-                self.tree_model.load_children(source_index)
+            self._start_lazy_child_load(source_index)
 
     def _on_tree_collapsed(self, proxy_index):
         pass
@@ -4488,6 +4632,7 @@ class MainWindow(QMainWindow):
             folder_path,
             sort_column=self.sort_column,
             sort_desc=self.sort_order == Qt.SortOrder.DescendingOrder,
+            options=None if self.current_lazy_show_all_tree else getattr(self.tree_model, 'options', {}),
             parent=self,
         )
         self.lazy_child_threads[request_id] = {
@@ -4519,6 +4664,13 @@ class MainWindow(QMainWindow):
         self._restore_persistent_selection_to_model()
         self._restore_bulk_scope_selection_to_model()
         self._refresh_selection_buttons()
+        proxy_index = self.proxy_model.mapFromSource(QModelIndex(persistent_index))
+        if proxy_index.isValid():
+            self.is_programmatic_expand = True
+            try:
+                self.tree.setExpanded(proxy_index, True)
+            finally:
+                self.is_programmatic_expand = False
 
     def _on_lazy_children_failed(self, request_id, folder_path, error):
         state = self.lazy_child_threads.get(request_id)

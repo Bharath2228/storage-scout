@@ -758,6 +758,14 @@ def apply_theme(app, theme_name="dark"):
             font-size: 12px; /* ~9pt Body */
             color: {text_muted};
         }}
+        QLabel#scanPathValue {{
+            background-color: #f8fafc;
+            border: 1px solid #dbe4ee;
+            border-radius: 8px;
+            padding: 10px 12px;
+            color: {text};
+            font-size: 12px;
+        }}
 
         QLabel#agePill {{
             background-color: {accent};
