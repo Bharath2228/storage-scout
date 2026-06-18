@@ -160,13 +160,12 @@ def apply_theme(app, theme_name="dark"):
         QLabel#displayModeHeader,
         QLabel#viewModeHeader,
         QLabel#ageThresholdHeader {{
-            background-color: #f1f5f9;
+            background-color: transparent;
             padding: 10px 16px;
             font-weight: 600;
-            font-size: 10pt;
-            color: #1e293b;
-            margin-bottom: 12px;
-            border-radius: 6px;
+            font-size: 9pt;
+            color: #475569;
+            margin-bottom: 8px;
         }}
 
         QCheckBox, QRadioButton {{
@@ -258,10 +257,11 @@ def apply_theme(app, theme_name="dark"):
         }}
         QTreeView {{
             background-color: {bg_main};
-            alternate-background-color: rgba(248, 250, 252, 0.5);
+            alternate-background-color: #f8fafc;
             border: none;
             outline: none;
             color: {text};
+            font-weight: 500;
         }}
         QTreeView::viewport,
         QAbstractScrollArea::viewport {{
@@ -270,6 +270,9 @@ def apply_theme(app, theme_name="dark"):
         QTreeView::item {{ 
             padding: 10px 4px; 
             border-bottom: 1px solid #f1f5f9; 
+        }}
+        QTreeView::item:alternate {{
+            background-color: #f8fafc;
         }}
         QTreeView::item:hover {{ background-color: {bg_hover}; color: {text}; }}
         QTreeView::item:selected {{ background-color: {accent}; color: #fff; }}
@@ -385,15 +388,13 @@ def apply_theme(app, theme_name="dark"):
             background-color: #fafbfc;
         }}
         QHeaderView::section {{
-            background-color: #fafbfc;
-            padding: 14px 16px;
+            background-color: #f8fafc;
+            padding: 12px 16px;
             border: none;
-            border-bottom: 2px solid #e2e8f0;
+            border-bottom: 1px solid #dbe3ee;
             font-weight: 600;
-            color: #64748b;
+            color: #475569;
             font-size: 9pt;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
         }}
         QHeaderView::section:hover {{
             background-color: #f1f5f9;
@@ -723,9 +724,8 @@ def apply_theme(app, theme_name="dark"):
         QLabel#appTitle {{
             font-weight: 700;
             font-size: 16px; /* ~12pt Header */
-            color: {accent};
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            color: {text};
+            letter-spacing: 0px;
             padding-right: 4px;
         }}
 
@@ -733,7 +733,7 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
             font-size: 11px; /* ~8pt Label */
             font-weight: 600;
-            letter-spacing: 0.5px;
+            letter-spacing: 0px;
         }}
 
         QLabel#mutedLabel {{

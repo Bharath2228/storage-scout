@@ -58,7 +58,7 @@ class TreeItem:
         return len(self.childItems)
 
     def columnCount(self):
-        return 7  # Name, Type, Last Modified, Age, Size, Status, Action
+        return 6  # Name, Type, Last Modified, Age, Size, Status
 
     def data(self, column):
         if column == 0:
@@ -79,8 +79,6 @@ class TreeItem:
             return format_size(self.itemData.get('size', 0))
         if column == 5:
             return self.itemData.get('status', '')
-        if column == 6:
-            return "queued" if self.checkState == Qt.CheckState.Checked else "Open"
         return None
 
     def row(self):
@@ -118,7 +116,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         if cache is None:
             return
 
-        changed = False
+        changed_indexes = []
         stack = [self.rootItem]
         while stack:
             item = stack.pop()
@@ -129,11 +127,11 @@ class WatchdogTreeModel(QAbstractItemModel):
                     new_size = cache.folder_sizes.get(key, 0) or 0
                     if item_data.get('size', 0) != new_size:
                         item_data['size'] = new_size
-                        changed = True
+                        changed_indexes.append(self.createIndex(item.row(), 4, item))
             stack.extend(item.childItems)
 
-        if changed:
-            self.layoutChanged.emit()
+        for index in changed_indexes:
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole])
 
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
@@ -365,7 +363,6 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col == 3: return format_age(item.itemData.get('last_modified', 0))
             if col == 4: return format_size(item.itemData.get('size', 0))
             if col == 5: return item.itemData.get('status', '')
-            if col == 6: return "queued" if item.checkState == Qt.CheckState.Checked else "Open"
             return None
 
         if role == Qt.ItemDataRole.CheckStateRole and col == 0:
@@ -383,14 +380,19 @@ class WatchdogTreeModel(QAbstractItemModel):
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if col == 0 or (not is_tree and col == 1):
                 return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            if col in (1, 2, 5, 6): return Qt.AlignmentFlag.AlignCenter
+            if col in (1, 2, 5): return Qt.AlignmentFlag.AlignCenter
             if col in (3, 4): return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
         if role == Qt.ItemDataRole.FontRole:
-            if item.itemData.get('is_dir', False) and col == 0:
+            if item.itemData.get('is_dir', False) and col in (0, 4):
                 font = QFont()
-                font.setBold(True)
+                font.setWeight(QFont.Weight.Bold if col == 0 else QFont.Weight.Black)
+                if col == 4:
+                    font.setUnderline(False)
                 return font
+            font = QFont()
+            font.setWeight(QFont.Weight.Medium)
+            return font
 
         if role == Qt.ItemDataRole.DecorationRole and col == 0:
             is_dir = item.itemData.get('is_dir', False)
@@ -513,9 +515,9 @@ class WatchdogTreeModel(QAbstractItemModel):
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             if self.view_mode == 'Tree':
-                headers = ["Folder / File path", "Type", "Last modified", "Age", "Size", "Status", "Action"]
+                headers = ["Folder / File path", "Type", "Last modified", "Age", "Size", "Status"]
             else:
-                headers = ["Name", "Location", "Last modified", "Age", "Size", "Status", "Action"]
+                headers = ["Name", "Location", "Last modified", "Age", "Size", "Status"]
             if section < len(headers):
                 return headers[section]
         return None

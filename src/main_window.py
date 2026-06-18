@@ -9,10 +9,10 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QRadioButton, QSlider, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
-    QSpinBox, QAbstractItemView, QStackedWidget,
+    QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar
 )
-from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
@@ -388,6 +388,10 @@ class DeletePreviewThread(QThread):
     def cancel(self):
         self.is_cancelled = True
 
+    def _raise_if_cancelled(self):
+        if self.is_cancelled:
+            raise DeletePreviewThread._Cancelled()
+
     def _path_key(self, path):
         return os.path.normcase(os.path.normpath(path))
 
@@ -647,9 +651,19 @@ class DeletePreviewDialog(QDialog):
         self.detail_label.setText(
             f"Delete operations: {delete_operations}    Total size: {size_text}"
         )
+        if folders > 0:
+            path_summary = (
+                f"Selected folders will delete {folders} folders and {files} files inside them.\n"
+                f"Matched items: {total}\n"
+                f"Items sent to Recycle Bin: {delete_operations}"
+            )
+        else:
+            path_summary = (
+                f"Matched items: {total}\n"
+                f"Items sent to Recycle Bin: {delete_operations}"
+            )
         self.path_label.setText(
-            f"Matched items: {total}\n"
-            f"Items sent to Recycle Bin: {delete_operations}\n"
+            f"{path_summary}\n"
             f"Folders: {folders}\n"
             f"Files: {files}"
         )
@@ -1609,6 +1623,47 @@ class StatusDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class SizeBarDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def paint(self, painter, option, index):
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+
+        widget = opt.widget
+        style = widget.style() if widget else QApplication.style()
+
+        painter.save()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        display_font = index.data(Qt.ItemDataRole.FontRole) or opt.font
+        painter.setFont(display_font)
+
+        content_rect = opt.rect.adjusted(10, 5, -18, -5)
+
+        text_color = (
+            opt.palette.color(opt.palette.ColorRole.HighlightedText)
+            if opt.state & QStyle.StateFlag.State_Selected
+            else opt.palette.color(opt.palette.ColorRole.Text)
+        )
+        painter.setPen(text_color)
+        painter.drawText(
+            content_rect,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            text,
+        )
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        hint = super().sizeHint(option, index)
+        hint.setHeight(max(hint.height(), 34))
+        return hint
+
+
 class ActionDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         text = index.data(Qt.ItemDataRole.DisplayRole)
@@ -1640,8 +1695,11 @@ class ActionDelegate(QStyledItemDelegate):
             painter.setPen(QColor("#ef4444"))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "X Queued")
         else:
+            if not is_hovered:
+                painter.restore()
+                return
             # Modern Small Outline Button for "Open"
-            bg = QColor("#eff6ff") if is_hovered else QColor("transparent")
+            bg = QColor("#eff6ff")
             painter.setBrush(QBrush(bg))
             painter.setPen(QPen(QColor("#2563eb"), 1.2))
             painter.drawRoundedRect(btn, 5, 5)
@@ -1680,7 +1738,7 @@ class FilterPanel(QFrame):
         display_layout.setContentsMargins(0, 0, 0, 0)
         display_layout.setSpacing(4)
 
-        lbl_display = QLabel("DISPLAY MODE")
+        lbl_display = QLabel("Display Mode")
         lbl_display.setObjectName("displayModeHeader")
 
         display_layout.addWidget(lbl_display)
@@ -1706,7 +1764,7 @@ class FilterPanel(QFrame):
         view_layout.setContentsMargins(0, 0, 0, 0)
         view_layout.setSpacing(4)
 
-        lbl_view = QLabel("VIEW MODE")
+        lbl_view = QLabel("View Mode")
         lbl_view.setObjectName("viewModeHeader")
         view_layout.addWidget(lbl_view)
 
@@ -1737,7 +1795,7 @@ class FilterPanel(QFrame):
         age_outer_layout.setContentsMargins(0, 0, 0, 0)
         age_outer_layout.setSpacing(4)
 
-        lbl_age = QLabel("AGE THRESHOLD")
+        lbl_age = QLabel("Age Threshold")
         lbl_age.setObjectName("ageThresholdHeader")
 
         age_outer_layout.addWidget(lbl_age)
@@ -1926,6 +1984,7 @@ class MainWindow(QMainWindow):
         self.cached_selected_total = None
         self.folder_cache = None
         self.saved_age_threshold_value = 0
+        self.age_controls_forced_disabled = False
         self.loading_dialog = None
         self.selection_loading_dialog = None
         self.selection_loading_min_visible_until = 0.0
@@ -1956,6 +2015,8 @@ class MainWindow(QMainWindow):
         self.page_only_selection_page = None
         self.current_total_matches = 0
         self.current_lazy_show_all_tree = False
+        self.refresh_tree_state_key = None
+        self.refresh_collapsed_tree_paths = set()
 
         self.sort_column = 3 # Default sort by Age
         self.sort_order = Qt.SortOrder.DescendingOrder
@@ -1964,10 +2025,10 @@ class MainWindow(QMainWindow):
         self.recount_timer.setSingleShot(True)
         self.recount_timer.timeout.connect(self._do_recount)
 
-        # Debounce timer for age threshold
+        # Debounce timer for age threshold so slider drags do not reload on every step.
         self.filter_debounce_timer = QTimer(self)
         self.filter_debounce_timer.setSingleShot(True)
-        self.filter_debounce_timer.setInterval(180)
+        self.filter_debounce_timer.setInterval(700)
         self.filter_debounce_timer.timeout.connect(self._on_filter_changed)
 
         self.loading_timer = QTimer(self)
@@ -2081,8 +2142,9 @@ class MainWindow(QMainWindow):
         # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
         self.fp.rb_videos.toggled.connect(self._on_videos_mode_toggled)
-        # Age controls: debounced
-        self.fp.slider.valueChanged.connect(lambda _v: self.filter_debounce_timer.start())
+        # Age controls: wait for the user to pause before applying.
+        self.fp.slider.valueChanged.connect(self._on_age_slider_changed)
+        self.fp.slider.sliderReleased.connect(self._on_age_slider_released)
         self.fp.age_input.editingFinished.connect(self._on_manual_age_finished)
         
         # View mode connections
@@ -2092,6 +2154,7 @@ class MainWindow(QMainWindow):
         
         self._apply_default_browse_preset(apply_now=False)
         self._update_age_controls_enabled()
+        self._update_expand_control_visibility()
         main_area.addWidget(self.fp)
 
         # Right Content Area
@@ -2126,6 +2189,7 @@ class MainWindow(QMainWindow):
 
         self.btn_select_empty = QPushButton("Select All Empty")
         self.btn_select_empty.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select_empty.setToolTip("No empty folders are available in the current view.")
         self.btn_select_empty.clicked.connect(self._select_empty)
         self.btn_select_empty.setEnabled(False)
         controls_layout.addWidget(self.btn_select_empty)
@@ -2254,8 +2318,8 @@ class MainWindow(QMainWindow):
         self.tree.setIndentation(16)
         self.tree.setMouseTracking(True)
         self.tree.viewport().setMouseTracking(True)
+        self.tree.setItemDelegateForColumn(4, SizeBarDelegate(self.tree))
         self.tree.setItemDelegateForColumn(5, StatusDelegate(self.tree))
-        self.tree.setItemDelegateForColumn(6, ActionDelegate(self.tree))
         self.tree.clicked.connect(self._on_click)
         self.tree.doubleClicked.connect(self._on_double_click)
         self.tree.expanded.connect(self._on_tree_expanded)
@@ -2264,6 +2328,7 @@ class MainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self._context_menu)
         self.tree.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         self.tree.viewport().installEventFilter(self)
+        self.tree.setIconSize(QSize(18, 18))
         hdr = self.tree.header()
         hdr.setSectionsMovable(False)
         hdr.setStretchLastSection(False)
@@ -2519,6 +2584,7 @@ class MainWindow(QMainWindow):
             status_filter=status_filter,
             view_mode=self.fp.get_view_mode(),
         )
+        self._update_expand_control_visibility()
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
 
@@ -2542,6 +2608,11 @@ class MainWindow(QMainWindow):
             self._cancel_running_bulk_select_thread()
             self._discard_current_page_selection()
             self._apply_filters()
+
+    def _update_expand_control_visibility(self):
+        if not hasattr(self, 'btn_expand') or not hasattr(self, 'fp'):
+            return
+        self.btn_expand.setVisible(not self.fp.rb_all.isChecked())
 
     def _update_status_column_visibility(self):
         if not hasattr(self, 'tree') or not hasattr(self, 'fp'):
@@ -2584,9 +2655,14 @@ class MainWindow(QMainWindow):
                 finally:
                     del blockers
                 self.fp._update_age_label(disabled_value)
+            self.age_controls_forced_disabled = True
         else:
             restore_value = getattr(self, 'saved_age_threshold_value', disabled_value)
-            if current_value == disabled_value and restore_value != disabled_value:
+            if (
+                getattr(self, 'age_controls_forced_disabled', False)
+                and current_value == disabled_value
+                and restore_value != disabled_value
+            ):
                 blockers = [
                     QSignalBlocker(self.fp.slider),
                     QSignalBlocker(self.fp.age_input),
@@ -2597,6 +2673,7 @@ class MainWindow(QMainWindow):
                 finally:
                     del blockers
                 self.fp._update_age_label(restore_value)
+            self.age_controls_forced_disabled = False
 
         enabled = not show_all
         self.fp.slider.setEnabled(enabled)
@@ -2653,6 +2730,95 @@ class MainWindow(QMainWindow):
             self.btn_expand.setText("Collapse All" if expanded else "Expand All")
             self.btn_expand.setEnabled(self._has_visible_rows())
             del blocker
+
+    def _tree_refresh_state_signature(self, options=None):
+        options = options or self._page_load_options()
+        filter_mode = 'all'
+        age_value = None
+        if hasattr(self, 'fp'):
+            if self.fp.rb_empty.isChecked():
+                filter_mode = 'empty'
+            elif self.fp.rb_videos.isChecked():
+                filter_mode = 'videos'
+            elif self.fp.rb_all.isChecked():
+                filter_mode = 'all'
+            else:
+                filter_mode = 'inactive'
+            if hasattr(self.fp, 'slider'):
+                age_value = self.fp.slider.value()
+        return (
+            options.get('scan_root'),
+            options.get('view_mode'),
+            filter_mode,
+            age_value,
+            options.get('page'),
+            bool(options.get('lazy_show_all_tree')),
+            bool(options.get('filtered_expanded_tree')),
+        )
+
+    def _should_preserve_tree_refresh_state(self, options=None):
+        options = options or self._page_load_options()
+        return (
+            options.get('view_mode') == 'Tree'
+            and not options.get('lazy_show_all_tree')
+        )
+
+    def _capture_tree_refresh_state(self, options=None):
+        options = options or self._page_load_options()
+        if not self._should_preserve_tree_refresh_state(options):
+            self.refresh_tree_state_key = None
+            self.refresh_collapsed_tree_paths = set()
+            return
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            self.refresh_tree_state_key = self._tree_refresh_state_signature(options)
+            self.refresh_collapsed_tree_paths = set()
+            return
+
+        collapsed_paths = set()
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
+            for row in range(self.proxy_model.rowCount(parent)):
+                proxy_index = self.proxy_model.index(row, 0, parent)
+                source_index = self.proxy_model.mapToSource(proxy_index)
+                if not source_index.isValid():
+                    continue
+                item_data = self.tree_model.data(source_index, Qt.ItemDataRole.UserRole) or {}
+                if not item_data.get('is_dir') or not item_data.get('path'):
+                    continue
+                if self.tree.isExpanded(proxy_index):
+                    stack.append(proxy_index)
+                else:
+                    collapsed_paths.add(self._path_key(item_data['path']))
+
+        self.refresh_tree_state_key = self._tree_refresh_state_signature(options)
+        self.refresh_collapsed_tree_paths = collapsed_paths
+
+    def _restore_tree_refresh_state(self, options=None):
+        options = options or self._page_load_options()
+        if not self._should_preserve_tree_refresh_state(options):
+            self.refresh_tree_state_key = None
+            self.refresh_collapsed_tree_paths = set()
+            return
+        if self.refresh_tree_state_key != self._tree_refresh_state_signature(options):
+            return
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            return
+
+        self.is_programmatic_expand = True
+        try:
+            for path_key in sorted(
+                self.refresh_collapsed_tree_paths,
+                key=lambda key: key.count(os.sep),
+            ):
+                source_index = self.source_index_by_path.get(path_key)
+                if source_index is None or not source_index.isValid():
+                    continue
+                proxy_index = self.proxy_model.mapFromSource(source_index)
+                if proxy_index.isValid():
+                    self.tree.setExpanded(proxy_index, False)
+        finally:
+            self.is_programmatic_expand = False
 
     def _select_all(self):
         if not self.tree_model:
@@ -2719,7 +2885,11 @@ class MainWindow(QMainWindow):
         self._do_recount()
 
     def _unselect_all(self):
-        if not self.tree_model or not (self.selected_paths or self.page_only_selected_paths):
+        if not self.tree_model or not (
+            self.bulk_delete_scope
+            or self.selected_paths
+            or self.page_only_selected_paths
+        ):
             return
 
         if not (hasattr(self, 'lbl_page_info') and self.lbl_page_info.isVisible()):
@@ -2766,6 +2936,16 @@ class MainWindow(QMainWindow):
         if hasattr(self.fp, 'age_input'):
             self.fp.age_input.interpretText()
         self._on_filter_changed()
+
+    def _on_age_slider_changed(self, _value):
+        if not hasattr(self, 'fp') or not self.fp.slider.isEnabled():
+            return
+        self.filter_debounce_timer.start()
+
+    def _on_age_slider_released(self):
+        if not hasattr(self, 'fp') or not self.fp.slider.isEnabled():
+            return
+        self.filter_debounce_timer.start()
 
     def _on_videos_mode_toggled(self, checked):
         self._update_age_controls_enabled()
@@ -3271,6 +3451,7 @@ class MainWindow(QMainWindow):
 
         self.btn_select_all.setVisible(not has_selection)
         self.btn_clear_selection.setVisible(has_selection)
+        self.btn_clear_selection.setEnabled(has_selection)
 
         if mode == 'Videos':
             self.btn_select_all.setText("Select All Videos")
@@ -3292,7 +3473,13 @@ class MainWindow(QMainWindow):
 
         self.btn_select_all.setEnabled(bool(all_targets) and mode in ('All', 'Videos'))
         self.btn_select_inactive.setEnabled(bool(inactive_targets) and mode == 'Inactive')
-        self.btn_select_empty.setEnabled(bool(empty_targets) and mode in ('All', 'Empty'))
+        empty_enabled = bool(empty_targets) and mode in ('All', 'Empty')
+        self.btn_select_empty.setEnabled(empty_enabled)
+        self.btn_select_empty.setToolTip(
+            "Select every empty folder in the current view."
+            if empty_enabled
+            else "No empty folders are available in the current view."
+        )
         self.btn_select_inactive.setVisible(mode != 'All')
 
     def _collect_selection_button_targets(self, mode):
@@ -3535,14 +3722,15 @@ class MainWindow(QMainWindow):
         pruned_paths = self._prune_paths(paths)
         folder_count = 0
         file_count = 0
-        for path in pruned_paths:
-            index = self.source_index_by_path.get(self._path_key(path))
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole) if index and index.isValid() and self.tree_model else None
-            is_folder = item_data.get('is_dir') if item_data else os.path.isdir(path)
-            if is_folder:
-                folder_count += 1
-            else:
-                file_count += 1
+        if pruned_paths:
+            from src.file_index_tool import FileIndexTool
+
+            tool = FileIndexTool()
+            try:
+                cursor = tool.conn.cursor()
+                _, folder_count, file_count, _total_size = summarize_paths_batch(cursor, pruned_paths)
+            finally:
+                tool.close()
         return {
             'paths': pruned_paths,
             'total': len(pruned_paths),
@@ -3684,6 +3872,8 @@ class MainWindow(QMainWindow):
         self.source_index_by_path = {}
         self.lazy_child_request_id += 1
         self.current_lazy_show_all_tree = False
+        self.refresh_tree_state_key = None
+        self.refresh_collapsed_tree_paths = set()
         self.folder_cache = None
 
         # Reset pagination state
@@ -3929,11 +4119,32 @@ class MainWindow(QMainWindow):
     def _prev_page(self):
         if self.current_page > 0:
             self.current_page -= 1
+            self._update_pending_pagination_state()
             self._load_page()
 
     def _next_page(self):
         self.current_page += 1
+        self._update_pending_pagination_state()
         self._load_page()
+
+    def _update_pending_pagination_state(self):
+        if not hasattr(self, 'lbl_page_info'):
+            return
+
+        limit = 2000
+        total_matches = self.current_total_matches or 0
+        has_multiple_pages = total_matches > limit and not self.current_lazy_show_all_tree
+        self.btn_prev_page.setVisible(has_multiple_pages)
+        self.btn_next_page.setVisible(has_multiple_pages)
+        self.lbl_page_info.setVisible(has_multiple_pages)
+        if not has_multiple_pages:
+            return
+
+        offset = self.current_page * limit
+        end = min(offset + limit, total_matches) if total_matches else offset + limit
+        self.lbl_page_info.setText(f"{offset + 1}-{end} of {total_matches}")
+        self.btn_prev_page.setEnabled(self.current_page > 0)
+        self.btn_next_page.setEnabled(offset + limit < total_matches)
 
     def _default_sort_order_for_column(self, col):
         if col in (2, 3, 4, 5):
@@ -4414,15 +4625,23 @@ class MainWindow(QMainWindow):
         self._start_path_total_thread(request_id, 'selected', options['selected_paths'])
 
     def _set_loading_controls_enabled(self, enabled):
-        self.controls_bar.setEnabled(enabled)
         self.tree.setEnabled(enabled)
-        self.btn_delete.setEnabled(enabled and (self.btn_delete.isEnabled()))
+        for button in (
+            self.btn_expand,
+            self.btn_select_all,
+            self.btn_clear_selection,
+            self.btn_select_inactive,
+            self.btn_select_empty,
+        ):
+            button.setEnabled(enabled and button.isVisible())
+        self.btn_delete.setEnabled(enabled and self.btn_delete.isEnabled())
 
     def _load_page(self):
         self._cancel_running_bulk_select_thread()
         self.page_load_request_id += 1
         request_id = self.page_load_request_id
         options = self._page_load_options()
+        self._capture_tree_refresh_state(options)
 
         if self.page_load_thread and self.page_load_thread.isRunning():
             try:
@@ -4509,7 +4728,7 @@ class MainWindow(QMainWindow):
         self.controls_bar.setVisible(True)
 
         hdr = self.tree.header()
-        for index in range(0, 7):
+        for index in range(0, 6):
             hdr.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._apply_sort_indicator()
@@ -4520,11 +4739,11 @@ class MainWindow(QMainWindow):
             self.tree.setColumnWidth(1, 380)
         self.tree.setColumnWidth(2, 150)
         self.tree.setColumnWidth(3, 82)
-        self.tree.setColumnWidth(4, 104)
+        self.tree.setColumnWidth(4, 132)
         self.tree.setColumnWidth(5, 116)
-        self.tree.setColumnWidth(6, 104)
 
         self._set_expand_state(False if lazy_show_all_tree else True)
+        self._restore_tree_refresh_state(self.tree_model.options)
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
         self._set_match_status(total_matches)
@@ -4694,12 +4913,7 @@ class MainWindow(QMainWindow):
     def _is_tree_index_clickable(self, index):
         if not index.isValid():
             return False
-        if index.column() == 0:
-            return True
-        if index.column() == 6:
-            action_text = self.proxy_model.data(index, Qt.ItemDataRole.DisplayRole)
-            return not (action_text and 'queued' in str(action_text).lower())
-        return False
+        return index.column() == 0
 
     def _update_tree_cursor(self, index):
         cursor = (
@@ -4710,10 +4924,7 @@ class MainWindow(QMainWindow):
         self.tree.viewport().setCursor(cursor)
 
     def _on_click(self, index):
-        if index.column() == 6 and self._is_tree_index_clickable(index):
-            d = self._item_data(self.proxy_model.index(index.row(), 0, index.parent()))
-            if d:
-                self._open(d['path'], d.get('is_dir', True))
+        return
 
     def _on_double_click(self, index):
         if not self._is_tree_index_clickable(index):
@@ -4991,8 +5202,8 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save Report", "", "CSV Files (*.csv)")
         if not path:
             return
-        # Columns to exclude from export: 5 = Status, 6 = Action
-        _SKIP_COLS = {5, 6}
+        # Columns to exclude from export: 5 = Status
+        _SKIP_COLS = {5}
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 w = csv.writer(f)
