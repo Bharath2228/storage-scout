@@ -944,7 +944,7 @@ class PageLoadThread(QThread):
                 self.options['sort_column'],
                 self.options['sort_desc'],
             )
-        if cached_children is not None:
+        if cached_children:
             total_matches = max(cache.item_count() - 1, 0)
             root_node = {
                 'name': 'root',
@@ -964,6 +964,7 @@ class PageLoadThread(QThread):
                 'page': 0,
                 'paginated': False,
                 'lazy_show_all_tree': True,
+                'debug_info': f"show_all_source=cache children={len(cached_children)} total={total_matches}",
             }
 
         tool = FileIndexTool()
@@ -974,17 +975,33 @@ class PageLoadThread(QThread):
 
             cursor.execute(
                 """
-                SELECT path
+                SELECT CASE
+                           WHEN path = ? COLLATE NOCASE THEN path
+                           ELSE root
+                       END
                 FROM file_index
                 WHERE path = ? COLLATE NOCASE OR root = ? COLLATE NOCASE
                 ORDER BY CASE WHEN path = ? COLLATE NOCASE THEN 0 ELSE 1 END,
                          length(path) ASC
                 LIMIT 1
                 """,
-                (root_path, root_path, root_path),
+                (root_path, root_path, root_path, root_path),
             )
             stored_root_row = cursor.fetchone()
-            stored_root_path = stored_root_row[0] if stored_root_row else root_path
+            if stored_root_row:
+                stored_root_path = stored_root_row[0]
+            else:
+                cursor.execute(
+                    """
+                    SELECT root
+                    FROM file_index
+                    GROUP BY root
+                    ORDER BY COUNT(*) DESC, length(root) ASC
+                    LIMIT 1
+                    """
+                )
+                fallback_root_row = cursor.fetchone()
+                stored_root_path = fallback_root_row[0] if fallback_root_row else root_path
 
             cursor.execute(
                 "SELECT 1 FROM file_index WHERE path = ? COLLATE NOCASE LIMIT 1",
@@ -1001,6 +1018,16 @@ class PageLoadThread(QThread):
                 (stored_root_path,),
             )
             rows = cursor.fetchall()
+            load_source = "parent_path"
+            if not rows and total_matches:
+                rows = self._load_direct_children_from_root_index(cursor, stored_root_path)
+                load_source = "root_index_direct"
+            if not rows and total_matches:
+                rows = self._load_direct_children_by_path(cursor, stored_root_path)
+                load_source = "path_prefix_direct"
+            if not rows and total_matches:
+                rows = self._load_indexed_rows_for_root(cursor, stored_root_path)
+                load_source = "root_index_all"
         finally:
             tool.close()
 
@@ -1040,7 +1067,119 @@ class PageLoadThread(QThread):
             'page': 0,
             'paginated': False,
             'lazy_show_all_tree': True,
+            'debug_info': f"show_all_source={load_source} rows={len(rows)} total={total_matches} root={stored_root_path}",
         }
+
+    def _is_direct_child_path(self, root_path, child_path):
+        root = os.path.normpath(str(root_path or "")).rstrip("\\/")
+        child = os.path.normpath(str(child_path or "")).rstrip("\\/")
+        if not root or not child:
+            return False
+        if os.path.normcase(root) == os.path.normcase(child):
+            return False
+
+        try:
+            relative = os.path.relpath(child, root)
+        except ValueError:
+            relative = ""
+
+        if relative and relative != "." and not relative.startswith(".."):
+            return "\\" not in relative and "/" not in relative
+
+        root_key = os.path.normcase(root)
+        child_key = os.path.normcase(child)
+        for separator in ("\\", "/"):
+            prefix = root_key + separator
+            if child_key.startswith(prefix):
+                remainder = child_key[len(prefix):]
+                return "\\" not in remainder and "/" not in remainder
+        return False
+
+    def _load_direct_children_from_root_index(self, cursor, root_path):
+        cursor.execute(
+            """
+            SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path,
+                   (SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1)
+            FROM file_index f
+            WHERE f.root = ? COLLATE NOCASE
+              AND f.path != ? COLLATE NOCASE
+            """,
+            (root_path, root_path),
+        )
+
+        rows = []
+        seen = set()
+        for row in cursor.fetchall():
+            path = row[0]
+            if not self._is_direct_child_path(root_path, path):
+                continue
+            key = os.path.normcase(os.path.normpath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+
+        return self._sort_show_all_rows(rows)
+
+    def _load_indexed_rows_for_root(self, cursor, root_path):
+        cursor.execute(
+            """
+            SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path,
+                   (SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1)
+            FROM file_index f
+            WHERE f.root = ? COLLATE NOCASE
+              AND f.path != ? COLLATE NOCASE
+            """,
+            (root_path, root_path),
+        )
+        return self._sort_show_all_rows(cursor.fetchall())
+
+    def _load_direct_children_by_path(self, cursor, root_path):
+        rows = []
+        seen = set()
+        base = str(root_path).rstrip("\\/")
+
+        for separator in ("\\", "/"):
+            prefix = base + separator
+            pattern = escape_sql_like(prefix) + "%"
+            relative_start = len(prefix) + 1
+            cursor.execute(
+                """
+                SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path,
+                       (SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1)
+                FROM file_index f
+                WHERE f.path LIKE ? ESCAPE '\\'
+                  AND instr(substr(f.path, ?), '\\') = 0
+                  AND instr(substr(f.path, ?), '/') = 0
+                """,
+                (pattern, relative_start, relative_start),
+            )
+            for row in cursor.fetchall():
+                key = os.path.normcase(os.path.normpath(row[0]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+
+        return self._sort_show_all_rows(rows)
+
+    def _sort_show_all_rows(self, rows):
+        rows.sort(key=lambda row: (
+            tree_sort_value(
+                {
+                    'path': row[0],
+                    'name': row[1],
+                    'is_dir': bool(row[2]),
+                    'size': row[3] or 0,
+                    'last_modified': row[4],
+                    'status': 'Active',
+                },
+                self.options['sort_column'],
+            ),
+            (row[1] or '').lower(),
+            (row[0] or '').lower(),
+        ), reverse=self.options['sort_desc'])
+        return rows
 
 
 class LazyChildrenLoadThread(QThread):
@@ -4138,7 +4277,7 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_status.setText("Scan complete.")
 
-        if self.content_stack.currentIndex() in (0, 3):
+        if self.content_stack.currentIndex() in (0, 2, 3):
             self._load_page()
         elif self.content_stack.currentIndex() == 1:
             if self.current_lazy_show_all_tree:
@@ -4734,7 +4873,11 @@ class MainWindow(QMainWindow):
             else:
                 self.content_stack.setCurrentIndex(2)
                 self.controls_bar.setVisible(False)
-                self.lbl_status.setText("No matching items found")
+                debug_info = result.get('debug_info')
+                self.lbl_status.setText(
+                    f"No matching items found ({debug_info})"
+                    if debug_info else "No matching items found"
+                )
             return
 
         self.tree_model = WatchdogTreeModel(result['root_node'])
