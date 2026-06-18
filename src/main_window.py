@@ -772,6 +772,11 @@ class PageLoadThread(QThread):
         elif view_mode == 'Folders':
             where_clauses.append("is_folder = 1")
 
+        scan_root = self.options.get('scan_root')
+        if scan_root:
+            where_clauses.append("path != ? COLLATE NOCASE")
+            params.append(scan_root)
+
         if where_clauses:
             where_sql = " WHERE " + " AND ".join(where_clauses)
             query += where_sql
@@ -932,11 +937,13 @@ class PageLoadThread(QThread):
         root_path = self.options.get('scan_root') or ""
         root_path = os.path.normpath(root_path) if root_path else root_path
         cache = self.options.get('folder_cache')
-        cached_children = cache.children_for(
-            root_path,
-            self.options['sort_column'],
-            self.options['sort_desc'],
-        ) if cache and cache.has_children_for(root_path) else None
+        cached_children = None
+        if cache and cache.child_count(root_path) > 0:
+            cached_children = cache.children_for(
+                root_path,
+                self.options['sort_column'],
+                self.options['sort_desc'],
+            )
         if cached_children is not None:
             total_matches = max(cache.item_count() - 1, 0)
             root_node = {
@@ -964,9 +971,24 @@ class PageLoadThread(QThread):
             cursor = tool.conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM file_index")
             total_rows = cursor.fetchone()[0] or 0
+
+            cursor.execute(
+                """
+                SELECT path
+                FROM file_index
+                WHERE path = ? COLLATE NOCASE OR root = ? COLLATE NOCASE
+                ORDER BY CASE WHEN path = ? COLLATE NOCASE THEN 0 ELSE 1 END,
+                         length(path) ASC
+                LIMIT 1
+                """,
+                (root_path, root_path, root_path),
+            )
+            stored_root_row = cursor.fetchone()
+            stored_root_path = stored_root_row[0] if stored_root_row else root_path
+
             cursor.execute(
                 "SELECT 1 FROM file_index WHERE path = ? COLLATE NOCASE LIMIT 1",
-                (root_path,),
+                (stored_root_path,),
             )
             total_matches = max(total_rows - (1 if cursor.fetchone() else 0), 0)
 
@@ -976,7 +998,7 @@ class PageLoadThread(QThread):
                 "FROM file_index f "
                 "WHERE f.parent_path = ? COLLATE NOCASE "
                 f"ORDER BY {build_sort_order_clause('Tree', self.options['sort_column'], self.options['sort_desc'])}",
-                (root_path,),
+                (stored_root_path,),
             )
             rows = cursor.fetchall()
         finally:
@@ -985,7 +1007,7 @@ class PageLoadThread(QThread):
         root_node = {
             'name': 'root',
             'is_dir': True,
-            'path': root_path,
+            'path': stored_root_path,
             'status': 'Active',
             'children': [],
             '_children_loaded': True,
@@ -3207,6 +3229,11 @@ class MainWindow(QMainWindow):
         elif view_mode == 'Folders':
             where_clauses.append("is_folder = 1")
 
+        scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
+        if scan_root:
+            where_clauses.append("path != ? COLLATE NOCASE")
+            params.append(scan_root)
+
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         return where_sql, params
 
@@ -4072,6 +4099,11 @@ class MainWindow(QMainWindow):
                 where_clauses.append("is_folder = 0")
             elif view_mode == 'Folders':
                 where_clauses.append("is_folder = 1")
+
+            scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
+            if scan_root:
+                where_clauses.append("path != ? COLLATE NOCASE")
+                params.append(scan_root)
 
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
             cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
