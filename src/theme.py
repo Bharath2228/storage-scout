@@ -153,10 +153,12 @@ def apply_theme(app, theme_name="dark"):
         
         QWidget#displayModeSection,
         QWidget#viewModeSection,
-        QWidget#ageThresholdSection {{
+        QWidget#ageThresholdSection,
+        QWidget#searchSection {{
             margin-bottom: 8px;
         }}
         
+        QLabel#searchHeader,
         QLabel#displayModeHeader,
         QLabel#viewModeHeader,
         QLabel#ageThresholdHeader {{
@@ -166,6 +168,11 @@ def apply_theme(app, theme_name="dark"):
             font-size: 9pt;
             color: #475569;
             margin-bottom: 8px;
+        }}
+
+        QLabel#searchHeader {{
+            padding: 4px 0;
+            margin-bottom: 2px;
         }}
 
         QCheckBox, QRadioButton {{
@@ -389,15 +396,21 @@ def apply_theme(app, theme_name="dark"):
         }}
         QHeaderView::section {{
             background-color: #f8fafc;
-            padding: 12px 16px;
+            padding: 12px 18px;
             border: none;
+            border-right: 1px solid #e6edf5;
             border-bottom: 1px solid #dbe3ee;
             font-weight: 600;
             color: #475569;
             font-size: 9pt;
         }}
+
+        QLineEdit#filterSearch {{
+            padding: 3px 8px;
+        }}
         QHeaderView::section:hover {{
-            background-color: #f1f5f9;
+            background-color: #eef4fb;
+            color: #0b5ed7;
         }}
 
         QPushButton:disabled {{

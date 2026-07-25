@@ -9,6 +9,7 @@ class FolderCache:
         self.items = {}
         self.folder_sizes = {}
         self.folder_counts = {}
+        self.running_total_size = 0
 
     def _key(self, path):
         return os.path.normcase(os.path.normpath(path)) if path else ""
@@ -19,6 +20,7 @@ class FolderCache:
             self.items.clear()
             self.folder_sizes.clear()
             self.folder_counts.clear()
+            self.running_total_size = 0
 
     def add_item(self, path, name, is_folder, size, modified_time, parent_path, status="Active"):
         if not path:
@@ -50,6 +52,8 @@ class FolderCache:
                 self.children.setdefault(key, [])
                 self.folder_sizes.setdefault(key, 0)
                 self.folder_counts.setdefault(key, {'files': 0, 'folders': 1, 'children': 0})
+            else:
+                self.running_total_size += size or 0
 
     def set_folder_summary(self, path, total_size, file_count, folder_count, child_count=None):
         key = self._key(path)

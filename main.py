@@ -9,6 +9,16 @@ def main():
     apply_theme(app, "dark")
 
     window = MainWindow()
+    screen = app.primaryScreen()
+    if screen:
+        available = screen.availableGeometry()
+        width = min(window.width(), max(900, available.width() - 80))
+        height = min(window.height(), max(640, available.height() - 80))
+        window.resize(width, height)
+        window.move(
+            available.left() + max(0, (available.width() - width) // 2),
+            available.top() + max(0, (available.height() - height) // 2),
+        )
     window.show()
     sys.exit(app.exec())
 

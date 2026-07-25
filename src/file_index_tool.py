@@ -402,6 +402,37 @@ class FileIndexTool:
         for path, total_size, file_count, folder_count, child_count in cursor.fetchall():
             cache.set_folder_summary(path, total_size, file_count, folder_count, child_count)
 
+    def extension_breakdown(self, limit: int = 20) -> list[tuple[str, int, int]]:
+        cursor = self.conn.cursor()
+        # Global over the current indexed scan: best answers "where did my disk space go?"
+        cursor.execute(
+            """
+            SELECT extension, COALESCE(SUM(size), 0) AS total_size, COUNT(*) AS file_count
+            FROM file_index
+            WHERE is_folder = 0
+            GROUP BY extension
+            ORDER BY total_size DESC, file_count DESC, extension ASC
+            """
+        )
+        rows = cursor.fetchall()
+
+        results = []
+        other_size = 0
+        other_count = 0
+        for index, (extension, total_size, file_count) in enumerate(rows):
+            label = extension or "(no extension)"
+            total_size = total_size or 0
+            file_count = file_count or 0
+            if index < limit:
+                results.append((label, total_size, file_count))
+            else:
+                other_size += total_size
+                other_count += file_count
+
+        if other_count:
+            results.append(("Other", other_size, other_count))
+        return results
+
     def children_of_folder(self, folder_path: str, limit: int = 500, offset: int = 0) -> list[tuple]:
         folder_path = str(Path(folder_path).resolve())
         cursor = self.conn.execute(

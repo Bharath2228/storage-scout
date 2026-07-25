@@ -91,8 +91,15 @@ class WatchdogTreeModel(QAbstractItemModel):
     def __init__(self, root_data, parent=None):
         super().__init__(parent)
         self.view_mode = 'Tree'
+        self.sort_column = 3
+        self.sort_order = Qt.SortOrder.DescendingOrder
         self.rootItem = TreeItem({'name': 'Root'})
         self._setupModelData(root_data, self.rootItem)
+
+    def set_sort_header_state(self, column, order):
+        self.sort_column = column
+        self.sort_order = order
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self.columnCount() - 1)
 
     def _setupModelData(self, root_data, root_item):
         if not root_data:
@@ -274,16 +281,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         item.children_loading = True
         path = item.itemData.get('path')
 
-        if item.childCount() == 1 and item.child(0).itemData.get('_is_dummy'):
-            self.beginRemoveRows(parent_index, 0, 0)
-            item.childItems.pop(0)
-            self.endRemoveRows()
-
         if path:
-            loading_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
-            self.beginInsertRows(parent_index, 0, 0)
-            item.appendChild(TreeItem(loading_data, item))
-            self.endInsertRows()
             return path
 
         item.children_loading = False
@@ -368,6 +366,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         if role == Qt.ItemDataRole.CheckStateRole and col == 0:
             return item.checkState
 
+
         if role == Qt.ItemDataRole.UserRole:
             return item.itemData
 
@@ -384,11 +383,13 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col in (3, 4): return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
         if role == Qt.ItemDataRole.FontRole:
-            if item.itemData.get('is_dir', False) and col in (0, 4):
+            if col == 4:
                 font = QFont()
-                font.setWeight(QFont.Weight.Bold if col == 0 else QFont.Weight.Black)
-                if col == 4:
-                    font.setUnderline(False)
+                font.setWeight(QFont.Weight.Normal)
+                return font
+            if item.itemData.get('is_dir', False) and col == 0:
+                font = QFont()
+                font.setWeight(QFont.Weight.Bold)
                 return font
             font = QFont()
             font.setWeight(QFont.Weight.Medium)
@@ -519,7 +520,10 @@ class WatchdogTreeModel(QAbstractItemModel):
             else:
                 headers = ["Name", "Location", "Last modified", "Age", "Size", "Status"]
             if section < len(headers):
-                return headers[section]
+                if section == self.sort_column:
+                    arrow = "▲" if self.sort_order == Qt.SortOrder.AscendingOrder else "▼"
+                    return f"{headers[section]}  {arrow}"
+                return f"{headers[section]}  ↕"
         return None
 
     def index(self, row, column, parent=QModelIndex()):
@@ -598,12 +602,21 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         self.older_than_secs = None
         self.older_than_cutoff_ts = None
         self.view_mode = 'Tree'
+        self.name_filter = ""
         self._accepts_cache = {}
 
-    def set_filters(self, empty_only, older_than_secs=None, status_filter=None, view_mode='Tree'):
+    def set_filters(
+        self,
+        empty_only,
+        older_than_secs=None,
+        status_filter=None,
+        view_mode='Tree',
+        name_filter="",
+    ):
         self.empty_only = empty_only
         self.status_filter = status_filter
         self.view_mode = view_mode
+        self.name_filter = (name_filter or "").lower()
         self.older_than_secs = older_than_secs
         self.older_than_cutoff_ts = (
             datetime.now().timestamp() - older_than_secs
@@ -617,6 +630,7 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             self.empty_only,
             self.status_filter is not None,
             self.older_than_cutoff_ts is not None,
+            self.name_filter,
         ))
 
     def hasChildren(self, parent=QModelIndex()):
@@ -710,9 +724,16 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
                 
             visited_items.append(current_item)
             item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
-            if not item_data: continue
+            if not item_data and current_item is not None:
+                item_data = getattr(current_item, 'itemData', None)
+            if not item_data:
+                continue
             
-            if self._matches(item_data):
+            ignore_name_filter = (
+                bool(self.name_filter)
+                and self._has_name_matching_ancestor(current_item)
+            )
+            if self._matches(item_data, ignore_name_filter=ignore_name_filter):
                 self._accepts_cache[item] = True
                 self._accepts_cache[current_item] = True
                 return True
@@ -725,10 +746,25 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             self._accepts_cache[v] = False
         return False
 
+    def _has_name_matching_ancestor(self, item):
+        parent = getattr(item, 'parentItem', None)
+        while parent is not None and getattr(parent, 'parentItem', None) is not None:
+            parent_data = getattr(parent, 'itemData', None) or {}
+            parent_name = (parent_data.get('name', '') or '').lower()
+            if self.name_filter in parent_name:
+                return True
+            parent = getattr(parent, 'parentItem', None)
+        return False
 
-    def _matches(self, item_data):
+    def _matches(self, item_data, ignore_name_filter=False):
         if item_data.get('_is_dummy'):
             return True
+        if (
+            self.name_filter
+            and not ignore_name_filter
+            and self.name_filter not in (item_data.get('name', '') or '').lower()
+        ):
+            return False
         if (
             self.view_mode == 'Tree'
             and self.status_filter == 'Inactive'

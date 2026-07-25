@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QRadioButton, QSlider, QTreeView, QHeaderView,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
-    QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar
+    QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
+    QTableWidget, QTableWidgetItem
 )
 from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
@@ -23,6 +24,15 @@ VIDEO_EXTENSIONS = (
     ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".ogv",
     ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
 )
+
+ROW_BORDER_COLOR = QColor("#dbe3ee")
+
+
+
+
+def paint_tree_row_border(painter, option):
+    painter.setPen(QPen(ROW_BORDER_COLOR, 1))
+    painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
 
 EMPTY_FOLDER_SQL = (
     "is_folder = 1 AND NOT EXISTS ("
@@ -679,6 +689,161 @@ class DeletePreviewDialog(QDialog):
         self.delete_button.setEnabled(False)
 
 
+class FileTypeBreakdownThread(QThread):
+    breakdown_ready = pyqtSignal(int, list)
+    breakdown_failed = pyqtSignal(int, str)
+
+    def __init__(self, request_id, limit=20, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.limit = limit
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def run(self):
+        from src.file_index_tool import FileIndexTool
+
+        tool = FileIndexTool()
+        try:
+            if self.is_cancelled:
+                return
+            rows = tool.extension_breakdown(limit=self.limit)
+            if not self.is_cancelled:
+                self.breakdown_ready.emit(self.request_id, rows)
+        except Exception as exc:
+            if not self.is_cancelled:
+                self.breakdown_failed.emit(self.request_id, str(exc))
+        finally:
+            tool.close()
+
+
+class FileTypeBarDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        try:
+            share = float(index.data(Qt.ItemDataRole.UserRole) or 0.0)
+        except (TypeError, ValueError):
+            share = 0.0
+
+        rect = option.rect.adjusted(12, 10, -12, -10)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#e9eef5"))
+        painter.drawRoundedRect(rect, 5, 5)
+
+        if share > 0:
+            width = max(3, int(rect.width() * min(1.0, share)))
+            bar_rect = QRect(rect.left(), rect.top(), width, rect.height())
+            painter.setBrush(QColor("#2f6df6"))
+            painter.drawRoundedRect(bar_rect, 5, 5)
+        painter.restore()
+
+
+class FileTypesDialog(QDialog):
+    extension_selected = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("File Types")
+        self.setModal(False)
+        self.resize(620, 520)
+        self.setObjectName("deleteProgressDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("File Types")
+        title.setObjectName("deleteProgressTitle")
+        layout.addWidget(title)
+
+        self.detail_label = QLabel("Calculating file type breakdown...")
+        self.detail_label.setObjectName("deleteProgressCount")
+        layout.addWidget(self.detail_label)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Type", "Share", "Size", "Files"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setItemDelegateForColumn(1, FileTypeBarDelegate(self.table))
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(1, 180)
+        self.table.setColumnWidth(2, 110)
+        self.table.setColumnWidth(3, 90)
+        self.table.cellClicked.connect(self._activate_row)
+        layout.addWidget(self.table, 1)
+
+        hint = QLabel("Click a file type to show matching files.")
+        hint.setObjectName("deleteProgressCount")
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("deleteProgressCancel")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def set_loading(self):
+        self.detail_label.setText("Calculating file type breakdown...")
+        self.table.setRowCount(0)
+
+    def set_error(self, message):
+        self.detail_label.setText(f"Could not load file types: {message}")
+        self.table.setRowCount(0)
+
+    def set_rows(self, rows):
+        total_size = sum(size for _label, size, _count in rows) or 0
+        total_files = sum(count for _label, _size, count in rows) or 0
+        self.detail_label.setText(
+            f"{len(rows)} groups · {format_size(total_size)} · {total_files:,} files"
+        )
+        self.table.setRowCount(len(rows))
+        for row, (label, total_size_for_type, file_count) in enumerate(rows):
+            raw_extension = None
+            if label == "(no extension)":
+                raw_extension = ""
+            elif label != "Other":
+                raw_extension = label
+
+            type_item = QTableWidgetItem(label)
+            type_item.setData(Qt.ItemDataRole.UserRole, raw_extension)
+            self.table.setItem(row, 0, type_item)
+
+            share_item = QTableWidgetItem("")
+            share_item.setData(
+                Qt.ItemDataRole.UserRole,
+                (total_size_for_type / total_size) if total_size else 0.0,
+            )
+            self.table.setItem(row, 1, share_item)
+
+            self.table.setItem(row, 2, QTableWidgetItem(format_size(total_size_for_type)))
+            self.table.setItem(row, 3, QTableWidgetItem(f"{file_count:,}"))
+        self.table.resizeRowsToContents()
+
+    def _activate_row(self, row, _column):
+        item = self.table.item(row, 0)
+        if item is None:
+            return
+        raw_extension = item.data(Qt.ItemDataRole.UserRole)
+        if raw_extension is None:
+            return
+        self.extension_selected.emit(raw_extension)
+        self.accept()
+
+
 class PageLoadThread(QThread):
     page_ready = pyqtSignal(int, dict)
     page_failed = pyqtSignal(int, str)
@@ -724,6 +889,8 @@ class PageLoadThread(QThread):
         status_filter = self.options['status_filter']
         age_cutoff = self.options['age_cutoff']
         videos_only = self.options['videos_only']
+        name_filter = (self.options.get('name_filter') or '').strip()
+        extension_filter = self.options.get('extension_filter')
         lazy_show_all_tree = self.options.get('lazy_show_all_tree', False)
         filtered_expanded_tree = self.options.get('filtered_expanded_tree', False)
 
@@ -771,6 +938,15 @@ class PageLoadThread(QThread):
             where_clauses.append("is_folder = 0")
         elif view_mode == 'Folders':
             where_clauses.append("is_folder = 1")
+
+        if name_filter:
+            where_clauses.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+            params.append(f"%{escape_sql_like(name_filter)}%")
+
+        if extension_filter is not None:
+            where_clauses.append("is_folder = 0")
+            where_clauses.append("extension = ? COLLATE NOCASE")
+            params.append(extension_filter)
 
         scan_root = self.options.get('scan_root')
         if scan_root:
@@ -874,6 +1050,11 @@ class PageLoadThread(QThread):
             else:
                 root_node['children'].append(node)
 
+        if name_filter and view_mode == 'Tree':
+            for node in nodes_by_path.values():
+                if node.get('children'):
+                    node['_children_loaded'] = True
+
         def sort_tree_for_page(node):
             children = node.get('children', [])
             if not children:
@@ -911,6 +1092,8 @@ class PageLoadThread(QThread):
             'paginated': paginated,
             'lazy_show_all_tree': False,
             'filtered_expanded_tree': filtered_expanded_tree,
+            'name_filter': name_filter,
+            'extension_filter': extension_filter,
         }
 
     def _hide_scan_root_context(self, root_node):
@@ -1739,6 +1922,14 @@ class BulkSelectThread(QThread):
         }
 
 
+class TreeRowDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.backgroundBrush = QBrush(Qt.BrushStyle.NoBrush)
+        super().paint(painter, opt, index)
+        paint_tree_row_border(painter, option)
+
 class StatusDelegate(QStyledItemDelegate):
     # (text_color, bg_color, border_color)
     _COLORS = {
@@ -1752,6 +1943,7 @@ class StatusDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         status = index.data(Qt.ItemDataRole.DisplayRole)
         if not status:
+            paint_tree_row_border(painter, option)
             return
         colors = self._COLORS.get(status, (QColor(0x57, 0x60, 0x6a), QColor(0xf6, 0xf8, 0xfa), QColor(0xd0, 0xd7, 0xde)))
         text_color, bg_color, border_color = colors
@@ -1782,6 +1974,7 @@ class StatusDelegate(QStyledItemDelegate):
         text_rect = QRect(pill.left() + 18, pill.top(), pill.width() - 18, pill.height())
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, status)
         painter.restore()
+        paint_tree_row_border(painter, option)
 
 
 class SizeBarDelegate(QStyledItemDelegate):
@@ -1793,6 +1986,7 @@ class SizeBarDelegate(QStyledItemDelegate):
 
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        opt.backgroundBrush = QBrush(Qt.BrushStyle.NoBrush)
         opt.text = ""
 
         widget = opt.widget
@@ -1818,6 +2012,7 @@ class SizeBarDelegate(QStyledItemDelegate):
             text,
         )
         painter.restore()
+        paint_tree_row_border(painter, option)
 
     def sizeHint(self, option, index):
         hint = super().sizeHint(option, index)
@@ -1876,6 +2071,8 @@ class ActionDelegate(QStyledItemDelegate):
 # ---------------------------------------------------------------------------
 
 class FilterPanel(QFrame):
+    searchCleared = pyqtSignal()
+
     DEFAULT_STALE_MONTHS = 3
     AGE_FILTER_DISABLED = 0
     MAX_STALE_MONTHS = 24
@@ -1891,6 +2088,39 @@ class FilterPanel(QFrame):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 16, 0, 16)
         outer.setSpacing(4)
+
+        search_section = QWidget()
+        search_section.setObjectName("searchSection")
+        search_layout = QVBoxLayout(search_section)
+        search_layout.setContentsMargins(16, 0, 16, 8)
+        search_layout.setSpacing(4)
+
+        lbl_search = QLabel("Search")
+        lbl_search.setObjectName("searchHeader")
+        search_layout.addWidget(lbl_search)
+
+        self.txt_search = QLineEdit()
+        self.txt_search.setObjectName("filterSearch")
+        self.txt_search.setPlaceholderText("Search files and folders...")
+        self.txt_search.setToolTip("Filter the current results by file or folder name")
+        self.txt_search.setFixedHeight(36)
+        clear_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton)
+        self.search_clear_action = self.txt_search.addAction(
+            clear_icon,
+            QLineEdit.ActionPosition.TrailingPosition,
+        )
+        self.search_clear_action.setToolTip("Clear search")
+        self.search_clear_action.setVisible(False)
+        self.search_clear_action.triggered.connect(self.clear_search_text)
+        self.txt_search.textChanged.connect(
+            lambda text: self.search_clear_action.setVisible(bool(text))
+        )
+        self.txt_search.installEventFilter(self)
+        search_layout.addWidget(self.txt_search)
+
+        outer.addWidget(search_section)
+        outer.addWidget(self._hline())
+        outer.addSpacing(8)
 
         # Section 1: Display Mode
         display_section = QWidget()
@@ -2096,6 +2326,20 @@ class FilterPanel(QFrame):
         
         self._update_age_label(self.AGE_FILTER_DISABLED)
 
+    def eventFilter(self, obj, event):
+        if (
+            obj == self.txt_search
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+        ):
+            self.clear_search_text()
+            return True
+        return super().eventFilter(obj, event)
+
+    def clear_search_text(self):
+        self.txt_search.clear()
+        self.searchCleared.emit()
+
     # helpers
     def _make_section(self, title):
         col = QVBoxLayout()
@@ -2143,6 +2387,7 @@ class MainWindow(QMainWindow):
         self.cached_folder_total = None
         self.cached_folder_total_root = None
         self.cached_selected_total = None
+        self.is_scanning = False
         self.folder_cache = None
         self.saved_age_threshold_value = 0
         self.age_controls_forced_disabled = False
@@ -2151,6 +2396,10 @@ class MainWindow(QMainWindow):
         self.selection_loading_min_visible_until = 0.0
         self.delete_preview_thread = None
         self.pending_delete_preview_dialog = None
+        self.file_type_thread = None
+        self.file_type_request_id = 0
+        self.file_types_dialog = None
+        self.active_extension_filter = None
         self.bulk_select_thread = None
         self.bulk_select_request_id = 0
         self.bulk_select_active = False
@@ -2164,6 +2413,8 @@ class MainWindow(QMainWindow):
         self.bulk_select_precomputed_scope = None
         self.bulk_select_requested_scope = 'current'
         self.bulk_select_forced_state = None
+        self._preserve_results_focus = False
+        self.applied_name_filter = ""
         self.source_index_by_path = {}
         self.bulk_select_batch_size = 250
         self.bulk_select_batch_delay_ms = 0
@@ -2191,6 +2442,11 @@ class MainWindow(QMainWindow):
         self.filter_debounce_timer.setSingleShot(True)
         self.filter_debounce_timer.setInterval(700)
         self.filter_debounce_timer.timeout.connect(self._on_filter_changed)
+
+        self.search_debounce_timer = QTimer(self)
+        self.search_debounce_timer.setSingleShot(True)
+        self.search_debounce_timer.setInterval(275)
+        self.search_debounce_timer.timeout.connect(self._on_filter_changed)
 
         self.loading_timer = QTimer(self)
         self.loading_timer.setSingleShot(True)
@@ -2263,6 +2519,14 @@ class MainWindow(QMainWindow):
         self.btn_filter.clicked.connect(self._toggle_filters)
         tb.addWidget(self.btn_filter)
 
+        self.btn_file_types = QPushButton("Types")
+        self.btn_file_types.setObjectName("ghostBtn")
+        self.btn_file_types.setToolTip("File Types: show disk usage by extension")
+        self.btn_file_types.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_file_types.setEnabled(False)
+        self.btn_file_types.clicked.connect(self._show_file_types)
+        tb.addWidget(self.btn_file_types)
+
         self.btn_expand = QPushButton("Expand All")
         self.btn_expand.setObjectName("collapseAll")
         self.btn_expand.setCheckable(True)
@@ -2303,6 +2567,8 @@ class MainWindow(QMainWindow):
         # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
         self.fp.rb_videos.toggled.connect(self._on_videos_mode_toggled)
+        self.fp.txt_search.returnPressed.connect(self._on_search_submitted)
+        self.fp.searchCleared.connect(self._clear_search_filter)
         # Age controls: wait for the user to pause before applying.
         self.fp.slider.valueChanged.connect(self._on_age_slider_changed)
         self.fp.slider.sliderReleased.connect(self._on_age_slider_released)
@@ -2357,7 +2623,6 @@ class MainWindow(QMainWindow):
 
         controls_layout.addStretch()
 
-        # Integrated Pagination
         self.btn_prev_page = QPushButton("<")
         self.btn_prev_page.setObjectName("pageNavBtn")
         self.btn_prev_page.setFixedSize(34, 34)
@@ -2469,7 +2734,7 @@ class MainWindow(QMainWindow):
         # Page 1: Tree view
         self.tree = QTreeView()
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.tree.setAlternatingRowColors(True)
+        self.tree.setAlternatingRowColors(False)
         self.tree.setSortingEnabled(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(False)
@@ -2479,6 +2744,7 @@ class MainWindow(QMainWindow):
         self.tree.setIndentation(16)
         self.tree.setMouseTracking(True)
         self.tree.viewport().setMouseTracking(True)
+        self.tree.setItemDelegate(TreeRowDelegate(self.tree))
         self.tree.setItemDelegateForColumn(4, SizeBarDelegate(self.tree))
         self.tree.setItemDelegateForColumn(5, StatusDelegate(self.tree))
         self.tree.clicked.connect(self._on_click)
@@ -2585,9 +2851,9 @@ class MainWindow(QMainWindow):
         self.chip_empty = self._chip("Empty 0", "chipEmpty")
         self.chip_inactive_folders = self._chip("Inactive 0 folders", "chipInactive")
         self.chip_inactive_files = self._chip("0 files", "chipInactive")
-        self.chip_browse_size = self._chip("Folder --", "chipSpace")
+        self.chip_browse_size = self._chip("Total Size --", "chipSpace")
         self.chip_page_size = self._chip("Page --", "chipSpace")
-        self.chip_selected_size = self._chip("Selected --", "chipSpace")
+        self.chip_selected_size = self._chip("0 B selected · 0 folders, 0 files", "chipSpace")
 
         sbl.addWidget(self.chip_empty)
         sbl.addWidget(self.chip_inactive_folders)
@@ -2627,6 +2893,44 @@ class MainWindow(QMainWindow):
         chip.setText(text)
         chip.setToolTip(text)
 
+    def _format_chip_size(self, size):
+        from .models import format_size
+
+        if size is None:
+            return "--"
+        if isinstance(size, str):
+            return size
+        if size == 0:
+            return "0 B"
+        return format_size(int(size))
+
+    def _set_total_summary_chip(self, text):
+        if text is None:
+            display_text = "Total Size --"
+        elif isinstance(text, (int, float)):
+            display_text = f"Total Size {self._format_chip_size(int(text))}"
+        else:
+            display_text = text if str(text).startswith("Total Size ") else f"Total Size {text}"
+        self._set_chip_text(self.chip_browse_size, display_text)
+
+    def _set_scanning_total_chip(self):
+        running_total = 0
+        if self.folder_cache is not None:
+            running_total = getattr(self.folder_cache, "running_total_size", 0) or 0
+        self._set_chip_text(self.chip_browse_size, f"Scanning… {self._format_chip_size(running_total)} so far")
+
+    def _set_selected_summary_chip(self, size_text=None, folder_count=None, file_count=None):
+        if self.is_scanning:
+            self.chip_selected_size.setVisible(False)
+            return
+
+        size_part = "--" if size_text is None else size_text
+        folders_part = "--" if folder_count is None else f"{folder_count:,}"
+        files_part = "--" if file_count is None else f"{file_count:,}"
+        text = f"{size_part} selected · {folders_part} folders, {files_part} files"
+        self._set_chip_text(self.chip_selected_size, text)
+        self.chip_selected_size.setVisible(True)
+
     def _scan_path_html(self, path):
         if not path:
             return (
@@ -2651,15 +2955,20 @@ class MainWindow(QMainWindow):
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
-            self._set_chip_text(self.chip_browse_size, "Folder calculating...")
+            if self.is_scanning:
+                self._set_scanning_total_chip()
+            else:
+                self._set_total_summary_chip("--")
         if page:
             self._set_chip_text(self.chip_page_size, "Page calculating...")
         if selected:
-            if self._selected_roots_for_delete():
+            if self.is_scanning:
+                self.chip_selected_size.setVisible(False)
+            elif self._selected_roots_for_delete():
                 self._set_chip_text(self.chip_selected_size, "Selected calculating...")
             else:
                 self.cached_selected_total = 0
-                self._set_chip_text(self.chip_selected_size, "Selected 0 B (0F 0f)")
+                self._set_selected_summary_chip("0 B", 0, 0)
 
     def _on_tree_scroll(self, value):
         """Show/hide the scroll-to-top button based on vertical scroll position."""
@@ -2691,7 +3000,47 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'tree_container') and obj == self.tree_container:
             if event.type() == QEvent.Type.Resize:
                 self._reposition_scroll_top_btn()
+                QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
         return super().eventFilter(obj, event)
+
+    def _fit_tree_columns_to_viewport(self):
+        if not hasattr(self, 'tree') or self.tree.model() is None:
+            return
+
+        header = self.tree.header()
+        view_mode = self.fp.get_view_mode() if hasattr(self, 'fp') else 'Tree'
+        viewport_width = max(0, self.tree.viewport().width() - 18)
+
+        if view_mode == 'Tree':
+            fixed_widths = {
+                1: 96,
+                2: 150,
+                3: 86,
+                4: 132,
+                5: 118,
+            }
+            min_name_width = 420
+        else:
+            fixed_widths = {
+                1: min(420, max(260, viewport_width // 4)),
+                2: 150,
+                3: 86,
+                4: 132,
+                5: 118,
+            }
+            min_name_width = 260
+
+        visible_fixed = 0
+        for column, width in fixed_widths.items():
+            if self.tree.isColumnHidden(column):
+                continue
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.tree.setColumnWidth(column, width)
+            visible_fixed += width
+
+        name_width = max(min_name_width, viewport_width - visible_fixed)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.tree.setColumnWidth(0, name_width)
 
     # -------------------------------------------------------------------------
     # Filter panel
@@ -2744,6 +3093,7 @@ class MainWindow(QMainWindow):
             older_than_secs=age_secs,
             status_filter=status_filter,
             view_mode=self.fp.get_view_mode(),
+            name_filter=self.applied_name_filter,
         )
         self._update_expand_control_visibility()
         self._update_status_column_visibility()
@@ -2781,6 +3131,7 @@ class MainWindow(QMainWindow):
 
         show_status = not (self.fp.rb_all.isChecked() or self.fp.rb_videos.isChecked())
         self.tree.setColumnHidden(5, not show_status)
+        QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
 
     def _update_status_metrics_visibility(self):
         if not hasattr(self, 'chip_empty'):
@@ -2793,6 +3144,35 @@ class MainWindow(QMainWindow):
             self.chip_inactive_files,
         ):
             widget.setVisible(show_status)
+        if hasattr(self, 'chip_page_size'):
+            self.chip_page_size.setVisible(not self.fp.rb_all.isChecked())
+        if hasattr(self, 'chip_selected_size'):
+            self.chip_selected_size.setVisible((not self.is_scanning) and show_status)
+
+    def _set_page_controls_visible(self, visible):
+        for widget in (
+            getattr(self, 'btn_prev_page', None),
+            getattr(self, 'lbl_page_info', None),
+            getattr(self, 'btn_next_page', None),
+        ):
+            if widget is not None:
+                widget.setVisible(visible)
+
+    def _update_page_controls(self, total_matches):
+        if not hasattr(self, 'lbl_page_info'):
+            return
+
+        limit = 2000
+        has_multiple_pages = total_matches > limit and not self.current_lazy_show_all_tree
+        self._set_page_controls_visible(has_multiple_pages)
+        if not has_multiple_pages:
+            return
+
+        offset = self.current_page * limit
+        end = min(offset + limit, total_matches)
+        self.lbl_page_info.setText(f"{offset + 1}-{end} of {total_matches}")
+        self.btn_prev_page.setEnabled(self.current_page > 0)
+        self.btn_next_page.setEnabled(offset + limit < total_matches)
 
     def _update_age_controls_enabled(self):
         if not hasattr(self, 'fp'):
@@ -2846,7 +3226,90 @@ class MainWindow(QMainWindow):
         self.fp.age_input.setCursor(cursor)
 
     def _reset_filters(self):
+        self.search_debounce_timer.stop()
+        self.applied_name_filter = ""
+        self.active_extension_filter = None
+        blocker = QSignalBlocker(self.fp.txt_search)
+        self.fp.txt_search.clear()
+        del blocker
+        self.fp.search_clear_action.setVisible(False)
         self._apply_default_browse_preset()
+
+    def _has_completed_scan_context(self):
+        return bool(getattr(self, 'current_scan_root', None)) and not self.is_scanning
+
+    def _update_file_types_enabled(self):
+        if hasattr(self, 'btn_file_types'):
+            self.btn_file_types.setEnabled(self._has_completed_scan_context())
+
+    def _show_file_types(self):
+        if not self._has_completed_scan_context():
+            return
+
+        self.file_type_request_id += 1
+        request_id = self.file_type_request_id
+
+        if self.file_type_thread and self.file_type_thread.isRunning():
+            self.file_type_thread.cancel()
+
+        self.file_types_dialog = FileTypesDialog(self)
+        self.file_types_dialog.extension_selected.connect(self._drill_down_file_type)
+        self.file_types_dialog.set_loading()
+        self.file_types_dialog.show()
+
+        self.file_type_thread = FileTypeBreakdownThread(request_id, limit=20, parent=self)
+        self.file_type_thread.breakdown_ready.connect(self._on_file_types_ready)
+        self.file_type_thread.breakdown_failed.connect(self._on_file_types_failed)
+        self.file_type_thread.finished.connect(self._cleanup_file_type_thread)
+        self.file_type_thread.start()
+
+    def _cleanup_file_type_thread(self):
+        if self.sender() is self.file_type_thread:
+            self.file_type_thread = None
+
+    def _on_file_types_ready(self, request_id, rows):
+        if request_id != self.file_type_request_id or not self.file_types_dialog:
+            return
+        self.file_types_dialog.set_rows(rows)
+
+    def _on_file_types_failed(self, request_id, error):
+        if request_id != self.file_type_request_id or not self.file_types_dialog:
+            return
+        self.file_types_dialog.set_error(error)
+
+    def _drill_down_file_type(self, extension):
+        self.active_extension_filter = extension
+        self.search_debounce_timer.stop()
+        self.applied_name_filter = ""
+        self._cancel_running_bulk_select_thread()
+        self._discard_current_page_selection()
+        self.bulk_delete_scope = None
+        self.current_page = 0
+
+        blockers = [
+            QSignalBlocker(self.fp.bg),
+            QSignalBlocker(self.fp.bg_view),
+            QSignalBlocker(self.fp.rb_all),
+            QSignalBlocker(self.fp.rb_inactive),
+            QSignalBlocker(self.fp.rb_empty),
+            QSignalBlocker(self.fp.rb_videos),
+            QSignalBlocker(self.fp.rb_view_tree),
+            QSignalBlocker(self.fp.rb_view_files),
+            QSignalBlocker(self.fp.rb_view_folders),
+            QSignalBlocker(self.fp.txt_search),
+        ]
+        try:
+            self.fp.rb_all.setChecked(True)
+            self.fp.rb_view_files.setChecked(True)
+            self.fp.txt_search.clear()
+        finally:
+            del blockers
+
+        self.fp.search_clear_action.setVisible(False)
+        self.sort_column = 4
+        self.sort_order = Qt.SortOrder.DescendingOrder
+        self._apply_sort_indicator()
+        self._apply_filters()
 
     def _toggle_expand(self, checked):
         self._set_expand_state(checked)
@@ -2872,7 +3335,7 @@ class MainWindow(QMainWindow):
 
         if expanded:
             if self.proxy_model and self.proxy_model.rowCount() > 0:
-                # Pages are capped at 2000 rows so expandAll is safe
+                # Filtered pages are capped by the selected page size, so expandAll stays bounded.
                 self.is_programmatic_expand = True
                 try:
                     self.tree.expandAll()
@@ -2891,6 +3354,35 @@ class MainWindow(QMainWindow):
             self.btn_expand.setText("Collapse All" if expanded else "Expand All")
             self.btn_expand.setEnabled(self._has_visible_rows())
             del blocker
+
+    def _expand_loaded_search_branches(self):
+        if not self.tree_model or self.proxy_model.sourceModel() is None:
+            return
+
+        self.is_programmatic_expand = True
+        try:
+            stack = [
+                self.tree_model.index(row, 0, QModelIndex())
+                for row in range(self.tree_model.rowCount(QModelIndex()))
+            ]
+            while stack:
+                source_index = stack.pop()
+                item = source_index.internalPointer()
+                real_children = [
+                    child
+                    for child in item.childItems
+                    if not child.itemData.get('_is_dummy')
+                ]
+                if not real_children:
+                    continue
+
+                proxy_index = self.proxy_model.mapFromSource(source_index)
+                if proxy_index.isValid():
+                    self.tree.setExpanded(proxy_index, True)
+                for row in range(self.tree_model.rowCount(source_index)):
+                    stack.append(self.tree_model.index(row, 0, source_index))
+        finally:
+            self.is_programmatic_expand = False
 
     def _tree_refresh_state_signature(self, options=None):
         options = options or self._page_load_options()
@@ -2912,6 +3404,7 @@ class MainWindow(QMainWindow):
             options.get('view_mode'),
             filter_mode,
             age_value,
+            options.get('name_filter', ''),
             options.get('page'),
             bool(options.get('lazy_show_all_tree')),
             bool(options.get('filtered_expanded_tree')),
@@ -2985,6 +3478,7 @@ class MainWindow(QMainWindow):
         if not self.tree_model:
             return
 
+        self._preserve_results_focus = True
         videos_only = self._display_mode() == 'Videos'
         selecting = not self.btn_select_all.text().startswith("Deselect")
         self._begin_page_select_flow(
@@ -3090,8 +3584,23 @@ class MainWindow(QMainWindow):
 
     def _on_filter_changed(self):
         # User manually changed a filter control - clear selections and apply
+        self.active_extension_filter = None
         self._discard_current_page_selection()
         self._apply_filters()
+
+    def _on_search_submitted(self):
+        search_text = self.fp.txt_search.text().strip()
+        if search_text == self.applied_name_filter:
+            return
+        self.applied_name_filter = search_text
+        self._on_filter_changed()
+
+    def _clear_search_filter(self):
+        self.search_debounce_timer.stop()
+        if not self.applied_name_filter:
+            return
+        self.applied_name_filter = ""
+        self._on_filter_changed()
 
     def _on_manual_age_finished(self):
         if hasattr(self.fp, 'age_input'):
@@ -3368,6 +3877,16 @@ class MainWindow(QMainWindow):
         elif view_mode == 'Folders':
             where_clauses.append("is_folder = 1")
 
+        name_filter = self.applied_name_filter
+        if name_filter:
+            where_clauses.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+            params.append(f"%{escape_sql_like(name_filter)}%")
+
+        if self.active_extension_filter is not None:
+            where_clauses.append("is_folder = 0")
+            where_clauses.append("extension = ? COLLATE NOCASE")
+            params.append(self.active_extension_filter)
+
         scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         if scan_root:
             where_clauses.append("path != ? COLLATE NOCASE")
@@ -3579,10 +4098,6 @@ class MainWindow(QMainWindow):
 
     def _finish_immediate_page_selection(self, label):
         self._set_bulk_selection_busy(False)
-        if label == "videos":
-            self.lbl_status.setText("Video selection complete.")
-        else:
-            self.lbl_status.setText("Selection complete.")
         self._refresh_selection_buttons()
         self._do_recount()
 
@@ -4041,9 +4556,12 @@ class MainWindow(QMainWindow):
         self.refresh_tree_state_key = None
         self.refresh_collapsed_tree_paths = set()
         self.folder_cache = None
+        self.current_scan_root = None
+        self.active_extension_filter = None
 
         # Reset pagination state
         self.current_page = 0
+        self.current_total_matches = 0
         self.is_scanning  = False
         self.cached_folder_total = None
         self.cached_folder_total_root = None
@@ -4053,15 +4571,16 @@ class MainWindow(QMainWindow):
         self.chip_empty.setText("Empty 0")
         self.chip_inactive_folders.setText("Inactive 0 folders")
         self.chip_inactive_files.setText("0 files")
-        self._set_chip_text(self.chip_browse_size, "Folder --")
+        self._set_total_summary_chip("--")
         self._set_chip_text(self.chip_page_size, "Page --")
-        self._set_chip_text(self.chip_selected_size, "Selected --")
+        self._set_selected_summary_chip("0 B", 0, 0)
         self._update_status_metrics_visibility()
 
         # Hide controls, show empty page
         self.controls_bar.setVisible(False)
         self.content_stack.setCurrentIndex(0)
         self.lbl_status.setText("Ready - select a folder and click Re-scan")
+        self._update_file_types_enabled()
 
     def _browse(self):
         # Use native Windows Explorer dialog
@@ -4115,27 +4634,30 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"Path not found or not accessible: {path}")
             return
         
-        self.lbl_status.setText("Scanning...")
-        self.btn_rescan.setText("Stop")
-        self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
-        self._set_size_totals_pending(browse=True, page=True, selected=True)
-        self.content_stack.setCurrentIndex(3)
-        self._set_scanning_panel(
-            path=path,
-            detail="Preparing the index and waiting for the first batch of results.",
-        )
-
         self.current_page = 0
         self.total_scanned = 0
         self.is_scanning = True
+        self.active_extension_filter = None
         self.current_scan_root = os.path.normcase(os.path.normpath(path))
         self.cached_folder_total = None
         self.cached_folder_total_root = self.current_scan_root
         self.totals_request_id += 1
         self._cancel_running_totals_thread()
 
+        self.lbl_status.setText("Scanning...")
+        self.btn_rescan.setText("Stop")
+        self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
+        self._set_size_totals_pending(browse=True, page=True, selected=True)
+        self.content_stack.setCurrentIndex(3)
+        self._update_file_types_enabled()
+        self._set_scanning_panel(
+            path=path,
+            detail="Preparing the index and waiting for the first batch of results.",
+        )
+
         self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
         self.folder_cache = self.scanner_thread.cache
+        self.scanner_thread.scan_started.connect(self._on_scan_started)
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_progress.connect(self._on_progress)
         self.scanner_thread.first_batch_ready.connect(self._on_first_batch_ready)
@@ -4145,14 +4667,21 @@ class MainWindow(QMainWindow):
     def _on_progress(self, path):
         s = ("..." + path[-72:]) if len(path) > 75 else path
         self.lbl_status.setText(f"Scanning: {s}")
+        if self.is_scanning:
+            self._set_scanning_total_chip()
         if self.content_stack.currentIndex() == 3:
             self._set_scanning_panel(path=s)
+
+    def _on_scan_started(self):
+        if self.is_scanning:
+            self._set_scanning_total_chip()
+            self.chip_selected_size.setVisible(False)
 
     def _set_match_status(self, total_matches):
         if self.is_scanning:
             self.lbl_status.setText(f"Scanning... Found {total_matches} matching items")
         else:
-            self.lbl_status.setText(f"Found {total_matches} matching items")
+            self.lbl_status.setText("Scan complete")
 
     def _on_first_batch_ready(self):
         options = self._page_load_options()
@@ -4252,17 +4781,7 @@ class MainWindow(QMainWindow):
 
         # Update UI controls
         self.current_total_matches = total_matches or 0
-        limit = 2000
-        offset = self.current_page * limit
-        has_multiple_pages = total_matches > limit and not self._page_load_options().get('lazy_show_all_tree')
-        self.btn_prev_page.setVisible(has_multiple_pages)
-        self.btn_next_page.setVisible(has_multiple_pages)
-        self.lbl_page_info.setVisible(has_multiple_pages)
-        
-        if has_multiple_pages:
-            self.lbl_page_info.setText(f"{offset + 1}-{min(offset + limit, total_matches)} of {total_matches}")
-            self.btn_prev_page.setEnabled(self.current_page > 0)
-            self.btn_next_page.setEnabled(offset + limit < total_matches)
+        self._update_page_controls(total_matches or 0)
         
         self._set_match_status(total_matches)
 
@@ -4271,6 +4790,7 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("Re-scan")
         self.btn_rescan.setStyleSheet("") # reset style
         self.is_scanning = False
+        self._update_file_types_enabled()
         
         if self.scanner_thread and self.scanner_thread.is_cancelled:
             self.lbl_status.setText("Scan stopped by user.")
@@ -4286,6 +4806,9 @@ class MainWindow(QMainWindow):
             else:
                 self.scan_refresh_timer.start()
             self._update_chips_sql()
+        if self.folder_cache is not None:
+            self._set_total_summary_chip(getattr(self.folder_cache, "running_total_size", 0) or 0)
+        self._set_selected_summary_chip("0 B", 0, 0)
             
     def _prev_page(self):
         if self.current_page > 0:
@@ -4304,11 +4827,8 @@ class MainWindow(QMainWindow):
 
         limit = 2000
         total_matches = self.current_total_matches or 0
-        has_multiple_pages = total_matches > limit and not self.current_lazy_show_all_tree
-        self.btn_prev_page.setVisible(has_multiple_pages)
-        self.btn_next_page.setVisible(has_multiple_pages)
-        self.lbl_page_info.setVisible(has_multiple_pages)
-        if not has_multiple_pages:
+        self._update_page_controls(total_matches)
+        if self.current_lazy_show_all_tree or total_matches <= 0:
             return
 
         offset = self.current_page * limit
@@ -4328,6 +4848,13 @@ class MainWindow(QMainWindow):
         hdr.setSortIndicatorShown(True)
         hdr.setSortIndicator(self.sort_column, self.sort_order)
         del blocker
+        model = getattr(self, 'tree_model', None)
+        if model is not None and hasattr(model, 'set_sort_header_state'):
+            model.set_sort_header_state(self.sort_column, self.sort_order)
+
+    def _focus_results_view(self):
+        self.txt_path.clearFocus()
+        self.tree.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_header_sort_clicked(self, col):
         if col >= 6:
@@ -4351,6 +4878,7 @@ class MainWindow(QMainWindow):
             return
 
         self.bulk_delete_scope = None
+        self._preserve_results_focus = True
         self.sort_column = col
         self.sort_order = order
         self._apply_sort_indicator()
@@ -4360,6 +4888,8 @@ class MainWindow(QMainWindow):
     def _page_load_options(self):
         view_mode = self.fp.get_view_mode()
         paginated = True
+        name_filter = self.applied_name_filter
+        extension_filter = self.active_extension_filter
 
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
@@ -4379,15 +4909,24 @@ class MainWindow(QMainWindow):
             and status_filter is None
             and not self.fp.rb_videos.isChecked()
             and age_cutoff is None
+            and not name_filter
+            and extension_filter is None
         )
         filtered_expanded_tree = (
             view_mode == 'Tree'
+            and not name_filter
+            and extension_filter is None
             and (
                 status_filter in ('Inactive', 'Empty')
                 or self.fp.rb_videos.isChecked()
             )
         )
-        defer_tree_load_until_scan_done = lazy_show_all_tree or filtered_expanded_tree
+        defer_tree_load_until_scan_done = (
+            lazy_show_all_tree
+            or filtered_expanded_tree
+            or bool(name_filter)
+            or extension_filter is not None
+        )
         return {
             'limit': limit,
             'offset': self.current_page * limit if paginated else 0,
@@ -4397,6 +4936,8 @@ class MainWindow(QMainWindow):
             'status_filter': status_filter,
             'age_cutoff': age_cutoff,
             'videos_only': self.fp.rb_videos.isChecked(),
+            'name_filter': name_filter,
+            'extension_filter': extension_filter,
             'sort_column': self.sort_column,
             'sort_desc': self.sort_order == Qt.SortOrder.DescendingOrder,
             'scan_root': getattr(self, 'current_scan_root', os.path.normpath(self.txt_path.text().strip() or "")),
@@ -4432,7 +4973,7 @@ class MainWindow(QMainWindow):
                 else "Matching items and updating the current page..."
             )
             self.selection_loading_dialog = LoadingDialog(
-                "Selecting items",
+                "Working...",
                 detail,
                 self,
             )
@@ -4510,7 +5051,6 @@ class MainWindow(QMainWindow):
         self._set_delete_controls_enabled(not busy)
         if busy:
             self.bulk_select_label = label
-            self.lbl_status.setText(f"Selecting {label}..." if label else "Selecting...")
             self._show_selection_loading_dialog(label)
         else:
             self._hide_selection_loading_dialog()
@@ -4634,12 +5174,9 @@ class MainWindow(QMainWindow):
         else:
             self.bulk_delete_scope = None
         self._set_bulk_selection_busy(False)
-        if self.bulk_select_label == "videos":
-            self.lbl_status.setText("Video selection complete.")
-        else:
-            self.lbl_status.setText("Selection complete.")
         self._refresh_selection_buttons()
         self._do_recount()
+        self._focus_results_view()
         self.bulk_select_precomputed_scope = None
         self.bulk_select_forced_state = None
         self.bulk_select_requested_scope = 'current'
@@ -4684,9 +5221,9 @@ class MainWindow(QMainWindow):
                 precomputed=result,
             )
             self._set_bulk_selection_busy(False)
-            self.lbl_status.setText("Selection complete.")
             self._refresh_selection_buttons()
             self._do_recount()
+            self._focus_results_view()
             self.bulk_select_precomputed_scope = None
             self.bulk_select_forced_state = None
             self.bulk_select_requested_scope = 'current'
@@ -4698,9 +5235,9 @@ class MainWindow(QMainWindow):
             self.bulk_select_precomputed_scope = None
             self.bulk_select_forced_state = None
             self.bulk_select_requested_scope = 'current'
-            self.lbl_status.setText("No matching items on this page.")
             self._refresh_selection_buttons()
             self._do_recount()
+            self._focus_results_view()
             return
 
         if self.bulk_select_forced_state is not None:
@@ -4765,7 +5302,7 @@ class MainWindow(QMainWindow):
                 self._set_chip_text(self.chip_page_size, "Page 0 B")
             else:
                 self.cached_selected_total = 0
-                self._set_chip_text(self.chip_selected_size, "Selected 0 B (0F 0f)")
+                self._set_selected_summary_chip("0 B", 0, 0)
             return
 
         thread = PathSizeThread(request_id, kind, paths, parent=self)
@@ -4803,6 +5340,8 @@ class MainWindow(QMainWindow):
             self.btn_clear_selection,
             self.btn_select_inactive,
             self.btn_select_empty,
+            self.btn_prev_page,
+            self.btn_next_page,
         ):
             button.setEnabled(enabled and button.isVisible())
         self.btn_delete.setEnabled(enabled and self.btn_delete.isEnabled())
@@ -4848,6 +5387,7 @@ class MainWindow(QMainWindow):
         self._hide_loading_dialog()
         self._set_loading_controls_enabled(True)
         self.page_load_thread = None
+        self._update_file_types_enabled()
 
         total_matches = result['total_matches']
         self.current_total_matches = total_matches or 0
@@ -4873,6 +5413,7 @@ class MainWindow(QMainWindow):
             else:
                 self.content_stack.setCurrentIndex(2)
                 self.controls_bar.setVisible(False)
+                self._set_page_controls_visible(False)
                 debug_info = result.get('debug_info')
                 self.lbl_status.setText(
                     f"No matching items found ({debug_info})"
@@ -4889,15 +5430,7 @@ class MainWindow(QMainWindow):
         self._restore_persistent_selection_to_model()
         self._restore_bulk_scope_selection_to_model()
 
-        has_multiple_pages = (total_matches > limit) and not lazy_show_all_tree
-        self.btn_prev_page.setVisible(has_multiple_pages)
-        self.btn_next_page.setVisible(has_multiple_pages)
-        self.lbl_page_info.setVisible(has_multiple_pages)
-
-        if has_multiple_pages:
-            self.lbl_page_info.setText(f"{offset + 1}-{min(offset + limit, total_matches)} of {total_matches}")
-            self.btn_prev_page.setEnabled(self.current_page > 0)
-            self.btn_next_page.setEnabled(offset + limit < total_matches)
+        self._update_page_controls(total_matches or 0)
 
         self.content_stack.setCurrentIndex(1)
         self.controls_bar.setVisible(True)
@@ -4905,20 +5438,18 @@ class MainWindow(QMainWindow):
         hdr = self.tree.header()
         for index in range(0, 6):
             hdr.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setStretchLastSection(False)
         self._apply_sort_indicator()
+        self._fit_tree_columns_to_viewport()
 
-        if view_mode == 'Tree':
-            self.tree.setColumnWidth(1, 78)
+        if result.get('name_filter'):
+            self._set_expand_state(False)
+            self._expand_loaded_search_branches()
         else:
-            self.tree.setColumnWidth(1, 380)
-        self.tree.setColumnWidth(2, 150)
-        self.tree.setColumnWidth(3, 82)
-        self.tree.setColumnWidth(4, 132)
-        self.tree.setColumnWidth(5, 116)
-
-        self._set_expand_state(False if lazy_show_all_tree else True)
+            should_expand_loaded_tree = view_mode == 'Tree' and not lazy_show_all_tree
+            self._set_expand_state(should_expand_loaded_tree)
         self._restore_tree_refresh_state(self.tree_model.options)
+        self._update_expand_control_visibility()
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
         self._set_match_status(total_matches)
@@ -4927,6 +5458,9 @@ class MainWindow(QMainWindow):
         self._refresh_selection_buttons()
         self.tree_model.dataChanged.connect(self._on_checked)
         self.tree_model.layoutChanged.connect(self._on_checked)
+        if self._preserve_results_focus:
+            self._focus_results_view()
+            self._preserve_results_focus = False
 
     def _on_page_load_failed(self, request_id, error):
         if request_id != self.page_load_request_id:
@@ -4959,15 +5493,18 @@ class MainWindow(QMainWindow):
         self._set_chip_text(self.chip_empty, f"Empty {result['empty_n']}")
         self._set_chip_text(self.chip_inactive_folders, f"Inactive {result['inactive_folders']} folders")
         self._set_chip_text(self.chip_inactive_files, f"{result['inactive_files']} files")
+        if self.is_scanning:
+            self._set_scanning_total_chip()
+            return
         if result['folder_total'] is None:
-            self._set_chip_text(self.chip_browse_size, "Folder calculating...")
+            self._set_total_summary_chip("--")
         elif folder_total_is_unknown_zero:
             self.cached_folder_total = None
-            self._set_chip_text(self.chip_browse_size, "Folder calculating...")
+            self._set_total_summary_chip("--")
         else:
             folder_total = result['folder_total']
             folder_total_text = "0 B" if folder_total_is_real_zero else format_size(folder_total)
-            self._set_chip_text(self.chip_browse_size, f"Folder {folder_total_text}")
+            self._set_total_summary_chip(folder_total_text)
     def _on_path_total_ready(self, request_id, kind, total):
         from .models import format_size
 
@@ -4988,10 +5525,7 @@ class MainWindow(QMainWindow):
             return
 
         self.cached_selected_total = size
-        self._set_chip_text(
-            self.chip_selected_size,
-            f"Selected {format_size(size)} ({folders}F {files}f)",
-        )
+        self._set_selected_summary_chip(format_size(size), folders, files)
         if (
             self.pending_delete_preview_dialog
             and getattr(self.pending_delete_preview_dialog, 'preview_mode', '') == 'direct'
@@ -5007,13 +5541,16 @@ class MainWindow(QMainWindow):
             return
 
         self.cached_selected_total = None
-        self._set_chip_text(self.chip_selected_size, "Selected --")
+        self._set_selected_summary_chip("0 B", 0, 0)
 
     def _on_totals_failed(self, request_id, error):
         if request_id != self.totals_request_id:
             return
 
-        self._set_chip_text(self.chip_browse_size, "Folder --")
+        if self.is_scanning:
+            self._set_scanning_total_chip()
+        else:
+            self._set_total_summary_chip("--")
 
     # -------------------------------------------------------------------------
     # Selection count (debounced)
@@ -5160,18 +5697,42 @@ class MainWindow(QMainWindow):
         ):
             return
 
-        self.tree_model.finish_async_child_load(QModelIndex(persistent_index), children)
+        expanded_path_keys = set()
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
+            for row in range(self.proxy_model.rowCount(parent)):
+                proxy_index = self.proxy_model.index(row, 0, parent)
+                if not self.tree.isExpanded(proxy_index):
+                    continue
+                source_for_expanded = self.proxy_model.mapToSource(proxy_index)
+                item_data = self.tree_model.data(source_for_expanded, Qt.ItemDataRole.UserRole) or {}
+                if item_data.get('path'):
+                    expanded_path_keys.add(self._path_key(item_data['path']))
+                stack.append(proxy_index)
+        expanded_path_keys.add(self._path_key(folder_path))
+
+        source_index = QModelIndex(persistent_index)
+        self.proxy_model.setSourceModel(None)
+        try:
+            self.tree_model.finish_async_child_load(source_index, children)
+        finally:
+            self.proxy_model.setSourceModel(self.tree_model)
+            self.tree.setModel(self.proxy_model)
         self._rebuild_source_index_map()
         self._restore_persistent_selection_to_model()
         self._restore_bulk_scope_selection_to_model()
         self._refresh_selection_buttons()
-        proxy_index = self.proxy_model.mapFromSource(QModelIndex(persistent_index))
-        if proxy_index.isValid():
-            self.is_programmatic_expand = True
-            try:
+        self.is_programmatic_expand = True
+        try:
+            for path_key in sorted(expanded_path_keys, key=lambda key: key.count(os.sep)):
+                loaded_source_index = self.source_index_by_path.get(path_key, QModelIndex())
+                proxy_index = self.proxy_model.mapFromSource(loaded_source_index)
+                if not proxy_index.isValid():
+                    continue
                 self.tree.setExpanded(proxy_index, True)
-            finally:
-                self.is_programmatic_expand = False
+        finally:
+            self.is_programmatic_expand = False
 
     def _on_lazy_children_failed(self, request_id, folder_path, error):
         state = self.lazy_child_threads.get(request_id)
@@ -5295,6 +5856,8 @@ class MainWindow(QMainWindow):
             self.btn_delete.setEnabled(False)
         self.btn_rescan.setEnabled(enabled)
         self.btn_filter.setEnabled(enabled)
+        if hasattr(self, 'btn_file_types'):
+            self.btn_file_types.setEnabled(enabled and self._has_completed_scan_context())
         self.controls_bar.setEnabled(enabled)
         self.tree.setEnabled(enabled)
 
