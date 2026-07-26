@@ -21,6 +21,7 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
 from .scanner import ScannerThread
 from .scan_exclusions import ScanExclusions
+from .auth import AuthStore, append_delete_audit
 
 VIDEO_EXTENSIONS = (
     ".3g2", ".3gp", ".avi", ".divx", ".flv", ".m2ts", ".m4v",
@@ -615,6 +616,7 @@ class DeletePreviewDialog(QDialog):
         self.setFixedSize(520, 230)
         self.setObjectName("deleteProgressDialog")
         self.preview_paths = []
+        self.preview_payload = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -654,6 +656,7 @@ class DeletePreviewDialog(QDialog):
         layout.addLayout(btn_row)
 
     def apply_preview(self, payload):
+        self.preview_payload = dict(payload or {})
         self.preview_paths = payload.get('paths', [])
         total = payload.get('total', len(self.preview_paths))
         delete_operations = payload.get('delete_operations', len(self.preview_paths))
@@ -690,6 +693,133 @@ class DeletePreviewDialog(QDialog):
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.delete_button.setEnabled(False)
+
+
+class DeleteAuthDialog(QDialog):
+    consecutive_failures = 0
+    lockout_until = 0.0
+
+    def __init__(self, item_count, total_size=0, parent=None):
+        super().__init__(parent)
+        self.authorized_username = None
+        self.item_count = int(item_count or 0)
+        self.total_size = int(total_size or 0)
+        self.store = AuthStore()
+        self.setWindowTitle("Delete authorization")
+        self.setModal(True)
+        self.setFixedSize(520, 250)
+        self.setObjectName("deleteProgressDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("Authorization required")
+        title.setObjectName("deleteProgressTitle")
+        layout.addWidget(title)
+
+        size_text = format_size(self.total_size) if self.total_size else "0 B"
+        detail = QLabel(
+            f"Enter your credentials to permanently delete {self.item_count} "
+            f"item{'s' if self.item_count != 1 else ''} ({size_text})."
+        )
+        detail.setObjectName("deleteProgressCount")
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
+
+        self.message_label = QLabel("")
+        self.message_label.setObjectName("deleteProgressCount")
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        self.username_input = QLineEdit()
+        self.username_input.setObjectName("filterSearch")
+        self.username_input.setPlaceholderText("Username")
+        self.username_input.setFixedHeight(34)
+        layout.addWidget(self.username_input)
+
+        self.password_input = QLineEdit()
+        self.password_input.setObjectName("filterSearch")
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.setFixedHeight(34)
+        layout.addWidget(self.password_input)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("deleteProgressCancel")
+        self.cancel_button.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_button)
+        self.submit_button = QPushButton("Authorize delete")
+        self.submit_button.setObjectName("primaryBtn")
+        self.submit_button.clicked.connect(self._submit)
+        btn_row.addWidget(self.submit_button)
+        layout.addLayout(btn_row)
+
+        self.password_input.returnPressed.connect(self._submit)
+        self.username_input.returnPressed.connect(self.password_input.setFocus)
+        self.cooldown_timer = QTimer(self)
+        self.cooldown_timer.setInterval(1000)
+        self.cooldown_timer.timeout.connect(self._update_lockout_state)
+        self._update_lockout_state()
+
+    def _update_lockout_state(self):
+        remaining = int(max(0, DeleteAuthDialog.lockout_until - time.time()))
+        if remaining > 0:
+            self.submit_button.setEnabled(False)
+            self.message_label.setText(f"Too many failed attempts - try again in {remaining}s.")
+            if not self.cooldown_timer.isActive():
+                self.cooldown_timer.start()
+            return
+
+        self.cooldown_timer.stop()
+        self.submit_button.setEnabled(True)
+        if self.message_label.text().startswith("Too many failed attempts"):
+            self.message_label.setText("")
+
+    def _submit(self):
+        if self.store.is_empty():
+            QMessageBox.warning(
+                self,
+                "Delete authorization",
+                "No authorized users are configured for this installation. Contact your administrator.",
+            )
+            return
+
+        self._update_lockout_state()
+        if not self.submit_button.isEnabled():
+            return
+
+        username = self.username_input.text().strip()
+        password = self.password_input.text()
+        if self.store.verify(username, password):
+            DeleteAuthDialog.consecutive_failures = 0
+            DeleteAuthDialog.lockout_until = 0.0
+            self.authorized_username = self.store.canonical_username(username)
+            append_delete_audit(
+                "delete_authorized",
+                username=self.authorized_username,
+                items=self.item_count,
+                size=self.total_size,
+            )
+            self.accept()
+            return
+
+        DeleteAuthDialog.consecutive_failures += 1
+        append_delete_audit(
+            "delete_denied",
+            username="UNKNOWN",
+            items=self.item_count,
+            size=self.total_size,
+            reason="invalid_credentials",
+            attempted_username=username or "UNKNOWN",
+        )
+        self.password_input.clear()
+        self.message_label.setText("Invalid username or password.")
+        if DeleteAuthDialog.consecutive_failures >= 3:
+            DeleteAuthDialog.lockout_until = time.time() + 30
+            self._update_lockout_state()
 
 
 class FileTypeBreakdownThread(QThread):
@@ -4602,7 +4732,9 @@ class MainWindow(QMainWindow):
         dialog.activateWindow()
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
-            return dialog.preview_paths
+            payload = dict(dialog.preview_payload or {})
+            payload['paths'] = list(dialog.preview_paths or [])
+            return payload
         return None
 
     def _build_direct_delete_preview(self, paths):
@@ -6047,7 +6179,13 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if r == QMessageBox.StandardButton.Yes:
-            self._start_delete([path])
+            try:
+                _paths, _folders, _files, total_size = self._summarize_delete_paths([path])
+            except Exception:
+                total_size = 0
+            authorized_by = self._authorize_delete(1, total_size)
+            if authorized_by:
+                self._start_delete([path], authorized_by=authorized_by, audit_size=total_size)
 
     def _bulk_delete_paths(self):
         if not self.bulk_delete_scope:
@@ -6094,10 +6232,35 @@ class MainWindow(QMainWindow):
         self.controls_bar.setEnabled(enabled)
         self.tree.setEnabled(enabled)
 
-    def _start_delete(self, paths):
+    def _authorize_delete(self, item_count, total_size=0):
+        store = AuthStore()
+        if store.is_empty():
+            QMessageBox.warning(
+                self,
+                "Delete authorization",
+                "No authorized users are configured for this installation. Contact your administrator.",
+            )
+            return None
+
+        dialog = DeleteAuthDialog(item_count, total_size, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return dialog.authorized_username
+        return None
+
+    def _start_delete(self, paths, authorized_by=None, audit_size=0):
         if not paths:
             return
+        if not authorized_by:
+            QMessageBox.warning(
+                self,
+                "Delete authorization",
+                "Delete authorization is required before items can be deleted.",
+            )
+            return
 
+        self.delete_authorized_by = authorized_by
+        self.delete_audit_items = len(paths)
+        self.delete_audit_size = int(audit_size or 0)
         self._set_delete_controls_enabled(False)
         self.lbl_status.setText(f"Deleting 0 of {len(paths)}...")
 
@@ -6126,6 +6289,16 @@ class MainWindow(QMainWindow):
 
         self.delete_thread = None
         self.bulk_delete_scope = None
+        append_delete_audit(
+            "delete_completed",
+            username=getattr(self, 'delete_authorized_by', "UNKNOWN"),
+            items=getattr(self, 'delete_audit_items', deleted_count),
+            size=getattr(self, 'delete_audit_size', None),
+            errors=len(errors or []),
+        )
+        self.delete_authorized_by = None
+        self.delete_audit_items = 0
+        self.delete_audit_size = 0
         if deleted_paths:
             self._remove_deleted_paths_from_selection(deleted_paths)
         self._set_delete_controls_enabled(True)
@@ -6149,18 +6322,28 @@ class MainWindow(QMainWindow):
             return
         if self.bulk_delete_scope:
             scope = self.bulk_delete_scope
-            paths = self._show_delete_preview(bulk_scope=scope)
-            if paths:
-                self._start_delete(paths)
+            preview = self._show_delete_preview(bulk_scope=scope)
+            if preview:
+                paths = preview.get('paths', [])
+                total_size = preview.get('size', 0) or 0
+                item_count = preview.get('delete_operations', len(paths))
+                authorized_by = self._authorize_delete(item_count, total_size)
+                if authorized_by:
+                    self._start_delete(paths, authorized_by=authorized_by, audit_size=total_size)
             return
 
         paths = self._selected_roots_for_delete()
         if not paths:
             QMessageBox.information(self, "Delete", "No items selected.")
             return
-        preview_paths = self._show_delete_preview(paths=paths)
-        if preview_paths:
-            self._start_delete(preview_paths)
+        preview = self._show_delete_preview(paths=paths)
+        if preview:
+            preview_paths = preview.get('paths', [])
+            total_size = preview.get('size', 0) or 0
+            item_count = preview.get('delete_operations', len(preview_paths))
+            authorized_by = self._authorize_delete(item_count, total_size)
+            if authorized_by:
+                self._start_delete(preview_paths, authorized_by=authorized_by, audit_size=total_size)
 
     # -------------------------------------------------------------------------
     # Export CSV

@@ -84,7 +84,22 @@ The "Watchdog" uses a sophisticated approach to identify stale data:
 
 - **No Permanent Deletion**: The "Delete Selected" action never bypasses the Recycle Bin.
 - **Double Confirmation**: Users must confirm any bulk deletion through a native system dialog.
+- **Delete Authorization**: Deletion requires a pre-configured username and password every time.
 - **Scan Interruption**: You can stop a running scan at any time without losing the data already collected.
+
+### Delete authorization setup
+
+Authorized delete users are managed outside the running app:
+
+```powershell
+python tools/setup_auth.py --add-user jsmith
+python tools/setup_auth.py --remove-user jsmith
+python tools/setup_auth.py --list-users
+```
+
+Passwords are stored in `auth_store.json` as salted PBKDF2 hashes, never plaintext. Delete authorization and completion events are appended to `delete_audit.log`.
+
+This local authorization is deterrence-grade protection for shared workstations. It is not a substitute for OS file permissions or enterprise identity controls. Restrict NTFS permissions on `auth_store.json` and `delete_audit.log` so only the tool administrator can modify the auth store, while the app only needs read access to verify users.
 
 ---
 
