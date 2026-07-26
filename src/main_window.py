@@ -21,7 +21,9 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
 from .scanner import ScannerThread
 from .scan_exclusions import ScanExclusions
+from .scan_history import get_scan_history, record_scan_history
 from .auth import AuthStore, append_delete_audit
+from .theme import apply_theme, current_palette, resolve_theme_name
 
 VIDEO_EXTENSIONS = (
     ".3g2", ".3gp", ".avi", ".divx", ".flv", ".m2ts", ".m4v",
@@ -29,13 +31,8 @@ VIDEO_EXTENSIONS = (
     ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
 )
 
-ROW_BORDER_COLOR = QColor("#dbe3ee")
-
-
-
-
 def paint_tree_row_border(painter, option):
-    painter.setPen(QPen(ROW_BORDER_COLOR, 1))
+    painter.setPen(QPen(QColor(current_palette()["row_border"]), 1))
     painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
 
 EMPTY_FOLDER_SQL = (
@@ -863,13 +860,14 @@ class FileTypeBarDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(12, 10, -12, -10)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#e9eef5"))
+        palette = current_palette()
+        painter.setBrush(QColor(palette["bar_track"]))
         painter.drawRoundedRect(rect, 5, 5)
 
         if share > 0:
             width = max(3, int(rect.width() * min(1.0, share)))
             bar_rect = QRect(rect.left(), rect.top(), width, rect.height())
-            painter.setBrush(QColor("#2f6df6"))
+            painter.setBrush(QColor(palette["bar_fill"]))
             painter.drawRoundedRect(bar_rect, 5, 5)
         painter.restore()
 
@@ -2064,22 +2062,46 @@ class TreeRowDelegate(QStyledItemDelegate):
         paint_tree_row_border(painter, option)
 
 class StatusDelegate(QStyledItemDelegate):
-    # (text_color, bg_color, border_color)
-    _COLORS = {
-        'Empty':    (QColor("#991b1b"), QColor("#fef2f2"), QColor("#fee2e2")), # Danger Red
-        'Inactive': (QColor("#92400e"), QColor("#fffbeb"), QColor("#fef3c7")), # Warning Amber
-        'Pending':  (QColor("#92400e"), QColor("#fffbeb"), QColor("#fef3c7")), # Warning Amber
-        'Active':   (QColor("#065f46"), QColor("#f0fdf4"), QColor("#d1fae5")), # Success Emerald
-        'Context':  (QColor("#1e40af"), QColor("#eff6ff"), QColor("#dbeafe")), # Info Blue
-    }
+    def _colors_for_status(self, status):
+        palette = current_palette()
+        mapping = {
+            'Empty': (
+                palette["status_empty_text"],
+                palette["status_empty_bg"],
+                palette["status_empty_border"],
+            ),
+            'Inactive': (
+                palette["status_inactive_text"],
+                palette["status_inactive_bg"],
+                palette["status_inactive_border"],
+            ),
+            'Pending': (
+                palette["status_inactive_text"],
+                palette["status_inactive_bg"],
+                palette["status_inactive_border"],
+            ),
+            'Active': (
+                palette["status_active_text"],
+                palette["status_active_bg"],
+                palette["status_active_border"],
+            ),
+            'Context': (
+                palette["status_context_text"],
+                palette["status_context_bg"],
+                palette["status_context_border"],
+            ),
+        }
+        return tuple(QColor(value) for value in mapping.get(
+            status,
+            (palette["text_muted"], palette["bg_sec"], palette["border"]),
+        ))
 
     def paint(self, painter, option, index):
         status = index.data(Qt.ItemDataRole.DisplayRole)
         if not status:
             paint_tree_row_border(painter, option)
             return
-        colors = self._COLORS.get(status, (QColor(0x57, 0x60, 0x6a), QColor(0xf6, 0xf8, 0xfa), QColor(0xd0, 0xd7, 0xde)))
-        text_color, bg_color, border_color = colors
+        text_color, bg_color, border_color = self._colors_for_status(status)
         rect = option.rect
         pill = QRect(rect.left() + (rect.width() - 64) // 2,
                      rect.top() + (rect.height() - 20) // 2, 64, 20)
@@ -2170,32 +2192,33 @@ class ActionDelegate(QStyledItemDelegate):
         
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        palette = current_palette()
         
         if "queued" in text:
             # Draw red badge for queued items
-            painter.setBrush(QBrush(QColor("#fef2f2")))
-            painter.setPen(QPen(QColor("#ef4444"), 1))
+            painter.setBrush(QBrush(QColor(palette["danger_soft"])))
+            painter.setPen(QPen(QColor(palette["chip_red"]), 1))
             painter.drawRoundedRect(btn, 10, 10) # Rounded capsule
             f = QFont("Segoe UI", 8)
             f.setBold(True)
 
 
             painter.setFont(f)
-            painter.setPen(QColor("#ef4444"))
+            painter.setPen(QColor(palette["chip_red"]))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "X Queued")
         else:
             if not is_hovered:
                 painter.restore()
                 return
             # Modern Small Outline Button for "Open"
-            bg = QColor("#eff6ff")
+            bg = QColor(palette["accent_soft"])
             painter.setBrush(QBrush(bg))
-            painter.setPen(QPen(QColor("#2563eb"), 1.2))
+            painter.setPen(QPen(QColor(palette["accent"]), 1.2))
             painter.drawRoundedRect(btn, 5, 5)
             f = QFont("Segoe UI", 8)
             f.setBold(True)
             painter.setFont(f)
-            painter.setPen(QColor("#2563eb"))
+            painter.setPen(QColor(palette["accent"]))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
@@ -2497,13 +2520,14 @@ class FilterPanel(QFrame):
         outer.addWidget(action_box)
 
     def _update_age_label(self, value):
+        palette = current_palette()
         if value == self.AGE_FILTER_DISABLED:
             self.lbl_pill.setText("Off")
-            self.lbl_pill.setStyleSheet("background-color: #64748b; color: white;")
+            self.lbl_pill.setStyleSheet(f"background-color: {palette['text_muted']}; color: white;")
             self.lbl_val.setText("Age filtering is disabled")
         else:
             self.lbl_pill.setText(f"{value}m")
-            self.lbl_pill.setStyleSheet("background-color: #2563eb; color: white;")
+            self.lbl_pill.setStyleSheet(f"background-color: {palette['accent']}; color: white;")
             
             years = value // 12
             months = value % 12
@@ -2711,6 +2735,8 @@ class MainWindow(QMainWindow):
         self.file_type_request_id = 0
         self.file_types_dialog = None
         self.active_extension_filter = None
+        self.settings = QSettings("IBMS", "Watchdog")
+        self.current_theme_name = resolve_theme_name(self.settings.value("theme", "light"))
         self.bulk_select_thread = None
         self.bulk_select_request_id = 0
         self.bulk_select_active = False
@@ -2741,6 +2767,9 @@ class MainWindow(QMainWindow):
         self.refresh_tree_state_key = None
         self.refresh_collapsed_tree_paths = set()
         self.last_scan_excluded_count = 0
+        self.last_scan_elapsed_secs = 0.0
+        self.last_scan_item_count = 0
+        self.scan_progress_was_determinate = False
 
         self.sort_column = 3 # Default sort by Age
         self.sort_order = Qt.SortOrder.DescendingOrder
@@ -2838,6 +2867,17 @@ class MainWindow(QMainWindow):
         self.btn_file_types.setEnabled(False)
         self.btn_file_types.clicked.connect(self._show_file_types)
         tb.addWidget(self.btn_file_types)
+
+        self.theme_selector = QComboBox()
+        self.theme_selector.setObjectName("themeSelector")
+        self.theme_selector.addItem("Light", "light")
+        self.theme_selector.addItem("Dark", "dark")
+        self.theme_selector.setToolTip("Switch theme")
+        self.theme_selector.setCursor(Qt.CursorShape.PointingHandCursor)
+        theme_index = self.theme_selector.findData(self.current_theme_name)
+        self.theme_selector.setCurrentIndex(max(0, theme_index))
+        self.theme_selector.currentIndexChanged.connect(self._on_theme_changed)
+        tb.addWidget(self.theme_selector)
 
         self.btn_expand = QPushButton("Expand All")
         self.btn_expand.setObjectName("collapseAll")
@@ -3030,6 +3070,12 @@ class MainWindow(QMainWindow):
         self.scan_progress.setFixedWidth(360)
         self.scan_progress.setFixedHeight(18)
 
+        self.scan_stats = QLabel("Elapsed 00:00 - rate calculating...")
+        self.scan_stats.setObjectName("emptySub")
+        self.scan_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scan_stats.setWordWrap(True)
+        self.scan_stats.setMaximumWidth(520)
+
         scan_hint = QLabel("You can keep this window open while the scan runs in the background.")
         scan_hint.setObjectName("emptySub")
         scan_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3043,6 +3089,7 @@ class MainWindow(QMainWindow):
         sp_layout.addSpacing(4)
         sp_layout.addWidget(self.scan_progress, alignment=Qt.AlignmentFlag.AlignCenter)
         sp_layout.addSpacing(4)
+        sp_layout.addWidget(self.scan_stats, alignment=Qt.AlignmentFlag.AlignCenter)
         sp_layout.addWidget(scan_hint, alignment=Qt.AlignmentFlag.AlignCenter)
         sp_layout.addStretch()
 
@@ -3187,6 +3234,24 @@ class MainWindow(QMainWindow):
 
         # Do NOT auto-start scan - let the user enter a path first
 
+    def _on_theme_changed(self):
+        theme_name = self.theme_selector.currentData() or "light"
+        self.current_theme_name = resolve_theme_name(theme_name)
+        self.settings.setValue("theme", self.current_theme_name)
+        apply_theme(QApplication.instance(), self.current_theme_name)
+        self.fp._update_age_label(self.fp.age_input.value())
+        if self.scanner_thread and self.scanner_thread.isRunning():
+            palette = current_palette()
+            self.btn_rescan.setStyleSheet(
+                f"background-color: {palette['danger']}; border-color: {palette['danger_hover']};"
+            )
+        if hasattr(self, 'tree'):
+            self._update_status_column_visibility()
+            self.tree.viewport().update()
+            self.tree.header().viewport().update()
+        if self.file_types_dialog:
+            self.file_types_dialog.update()
+
     def _sep(self):
         l = QLabel("-")
         l.setObjectName("statusSeparator")
@@ -3253,18 +3318,19 @@ class MainWindow(QMainWindow):
         self.chip_selected_size.setVisible(True)
 
     def _scan_path_html(self, path):
+        palette = current_palette()
         if not path:
             return (
-                "<div><span style='font-weight:600;color:#0f172a;'>Current folder</span></div>"
-                "<div style='margin-top:6px;color:#64748b;'>--</div>"
+                f"<div><span style='font-weight:600;color:{palette['text']};'>Current folder</span></div>"
+                f"<div style='margin-top:6px;color:{palette['text_muted']};'>--</div>"
             )
 
         escaped = html.escape(path)
         for separator in ("\\", "/", "_", "-", "."):
             escaped = escaped.replace(separator, f"{separator}<wbr>")
         return (
-            "<div><span style='font-weight:600;color:#0f172a;'>Current folder</span></div>"
-            f"<div style='margin-top:6px;color:#475569;'>{escaped}</div>"
+            f"<div><span style='font-weight:600;color:{palette['text']};'>Current folder</span></div>"
+            f"<div style='margin-top:6px;color:{palette['text_soft']};'>{escaped}</div>"
         )
 
     def _set_scanning_panel(self, path=None, detail=None):
@@ -3273,6 +3339,41 @@ class MainWindow(QMainWindow):
             self.scan_path.setToolTip(path or "")
         if detail and hasattr(self, 'scan_detail'):
             self.scan_detail.setText(detail)
+
+    def _format_scan_duration(self, seconds):
+        seconds = int(max(0, seconds or 0))
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _scan_stats_text(self, detail=None):
+        elapsed = 0.0 if not detail else detail.get("elapsed_secs", 0.0)
+        rate = 0.0 if not detail else detail.get("rate", 0.0)
+        percent = None if not detail else detail.get("percent")
+        eta_secs = None if not detail else detail.get("eta_secs")
+
+        rate_text = "rate calculating..." if rate <= 0 else f"{rate:,.0f} items/sec"
+        parts = [rate_text, f"{self._format_scan_duration(elapsed)} elapsed"]
+        if percent is not None and eta_secs is not None:
+            parts.append(f"~{self._format_scan_duration(eta_secs)} remaining ({percent:.0f}%)")
+        return " - ".join(parts)
+
+    def _set_scan_stats(self, detail=None):
+        percent = None if not detail else detail.get("percent")
+
+        if hasattr(self, 'scan_progress'):
+            if percent is None:
+                self.scan_progress.setRange(0, 0)
+            else:
+                self.scan_progress_was_determinate = True
+                self.scan_progress.setRange(0, 100)
+                self.scan_progress.setValue(max(0, min(99, int(percent))))
+
+        if hasattr(self, 'scan_stats'):
+            self.scan_stats.setText(self._scan_stats_text(detail))
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
@@ -4975,6 +5076,9 @@ class MainWindow(QMainWindow):
         self.current_page = 0
         self.total_scanned = 0
         self.last_scan_excluded_count = 0
+        self.last_scan_elapsed_secs = 0.0
+        self.last_scan_item_count = 0
+        self.scan_progress_was_determinate = False
         self.is_scanning = True
         self.active_extension_filter = None
         self.current_scan_root = os.path.normcase(os.path.normpath(path))
@@ -4985,7 +5089,10 @@ class MainWindow(QMainWindow):
 
         self.lbl_status.setText("Scanning...")
         self.btn_rescan.setText("Stop")
-        self.btn_rescan.setStyleSheet("background-color: #da3633; border-color: #f85149;")
+        palette = current_palette()
+        self.btn_rescan.setStyleSheet(
+            f"background-color: {palette['danger']}; border-color: {palette['danger_hover']};"
+        )
         self._set_size_totals_pending(browse=True, page=True, selected=True)
         self.content_stack.setCurrentIndex(3)
         self._update_file_types_enabled()
@@ -4993,18 +5100,27 @@ class MainWindow(QMainWindow):
             path=path,
             detail="Preparing the index and waiting for the first batch of results.",
         )
+        self.scan_progress.setRange(0, 0)
+        self.scan_progress.setValue(0)
+        self._set_scan_stats(None)
 
         self.fp.show_exclusions_rescan_hint(False)
+        history = get_scan_history(self.current_scan_root)
+        estimated_total_items = None
+        if history:
+            estimated_total_items = history.get("item_count") or None
         self.scanner_thread = ScannerThread(
             path,
             stale_months=self.fp.get_stale_months_for_scan(),
             exclusions=self.fp.get_scan_exclusions(),
+            estimated_total_items=estimated_total_items,
         )
         self.folder_cache = self.scanner_thread.cache
         self.scanner_thread.scan_started.connect(self._on_scan_started)
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_exclusions_summary.connect(self._on_scan_exclusions_summary)
         self.scanner_thread.scan_progress.connect(self._on_progress)
+        self.scanner_thread.scan_progress_detail.connect(self._on_progress_detail)
         self.scanner_thread.first_batch_ready.connect(self._on_first_batch_ready)
         self.scanner_thread.batch_ready.connect(self._on_batch_ready)
         self.scanner_thread.start()
@@ -5016,6 +5132,12 @@ class MainWindow(QMainWindow):
             self._set_scanning_total_chip()
         if self.content_stack.currentIndex() == 3:
             self._set_scanning_panel(path=s)
+
+    def _on_progress_detail(self, detail):
+        self.last_scan_elapsed_secs = detail.get("elapsed_secs", 0.0)
+        self.last_scan_item_count = detail.get("scanned", 0) or 0
+        self._set_scan_stats(detail)
+        self.lbl_status.setText(f"Scanning - {self._scan_stats_text(detail)}")
 
     def _on_scan_started(self):
         if self.is_scanning:
@@ -5029,9 +5151,13 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(self._scan_complete_status_text())
 
     def _scan_complete_status_text(self):
+        parts = [
+            f"Scan complete in {self._format_scan_duration(getattr(self, 'last_scan_elapsed_secs', 0.0))}.",
+            f"{getattr(self, 'last_scan_item_count', 0):,} items scanned.",
+        ]
         if getattr(self, 'last_scan_excluded_count', 0):
-            return f"Scan complete. {self.last_scan_excluded_count:,} items skipped by exclusion rules."
-        return "Scan complete."
+            parts.append(f"{self.last_scan_excluded_count:,} items skipped by exclusion rules.")
+        return " ".join(parts)
 
     def _on_first_batch_ready(self):
         options = self._page_load_options()
@@ -5136,16 +5262,33 @@ class MainWindow(QMainWindow):
         self._set_match_status(total_matches)
 
     def _on_scan_done(self):
+        finished_thread = self.scanner_thread
+        if finished_thread:
+            self.last_scan_elapsed_secs = getattr(finished_thread, "scan_elapsed_secs", 0.0) or 0.0
+            self.last_scan_item_count = (
+                getattr(finished_thread, "scan_indexed_count", 0)
+                or getattr(finished_thread, "scan_scanned_count", 0)
+                or 0
+            )
         self.btn_rescan.setEnabled(True)
         self.btn_rescan.setText("Re-scan")
         self.btn_rescan.setStyleSheet("") # reset style
         self.is_scanning = False
         self._update_file_types_enabled()
         
-        if self.scanner_thread and self.scanner_thread.is_cancelled:
+        if finished_thread and finished_thread.is_cancelled:
             self.lbl_status.setText("Scan stopped by user.")
         else:
+            if self.scan_progress_was_determinate:
+                self.scan_progress.setRange(0, 100)
+                self.scan_progress.setValue(100)
             self.lbl_status.setText(self._scan_complete_status_text())
+            record_scan_history(
+                self.current_scan_root,
+                getattr(finished_thread, "scan_scanned_count", 0) or self.last_scan_item_count,
+                getattr(self.folder_cache, "running_total_size", 0) if self.folder_cache else 0,
+                self.last_scan_elapsed_secs,
+            )
 
         if self.content_stack.currentIndex() in (0, 2, 3):
             self._load_page()
@@ -6076,6 +6219,7 @@ class MainWindow(QMainWindow):
             finally:
                 self.proxy_model.setSourceModel(self.tree_model)
                 self.tree.setModel(self.proxy_model)
+                self._update_status_column_visibility()
         finally:
             self.tree.setUpdatesEnabled(True)
         self._rebuild_source_index_map()
@@ -6097,6 +6241,7 @@ class MainWindow(QMainWindow):
             0,
             lambda v=previous_vertical, h=previous_horizontal: self._restore_tree_scroll_position(v, h),
         )
+        QTimer.singleShot(0, self._update_status_column_visibility)
         QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
 
     def _on_lazy_children_failed(self, request_id, folder_path, error):
@@ -6121,12 +6266,13 @@ class MainWindow(QMainWindow):
         if not d:
             return
         menu = QMenu()
-        menu.setStyleSheet("""
-            QMenu { background:#1e293b; color:#c9d1d9; border:1px solid #334155;
-                    border-radius:6px; padding:4px; }
-            QMenu::item { padding:6px 16px; border-radius:4px; }
-            QMenu::item:selected { background:#3b82f6; }
-            QMenu::separator { background:#334155; height:1px; margin:4px 0; }
+        palette = current_palette()
+        menu.setStyleSheet(f"""
+            QMenu {{ background:{palette['menu_bg']}; color:{palette['menu_text']}; border:1px solid {palette['menu_border']};
+                    border-radius:6px; padding:4px; }}
+            QMenu::item {{ padding:6px 16px; border-radius:4px; }}
+            QMenu::item:selected {{ background:{palette['accent']}; color:white; }}
+            QMenu::separator {{ background:{palette['border']}; height:1px; margin:4px 0; }}
         """)
         a_open   = menu.addAction("Open Location")
         a_copy   = menu.addAction("Copy Path")

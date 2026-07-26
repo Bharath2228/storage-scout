@@ -1,6 +1,6 @@
 import os
 import stat
-from datetime import datetime
+import time
 from PyQt6.QtCore import QThread, pyqtSignal
 from .folder_cache import FolderCache
 from .scan_exclusions import ScanExclusions
@@ -8,21 +8,31 @@ from .scan_exclusions import ScanExclusions
 class ScannerThread(QThread):
     scan_started = pyqtSignal()
     scan_progress = pyqtSignal(str) # current_path
+    scan_progress_detail = pyqtSignal(dict)
     scan_finished = pyqtSignal() # no root_node anymore!
     scan_exclusions_summary = pyqtSignal(int)
     first_batch_ready = pyqtSignal()
     batch_ready = pyqtSignal()
     
-    def __init__(self, start_path, stale_months=6, exclusions: ScanExclusions | None = None):
+    def __init__(self, start_path, stale_months=6, exclusions: ScanExclusions | None = None, estimated_total_items=None):
         super().__init__()
         self.start_path = start_path
         self.stale_months = stale_months
         self.exclusions = exclusions or ScanExclusions()
+        self.estimated_total_items = int(estimated_total_items) if estimated_total_items else None
         self.is_cancelled = False
         self.last_emit_time = 0
         self.cache = FolderCache()
+        self.scan_start_time = None
+        self.scan_elapsed_secs = 0.0
+        self.scan_scanned_count = 0
+        self.scan_indexed_count = 0
+        self.smoothed_rate = 0.0
+        self._last_rate_sample_time = None
+        self._last_rate_sample_count = 0
         
     def run(self):
+        self.scan_start_time = time.monotonic()
         self.scan_started.emit()
         # To avoid UI freeze, we can build a nested dictionary/object structure
         # Or just yield paths and process in the model.
@@ -64,9 +74,49 @@ class ScannerThread(QThread):
             return self.is_cancelled
             
         def progress_cb(scanned, inserted, current_folder):
-            current_time = datetime.now().timestamp()
+            current_time = time.monotonic()
+            start_time = self.scan_start_time or current_time
+            elapsed = max(0.0, current_time - start_time)
+            self.scan_elapsed_secs = elapsed
+            self.scan_scanned_count = scanned
+            self.scan_indexed_count = inserted
+            if self._last_rate_sample_time is None:
+                self._last_rate_sample_time = current_time
+                self._last_rate_sample_count = scanned
+            else:
+                interval = current_time - self._last_rate_sample_time
+                item_delta = max(0, scanned - self._last_rate_sample_count)
+                if interval > 0:
+                    interval_rate = item_delta / interval
+                    self.smoothed_rate = (
+                        interval_rate
+                        if self.smoothed_rate <= 0
+                        else (self.smoothed_rate * 0.65) + (interval_rate * 0.35)
+                    )
+                self._last_rate_sample_time = current_time
+                self._last_rate_sample_count = scanned
+
+            percent = None
+            eta_secs = None
+            if self.estimated_total_items:
+                if scanned > self.estimated_total_items:
+                    self.estimated_total_items = None
+                else:
+                    percent = min(99.0, (scanned / self.estimated_total_items) * 100)
+                    if self.smoothed_rate > 0:
+                        eta_secs = max(0.0, (self.estimated_total_items - scanned) / self.smoothed_rate)
+
             if current_time - self.last_emit_time > 0.3:
                 self.scan_progress.emit(current_folder)
+                self.scan_progress_detail.emit({
+                    "current_folder": current_folder,
+                    "scanned": scanned,
+                    "indexed": inserted,
+                    "elapsed_secs": elapsed,
+                    "rate": self.smoothed_rate,
+                    "percent": percent,
+                    "eta_secs": eta_secs,
+                })
                 self.last_emit_time = current_time
             if inserted >= 500 and not self.initial_batch_emitted:
                 self.initial_batch_emitted = True

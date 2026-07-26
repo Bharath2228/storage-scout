@@ -1,27 +1,163 @@
 import os
 from PyQt6.QtGui import QFont
 
-def apply_theme(app, theme_name="dark"):
+LIGHT_PALETTE = {
+    "name": "light",
+    "bg_main": "#ffffff",
+    "bg_sec": "#f8fafc",
+    "bg_hover": "#f1f5f9",
+    "bg_panel": "#fafbfc",
+    "border": "#e2e8f0",
+    "border_strong": "#cbd5e1",
+    "text": "#1e293b",
+    "text_muted": "#64748b",
+    "text_soft": "#475569",
+    "accent": "#2563eb",
+    "accent_hover": "#1d4ed8",
+    "accent_pressed": "#1e40af",
+    "accent_soft": "#eff6ff",
+    "accent_border": "#dbeafe",
+    "danger": "#dc2626",
+    "danger_hover": "#b91c1c",
+    "danger_soft": "#fef2f2",
+    "danger_pressed": "#fee2e2",
+    "danger_border": "#fecaca",
+    "chip_red": "#ef4444",
+    "chip_red_bg": "#fef2f2",
+    "chip_yellow": "#f59e0b",
+    "chip_yellow_bg": "#fffbeb",
+    "chip_green": "#10b981",
+    "chip_green_bg": "#f0fdf4",
+    "tree_alt": "#f8fafc",
+    "row_border": "#dbe3ee",
+    "header_bg": "#f8fafc",
+    "header_border": "#dbe3ee",
+    "scroll_handle": "#cbd5e1",
+    "scroll_handle_hover": "#94a3b8",
+    "scroll_handle_pressed": "#64748b",
+    "bar_track": "#e9eef5",
+    "bar_fill": "#2f6df6",
+    "status_empty_text": "#991b1b",
+    "status_empty_bg": "#fef2f2",
+    "status_empty_border": "#fee2e2",
+    "status_inactive_text": "#92400e",
+    "status_inactive_bg": "#fffbeb",
+    "status_inactive_border": "#fef3c7",
+    "status_active_text": "#065f46",
+    "status_active_bg": "#f0fdf4",
+    "status_active_border": "#d1fae5",
+    "status_context_text": "#1e40af",
+    "status_context_bg": "#eff6ff",
+    "status_context_border": "#dbeafe",
+    "menu_bg": "#ffffff",
+    "menu_text": "#1e293b",
+    "menu_border": "#cbd5e1",
+}
+
+DARK_PALETTE = {
+    "name": "dark",
+    "bg_main": "#111827",
+    "bg_sec": "#0f172a",
+    "bg_hover": "#1e293b",
+    "bg_panel": "#111827",
+    "border": "#334155",
+    "border_strong": "#475569",
+    "text": "#e5e7eb",
+    "text_muted": "#94a3b8",
+    "text_soft": "#cbd5e1",
+    "accent": "#60a5fa",
+    "accent_hover": "#3b82f6",
+    "accent_pressed": "#2563eb",
+    "accent_soft": "#172554",
+    "accent_border": "#1d4ed8",
+    "danger": "#f87171",
+    "danger_hover": "#ef4444",
+    "danger_soft": "#3f1d1d",
+    "danger_pressed": "#4c1d1d",
+    "danger_border": "#7f1d1d",
+    "chip_red": "#f87171",
+    "chip_red_bg": "#3f1d1d",
+    "chip_yellow": "#fbbf24",
+    "chip_yellow_bg": "#3f2f0d",
+    "chip_green": "#34d399",
+    "chip_green_bg": "#0d3b2a",
+    "tree_alt": "#0b1220",
+    "row_border": "#243244",
+    "header_bg": "#111827",
+    "header_border": "#334155",
+    "scroll_handle": "#475569",
+    "scroll_handle_hover": "#64748b",
+    "scroll_handle_pressed": "#94a3b8",
+    "bar_track": "#334155",
+    "bar_fill": "#60a5fa",
+    "status_empty_text": "#fecaca",
+    "status_empty_bg": "#3f1d1d",
+    "status_empty_border": "#7f1d1d",
+    "status_inactive_text": "#fde68a",
+    "status_inactive_bg": "#3f2f0d",
+    "status_inactive_border": "#854d0e",
+    "status_active_text": "#bbf7d0",
+    "status_active_bg": "#0d3b2a",
+    "status_active_border": "#166534",
+    "status_context_text": "#bfdbfe",
+    "status_context_bg": "#172554",
+    "status_context_border": "#1d4ed8",
+    "menu_bg": "#111827",
+    "menu_text": "#e5e7eb",
+    "menu_border": "#334155",
+}
+
+_CURRENT_PALETTE = LIGHT_PALETTE
+
+
+def current_palette():
+    return _CURRENT_PALETTE
+
+
+def resolve_theme_name(theme_name="light"):
+    value = str(theme_name or "light").lower()
+    return "dark" if value == "dark" else "light"
+
+
+def apply_theme(app, theme_name="light"):
+    global _CURRENT_PALETTE
     base_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
-    # Single-theme application: keep only dark mode.
     base_style = ""
-    # Modern Color Palette
-    bg_main = "#ffffff"       # background
-    bg_sec = "#f8fafc"        # surface
-    bg_hover = "#f1f5f9"      # subtle hover
-    border = "#e2e8f0"        # border
-    text = "#1e293b"          # text_primary
-    text_muted = "#64748b"    # text_secondary
-    accent = "#2563eb"        # primary blue
-    
-    chip_red = "#ef4444"      # danger
-    chip_yellow = "#f59e0b"   # warning
-    chip_green = "#10b981"    # success
-    
-    # Derived light backgrounds for chips
-    chip_red_bg = "#fef2f2"
-    chip_yellow_bg = "#fffbeb"
-    chip_green_bg = "#f0fdf4"
+    palette = DARK_PALETTE if resolve_theme_name(theme_name) == "dark" else LIGHT_PALETTE
+    _CURRENT_PALETTE = palette
+    app.setProperty("watchdog_theme", palette["name"])
+
+    bg_main = palette["bg_main"]
+    bg_sec = palette["bg_sec"]
+    bg_hover = palette["bg_hover"]
+    bg_panel = palette["bg_panel"]
+    border = palette["border"]
+    border_strong = palette["border_strong"]
+    text = palette["text"]
+    text_muted = palette["text_muted"]
+    text_soft = palette["text_soft"]
+    accent = palette["accent"]
+    accent_hover = palette["accent_hover"]
+    accent_pressed = palette["accent_pressed"]
+    accent_soft = palette["accent_soft"]
+    accent_border = palette["accent_border"]
+    danger = palette["danger"]
+    danger_hover = palette["danger_hover"]
+    danger_soft = palette["danger_soft"]
+    danger_pressed = palette["danger_pressed"]
+    danger_border = palette["danger_border"]
+    chip_red = palette["chip_red"]
+    chip_red_bg = palette["chip_red_bg"]
+    chip_yellow = palette["chip_yellow"]
+    chip_yellow_bg = palette["chip_yellow_bg"]
+    chip_green = palette["chip_green"]
+    tree_alt = palette["tree_alt"]
+    row_border = palette["row_border"]
+    header_bg = palette["header_bg"]
+    header_border = palette["header_border"]
+    scroll_handle = palette["scroll_handle"]
+    scroll_handle_hover = palette["scroll_handle_hover"]
+    scroll_handle_pressed = palette["scroll_handle_pressed"]
 
     # Set application-wide font
     font = QFont("Segoe UI")
@@ -32,117 +168,117 @@ def apply_theme(app, theme_name="dark"):
         * {{ font-family: "Segoe UI", "Inter", system-ui, sans-serif; font-size: 9pt; }}
         
         QMessageBox, QDialog {{
-            background-color: white;
+            background-color: {bg_main};
         }}
         QMessageBox QLabel, QDialog QLabel {{
-            color: #1e293b;
+            color: {text};
             font-size: 10pt;
         }}
         QMessageBox QPushButton, QDialog QPushButton {{
-            background-color: #f1f5f9;
-            border: 1px solid #e2e8f0;
+            background-color: {bg_sec};
+            border: 1px solid {border};
             border-radius: 6px;
             padding: 6px 16px;
             min-width: 80px;
-            color: #1e293b;
+            color: {text};
         }}
         QMessageBox QPushButton:hover, QDialog QPushButton:hover {{
-            background-color: #e2e8f0;
+            background-color: {bg_hover};
         }}
         QDialog#deleteProgressDialog {{
-            background-color: white;
-            border: 1px solid #e2e8f0;
+            background-color: {bg_main};
+            border: 1px solid {border};
             border-radius: 8px;
         }}
         QLabel#deleteProgressTitle {{
-            color: #1e293b;
+            color: {text};
             font-size: 15px;
             font-weight: 700;
         }}
         QLabel#deleteProgressCount {{
-            color: #475569;
+            color: {text_soft};
             font-size: 12px;
             font-weight: 600;
         }}
         QLabel#deleteProgressPath {{
-            color: #64748b;
-            background-color: #f8fafc;
-            border: 1px solid #e2e8f0;
+            color: {text_muted};
+            background-color: {bg_sec};
+            border: 1px solid {border};
             border-radius: 6px;
             padding: 8px 10px;
             font-size: 11px;
         }}
         QProgressBar#deleteProgressBar {{
-            background-color: #e2e8f0;
+            background-color: {border};
             border: none;
             border-radius: 5px;
             height: 10px;
         }}
         QProgressBar#deleteProgressBar::chunk {{
-            background-color: #2563eb;
+            background-color: {accent};
             border-radius: 5px;
         }}
         QPushButton#deleteProgressCancel {{
             background-color: transparent;
-            color: #dc2626;
-            border: 1.5px solid #fecaca;
+            color: {danger};
+            border: 1.5px solid {danger_border};
             border-radius: 6px;
             padding: 8px 14px;
             font-weight: 600;
         }}
         QPushButton#deleteProgressCancel:hover {{
-            background-color: #fef2f2;
-            border-color: #dc2626;
+            background-color: {danger_soft};
+            border-color: {danger};
         }}
         QPushButton#deleteProgressCancel:disabled {{
-            color: #94a3b8;
-            border-color: #e2e8f0;
-            background-color: #f8fafc;
+            color: {text_muted};
+            border-color: {border};
+            background-color: {bg_sec};
         }}
         QDialog#loadingDialog {{
-            background-color: white;
-            border: 1px solid #e2e8f0;
+            background-color: {bg_main};
+            border: 1px solid {border};
             border-radius: 8px;
         }}
         QLabel#loadingTitle {{
-            color: #1e293b;
+            color: {text};
             font-size: 15px;
             font-weight: 700;
         }}
         QLabel#loadingDetail {{
-            color: #64748b;
+            color: {text_muted};
             font-size: 12px;
             font-weight: 500;
         }}
         QProgressBar#loadingBar {{
-            background-color: #e2e8f0;
+            background-color: {border};
             border: none;
             border-radius: 5px;
             height: 10px;
         }}
         QProgressBar#loadingBar::chunk {{
-            background-color: #2563eb;
+            background-color: {accent};
             border-radius: 5px;
         }}
-        QMainWindow {{ background-color: #f1f5f9; }}
+        QMainWindow {{ background-color: {bg_sec}; }}
         QLabel {{ color: {text}; }}
         QWidget#topbar {{
             background-color: {bg_sec};
             border-bottom: 1px solid {border};
         }}
         QWidget#sidebar {{
-            background-color: #fafbfc;
+            background-color: {bg_panel};
             border-right: 1px solid {border};
         }}
         QScrollArea#filterScroll {{
-            background-color: #fafbfc;
+            background-color: {bg_panel};
             border: none;
         }}
         QWidget#filterScrollContent {{
-            background-color: #fafbfc;
+            background-color: {bg_panel};
         }}
         QWidget#sidebarActionBox {{
-            background-color: #fafbfc;
+            background-color: {bg_panel};
             border-top: 1px solid {border};
         }}
         
@@ -157,7 +293,7 @@ def apply_theme(app, theme_name="dark"):
         }}
         
         QFrame#sidebarDivider {{
-            background-color: #e2e8f0;
+            background-color: {border};
             max-height: 1px;
             margin: 8px 16px;
         }}
@@ -177,7 +313,7 @@ def apply_theme(app, theme_name="dark"):
             padding: 10px 16px;
             font-weight: 600;
             font-size: 9pt;
-            color: #475569;
+            color: {text_soft};
             margin-bottom: 8px;
         }}
 
@@ -189,7 +325,7 @@ def apply_theme(app, theme_name="dark"):
         QCheckBox, QRadioButton {{
             padding: 10px 16px;
             spacing: 10px;
-            color: #475569;
+            color: {text_soft};
             font-weight: 500;
         }}
         
@@ -203,12 +339,12 @@ def apply_theme(app, theme_name="dark"):
             width: 18px;
             height: 18px;
             border-radius: 4px;
-            border: 2px solid #cbd5e1;
+            border: 2px solid {border_strong};
             background-color: {bg_main};
         }}
         QCheckBox::indicator:hover {{
-            border-color: #94a3b8;
-            background-color: #f8fafc;
+            border-color: {text_muted};
+            background-color: {bg_sec};
         }}
         QCheckBox::indicator:checked {{
             background-color: {accent};
@@ -221,15 +357,15 @@ def apply_theme(app, theme_name="dark"):
             width: 20px;
             height: 20px;
             border-radius: 10px;
-            border: 2px solid #cbd5e1;
+            border: 2px solid {border_strong};
             background-color: {bg_main};
         }}
         QRadioButton::indicator:checked {{
             border: 6px solid {accent};
-            background-color: white;
+            background-color: {bg_main};
         }}
         QRadioButton::indicator:hover {{
-            border-color: #94a3b8;
+            border-color: {text_muted};
         }}
 
         QWidget#statusbar {{
@@ -238,44 +374,44 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
         }}
         QLabel#statusMessage {{
-            color: #475569;
+            color: {text_soft};
             font-weight: 500;
             padding-right: 12px;
         }}
         QLabel#statusSeparator {{
-            color: #cbd5e1;
+            color: {border_strong};
             font-size: 10pt;
             padding: 0 8px;
         }}
 
         
         QLabel#chipEmpty, QLabel#chipInactive, QLabel#chipSpace {{ 
-            background-color: #f8fafc;
-            color: #334155;
-            border: 1px solid #e2e8f0;
+            background-color: {bg_sec};
+            color: {text};
+            border: 1px solid {border};
             border-radius: 12px;
             padding: 4px 12px;
             font-weight: 600;
             font-size: 11px;
         }}
         QLabel#chipEmpty {{
-            color: #64748b;
+            color: {text_muted};
             background-color: transparent;
-            border: 1px dashed #cbd5e1;
+            border: 1px dashed {border_strong};
         }}
         QLabel#chipInactive {{
-            color: #475569;
-            background-color: #f1f5f9;
-            border-color: #e2e8f0;
+            color: {text_soft};
+            background-color: {bg_hover};
+            border-color: {border};
         }}
         QLabel#chipSpace {{
-            color: #0f172a;
-            background-color: #ffffff;
-            border-color: #cbd5e1;
+            color: {text};
+            background-color: {bg_main};
+            border-color: {border_strong};
         }}
         QTreeView {{
             background-color: {bg_main};
-            alternate-background-color: #f8fafc;
+            alternate-background-color: {tree_alt};
             border: none;
             outline: none;
             color: {text};
@@ -287,25 +423,25 @@ def apply_theme(app, theme_name="dark"):
         }}
         QTreeView::item {{ 
             padding: 10px 4px; 
-            border-bottom: 1px solid #f1f5f9; 
+            border-bottom: 1px solid {row_border}; 
         }}
         QTreeView::item:alternate {{
-            background-color: #f8fafc;
+            background-color: {tree_alt};
         }}
         QTreeView::item:hover {{ background-color: {bg_hover}; color: {text}; }}
         QTreeView::item:selected {{ background-color: {accent}; color: #fff; }}
-        QTreeView::item:selected:hover {{ background-color: #0353a4; color: #fff; }}
+        QTreeView::item:selected:hover {{ background-color: {accent_pressed}; color: #fff; }}
         
         QTreeView::indicator {{
             width: 16px;
             height: 16px;
-            border: 1.5px solid #cbd5e1;
+            border: 1.5px solid {border_strong};
             border-radius: 4px;
             background-color: {bg_main};
         }}
         QTreeView::indicator:hover {{
-            border-color: #94a3b8;
-            background-color: #f8fafc;
+            border-color: {text_muted};
+            background-color: {bg_sec};
         }}
         QTreeView::indicator:checked {{
             background-color: {accent};
@@ -314,7 +450,7 @@ def apply_theme(app, theme_name="dark"):
         }}
 
         QTreeView::branch {{
-            border-bottom: 1px solid #f1f5f9;
+            border-bottom: 1px solid {row_border};
         }}
         QTreeView::branch:has-children:closed,
         QTreeView::branch:closed:has-children:has-siblings,
@@ -347,16 +483,16 @@ def apply_theme(app, theme_name="dark"):
             margin: 0;
         }}
         QScrollBar::handle:vertical {{
-            background: #c0c8d2;
+            background: {scroll_handle};
             border-radius: 5px;
             min-height: 32px;
             margin: 2px 2px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background: #9ca3af;
+            background: {scroll_handle_hover};
         }}
         QScrollBar::handle:vertical:pressed {{
-            background: #6b7280;
+            background: {scroll_handle_pressed};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0;
@@ -372,13 +508,13 @@ def apply_theme(app, theme_name="dark"):
             border-top: 1px solid {border};
         }}
         QScrollBar::handle:horizontal {{
-            background: #c0c8d2;
+            background: {scroll_handle};
             border-radius: 5px;
             min-width: 32px;
             margin: 2px 2px;
         }}
         QScrollBar::handle:horizontal:hover {{
-            background: #9ca3af;
+            background: {scroll_handle_hover};
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
             width: 0;
@@ -396,23 +532,23 @@ def apply_theme(app, theme_name="dark"):
             padding: 0;
         }}
         QPushButton#scrollTopBtn:hover {{
-            background-color: #0761d1;
+            background-color: {accent_hover};
         }}
         QPushButton#scrollTopBtn:pressed {{
-            background-color: #0353a4;
+            background-color: {accent_pressed};
         }}
 
         QHeaderView {{
-            background-color: #fafbfc;
+            background-color: {bg_panel};
         }}
         QHeaderView::section {{
-            background-color: #f8fafc;
+            background-color: {header_bg};
             padding: 12px 18px;
             border: none;
-            border-right: 1px solid #e6edf5;
-            border-bottom: 1px solid #dbe3ee;
+            border-right: 1px solid {border};
+            border-bottom: 1px solid {header_border};
             font-weight: 600;
-            color: #475569;
+            color: {text_soft};
             font-size: 9pt;
         }}
 
@@ -420,66 +556,66 @@ def apply_theme(app, theme_name="dark"):
             padding: 3px 8px;
         }}
         QLineEdit#scanExclusionInput {{
-            background-color: white;
-            border: 1px solid #dbe3ee;
+            background-color: {bg_main};
+            border: 1px solid {header_border};
             border-radius: 6px;
-            color: #1e293b;
+            color: {text};
             padding: 4px 8px;
-            selection-background-color: #dbeafe;
+            selection-background-color: {accent_border};
         }}
         QLineEdit#scanExclusionInput:focus {{
-            border-color: #2563eb;
+            border-color: {accent};
         }}
         QHeaderView::section:hover {{
-            background-color: #eef4fb;
-            color: #0b5ed7;
+            background-color: {accent_soft};
+            color: {accent};
         }}
 
         QPushButton:disabled {{
-            background-color: #f8fafc;
-            color: #cbd5e1;
-            border: 1.5px solid #f1f5f9;
+            background-color: {bg_sec};
+            color: {text_muted};
+            border: 1.5px solid {border};
         }}
 
         QPushButton#collapseAll {{
-            background-color: white;
-            color: #475569;
-            border: 1.5px solid #e2e8f0;
+            background-color: {bg_main};
+            color: {text_soft};
+            border: 1.5px solid {border};
             border-radius: 6px;
             padding: 8px 16px;
             font-weight: 500;
         }}
         QPushButton#collapseAll:hover {{
-            background-color: #f8fafc;
-            border-color: #cbd5e1;
+            background-color: {bg_sec};
+            border-color: {border_strong};
         }}
 
         QPushButton#pageNavBtn {{
-            background-color: white;
-            color: #2563eb;
-            border: 1.5px solid #cbd5e1;
+            background-color: {bg_main};
+            color: {accent};
+            border: 1.5px solid {border_strong};
             border-radius: 7px;
             padding: 0;
             font-size: 13px;
             font-weight: 700;
         }}
         QPushButton#pageNavBtn:hover {{
-            background-color: #eff6ff;
-            border-color: #2563eb;
+            background-color: {accent_soft};
+            border-color: {accent};
         }}
         QPushButton#pageNavBtn:pressed {{
-            background-color: #dbeafe;
+            background-color: {accent_border};
         }}
         QPushButton#pageNavBtn:disabled {{
-            background-color: #f8fafc;
-            color: #94a3b8;
-            border: 1px solid #e2e8f0;
+            background-color: {bg_sec};
+            color: {text_muted};
+            border: 1px solid {border};
         }}
 
         QLabel#pageInfo {{
-            background-color: #f8fafc;
-            color: #475569;
-            border: 1px solid #e2e8f0;
+            background-color: {bg_sec};
+            color: {text_soft};
+            border: 1px solid {border};
             border-radius: 7px;
             padding: 7px 12px;
             font-size: 12px;
@@ -497,6 +633,24 @@ def apply_theme(app, theme_name="dark"):
             selection-background-color: {bg_hover};
             selection-color: {text};
         }}
+        QComboBox {{
+            background-color: {bg_main};
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 5px 8px;
+            color: {text};
+        }}
+        QComboBox:hover {{
+            border-color: {border_strong};
+            background-color: {bg_hover};
+        }}
+        QComboBox:focus {{
+            border-color: {accent};
+        }}
+        QComboBox#themeSelector {{
+            min-width: 84px;
+            padding: 7px 10px;
+        }}
         QSpinBox:focus {{
             border-color: {accent};
         }}
@@ -505,7 +659,7 @@ def apply_theme(app, theme_name="dark"):
             max-height: 30px;
         }}
         QComboBox#scanExclusionUnit {{
-            background-color: white;
+            background-color: {bg_main};
             border: 1px solid {border};
             border-radius: 6px;
             color: {text};
@@ -548,7 +702,7 @@ def apply_theme(app, theme_name="dark"):
         }}
         QPushButton:hover {{
             background-color: {bg_hover};
-            border-color: #cbd5e1;
+            border-color: {border_strong};
             color: {text};
         }}
         QPushButton:pressed {{
@@ -556,24 +710,24 @@ def apply_theme(app, theme_name="dark"):
             color: {text};
         }}
         QPushButton:disabled {{
-            color: #cbd5e1;
+            color: {text_muted};
             border: 1px dashed {border};
-            background-color: #f8fafc;
+            background-color: {bg_sec};
         }}
         QPushButton#primaryBtn {{
             background-color: {accent};
             color: white;
             border: 1px solid {accent};
-            border-bottom: 3px solid #1d4ed8;
+            border-bottom: 3px solid {accent_hover};
             border-radius: 6px;
             padding: 8px 16px;
             font-weight: 600;
         }}
         QPushButton#primaryBtn:hover {{
-            background-color: #1d4ed8;
+            background-color: {accent_hover};
         }}
         QPushButton#primaryBtn:pressed {{
-            background-color: #1e40af;
+            background-color: {accent_pressed};
             border-bottom-width: 1px;
             padding: 9px 16px 7px 16px;
         }}
@@ -587,10 +741,10 @@ def apply_theme(app, theme_name="dark"):
             font-weight: 500;
         }}
         QPushButton#ghostBtn:hover {{
-            background-color: #eff6ff;
+            background-color: {accent_soft};
         }}
         QPushButton#ghostBtn:pressed {{
-            background-color: #dbeafe;
+            background-color: {accent_border};
         }}
 
 
@@ -599,22 +753,22 @@ def apply_theme(app, theme_name="dark"):
             color: {accent};
             font-weight: 600;
             border: 1px solid {accent};
-            border-bottom: 2px solid #1d4ed8;
-            background-color: #eff6ff;
+            border-bottom: 2px solid {accent_hover};
+            background-color: {accent_soft};
         }}
         QPushButton#filterBtn:hover {{
             background-color: {accent};
-            border-bottom-color: #1d4ed8;
+            border-bottom-color: {accent_hover};
             color: white;
         }}
         QPushButton#filterBtn:checked {{
             background-color: {accent};
-            border: 1px solid #1d4ed8;
-            border-bottom: 2px solid #1e40af;
+            border: 1px solid {accent_hover};
+            border-bottom: 2px solid {accent_pressed};
             color: white;
         }}
         QPushButton#filterBtn:pressed {{
-            background-color: #1e40af;
+            background-color: {accent_pressed};
             border-bottom-width: 1px;
             color: white;
             padding: 7px 14px 5px 14px;
@@ -622,15 +776,15 @@ def apply_theme(app, theme_name="dark"):
 
         QPushButton#deleteBtn {{
             background-color: transparent;
-            color: #dc2626;
-            border: 1.5px solid #fecaca;
+            color: {danger};
+            border: 1.5px solid {danger_border};
             border-radius: 6px;
             padding: 10px 18px;
             font-weight: 500;
         }}
         QPushButton#deleteBtn:hover {{
-            background-color: #fef2f2;
-            border-color: #dc2626;
+            background-color: {danger_soft};
+            border-color: {danger};
         }}
         QPushButton#deleteBtn:disabled {{
             color: {text_muted};
@@ -654,22 +808,22 @@ def apply_theme(app, theme_name="dark"):
 
         QPushButton#resetFilters {{
             background-color: transparent;
-            color: #2563eb;
-            border: 1.5px solid #dbeafe;
+            color: {accent};
+            border: 1.5px solid {accent_border};
             border-radius: 6px;
             padding: 10px 16px;
             font-weight: 500;
         }}
         QPushButton#resetFilters:hover {{
-            background-color: #eff6ff;
-            border-color: #2563eb;
+            background-color: {accent_soft};
+            border-color: {accent};
         }}
         QPushButton#resetFilters:pressed {{
-            background-color: #dbeafe;
+            background-color: {accent_border};
         }}
         QPushButton#resetExclusions {{
             background-color: transparent;
-            color: #2563eb;
+            color: {accent};
             border: none;
             padding: 2px 0;
             font-size: 8pt;
@@ -677,12 +831,12 @@ def apply_theme(app, theme_name="dark"):
             text-align: left;
         }}
         QPushButton#resetExclusions:hover {{
-            color: #1d4ed8;
+            color: {accent_hover};
             text-decoration: underline;
         }}
 
         QLabel#manualLabel {{
-            color: #64748b;
+            color: {text_muted};
             font-size: 8pt;
             font-weight: 400;
         }}
@@ -697,10 +851,10 @@ def apply_theme(app, theme_name="dark"):
             font-weight: 600;
         }}
         QPushButton#deleteBtn:hover {{
-            background-color: #fef2f2;
+            background-color: {danger_soft};
         }}
         QPushButton#deleteBtn:pressed {{
-            background-color: #fee2e2;
+            background-color: {danger_pressed};
         }}
         QPushButton#deleteBtn:disabled {{
             color: {text_muted};
@@ -720,11 +874,11 @@ def apply_theme(app, theme_name="dark"):
         QPushButton#filterCloseBtn:hover {{
             background-color: {chip_red_bg};
             border-color: {chip_red};
-            border-bottom-color: #b91c1c;
+            border-bottom-color: {danger_hover};
             color: {chip_red};
         }}
         QPushButton#filterCloseBtn:pressed {{
-            background-color: #fee2e2;
+            background-color: {danger_pressed};
             border-bottom-width: 1px;
             color: {chip_red};
             padding: 7px 14px 5px 14px;
@@ -738,8 +892,8 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
         }}
         QPushButton#resetBtn:hover {{
-            border-color: #94a3b8;
-            border-bottom-color: #94a3b8;
+            border-color: {text_muted};
+            border-bottom-color: {text_muted};
             background-color: {bg_hover};
             color: {text};
         }}
@@ -760,7 +914,7 @@ def apply_theme(app, theme_name="dark"):
             text-align: left;
         }}
         QPushButton#linkBtn:hover {{
-            color: #1d4ed8;
+            color: {accent_hover};
             text-decoration: underline;
         }}
         QPushButton#linkBtn:pressed {{
@@ -769,7 +923,7 @@ def apply_theme(app, theme_name="dark"):
 
         QPushButton#clearDates {{
             background-color: transparent;
-            color: #64748b;
+            color: {text_muted};
             border: none;
             padding: 6px 8px;
             font-size: 9pt;
@@ -779,8 +933,8 @@ def apply_theme(app, theme_name="dark"):
         }}
         
         QPushButton#clearDates:hover {{
-            color: #dc2626;
-            background-color: #fef2f2;
+            color: {danger};
+            background-color: {danger_soft};
             border-radius: 4px;
         }}
 
@@ -822,8 +976,8 @@ def apply_theme(app, theme_name="dark"):
             color: {text_muted};
         }}
         QLabel#scanPathValue {{
-            background-color: #f8fafc;
-            border: 1px solid #dbe4ee;
+            background-color: {bg_sec};
+            border: 1px solid {border};
             border-radius: 8px;
             padding: 10px 12px;
             color: {text};
@@ -878,19 +1032,19 @@ def apply_theme(app, theme_name="dark"):
         QSlider::groove:horizontal {{
             border: none;
             height: 6px;
-            background: #e2e8f0;
+            background: {border};
             border-radius: 3px;
         }}
         QSlider::handle:horizontal {{
             background: {accent};
-            border: 2px solid white;
+            border: 2px solid {bg_main};
             width: 18px;
             height: 18px;
             margin: -6px 0;
             border-radius: 9px;
         }}
         QSlider::handle:horizontal:hover {{
-            background: #1d4ed8;
+            background: {accent_hover};
             width: 20px;
             height: 20px;
             margin: -7px 0;
@@ -933,12 +1087,12 @@ def apply_theme(app, theme_name="dark"):
             margin: 0;
         }}
         QScrollBar::handle:vertical {{
-            background-color: #cbd5e1;
+            background-color: {scroll_handle};
             border-radius: 5px;
             min-height: 30px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background-color: #94a3b8;
+            background-color: {scroll_handle_hover};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0px;
@@ -951,12 +1105,12 @@ def apply_theme(app, theme_name="dark"):
             margin: 0;
         }}
         QScrollBar::handle:horizontal {{
-            background-color: #cbd5e1;
+            background-color: {scroll_handle};
             border-radius: 5px;
             min-width: 30px;
         }}
         QScrollBar::handle:horizontal:hover {{
-            background-color: #94a3b8;
+            background-color: {scroll_handle_hover};
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
             width: 0px;
@@ -966,8 +1120,8 @@ def apply_theme(app, theme_name="dark"):
             border: 1px solid {border};
             border-radius: 6px;
             background-color: {bg_main};
-            selection-background-color: #eff6ff;
-            selection-color: #1e293b;
+            selection-background-color: {accent_soft};
+            selection-color: {text};
             padding: 4px;
         }}
         

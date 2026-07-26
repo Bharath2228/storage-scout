@@ -1,12 +1,14 @@
 import sys
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QSettings
 from src.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
     
-    from src.theme import apply_theme
-    apply_theme(app, "dark")
+    from src.theme import apply_theme, resolve_theme_name
+    saved_theme = QSettings("IBMS", "Watchdog").value("theme", "light")
+    apply_theme(app, resolve_theme_name(saved_theme))
 
     window = MainWindow()
     screen = app.primaryScreen()
