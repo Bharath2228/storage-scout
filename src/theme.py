@@ -134,6 +134,17 @@ def apply_theme(app, theme_name="dark"):
             background-color: #fafbfc;
             border-right: 1px solid {border};
         }}
+        QScrollArea#filterScroll {{
+            background-color: #fafbfc;
+            border: none;
+        }}
+        QWidget#filterScrollContent {{
+            background-color: #fafbfc;
+        }}
+        QWidget#sidebarActionBox {{
+            background-color: #fafbfc;
+            border-top: 1px solid {border};
+        }}
         
         QWidget#contentArea {{
             background-color: {bg_sec};
@@ -408,6 +419,17 @@ def apply_theme(app, theme_name="dark"):
         QLineEdit#filterSearch {{
             padding: 3px 8px;
         }}
+        QLineEdit#scanExclusionInput {{
+            background-color: white;
+            border: 1px solid #dbe3ee;
+            border-radius: 6px;
+            color: #1e293b;
+            padding: 4px 8px;
+            selection-background-color: #dbeafe;
+        }}
+        QLineEdit#scanExclusionInput:focus {{
+            border-color: #2563eb;
+        }}
         QHeaderView::section:hover {{
             background-color: #eef4fb;
             color: #0b5ed7;
@@ -476,6 +498,21 @@ def apply_theme(app, theme_name="dark"):
             selection-color: {text};
         }}
         QSpinBox:focus {{
+            border-color: {accent};
+        }}
+        QSpinBox#scanExclusionSize {{
+            min-height: 30px;
+            max-height: 30px;
+        }}
+        QComboBox#scanExclusionUnit {{
+            background-color: white;
+            border: 1px solid {border};
+            border-radius: 6px;
+            color: {text};
+            padding: 4px 8px;
+            min-height: 22px;
+        }}
+        QComboBox#scanExclusionUnit:focus {{
             border-color: {accent};
         }}
         QSpinBox::up-button, QSpinBox::down-button {{
@@ -629,6 +666,19 @@ def apply_theme(app, theme_name="dark"):
         }}
         QPushButton#resetFilters:pressed {{
             background-color: #dbeafe;
+        }}
+        QPushButton#resetExclusions {{
+            background-color: transparent;
+            color: #2563eb;
+            border: none;
+            padding: 2px 0;
+            font-size: 8pt;
+            font-weight: 500;
+            text-align: left;
+        }}
+        QPushButton#resetExclusions:hover {{
+            color: #1d4ed8;
+            text-decoration: underline;
         }}
 
         QLabel#manualLabel {{

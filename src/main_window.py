@@ -1,6 +1,7 @@
 import os
 import csv
 import html
+import json
 import subprocess
 import send2trash
 import time
@@ -11,13 +12,15 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
-    QTableWidget, QTableWidgetItem
+    QTableWidget, QTableWidgetItem, QComboBox, QScrollArea, QAbstractScrollArea,
+    QLayout
 )
-from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
 from .scanner import ScannerThread
+from .scan_exclusions import ScanExclusions
 
 VIDEO_EXTENSIONS = (
     ".3g2", ".3gp", ".avi", ".divx", ".flv", ".m2ts", ".m4v",
@@ -2072,6 +2075,7 @@ class ActionDelegate(QStyledItemDelegate):
 
 class FilterPanel(QFrame):
     searchCleared = pyqtSignal()
+    exclusionChanged = pyqtSignal()
 
     DEFAULT_STALE_MONTHS = 3
     AGE_FILTER_DISABLED = 0
@@ -2084,10 +2088,29 @@ class FilterPanel(QFrame):
         self.setObjectName("sidebar")
         self.setVisible(False)
         self.setFixedWidth(280)
+        self.settings = QSettings("IBMS", "Watchdog")
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 16, 0, 16)
-        outer.setSpacing(4)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("filterScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("filterScrollContent")
+        scroll_content.setMinimumHeight(0)
+        scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        body = QVBoxLayout(scroll_content)
+        body.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        body.setContentsMargins(0, 16, 0, 12)
+        body.setSpacing(4)
+        scroll.setWidget(scroll_content)
 
         search_section = QWidget()
         search_section.setObjectName("searchSection")
@@ -2118,9 +2141,9 @@ class FilterPanel(QFrame):
         self.txt_search.installEventFilter(self)
         search_layout.addWidget(self.txt_search)
 
-        outer.addWidget(search_section)
-        outer.addWidget(self._hline())
-        outer.addSpacing(8)
+        body.addWidget(search_section)
+        body.addWidget(self._hline())
+        body.addSpacing(8)
 
         # Section 1: Display Mode
         display_section = QWidget()
@@ -2145,8 +2168,8 @@ class FilterPanel(QFrame):
             display_layout.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        outer.addWidget(display_section)
-        outer.addWidget(self._hline())
+        body.addWidget(display_section)
+        body.addWidget(self._hline())
 
         # Section 1.5: View Mode
         view_section = QWidget()
@@ -2170,8 +2193,8 @@ class FilterPanel(QFrame):
             view_layout.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
             
-        outer.addWidget(view_section)
-        outer.addWidget(self._hline())
+        body.addWidget(view_section)
+        body.addWidget(self._hline())
 
 
 
@@ -2237,16 +2260,98 @@ class FilterPanel(QFrame):
         age_layout.addLayout(bot_row)
         age_outer_layout.addWidget(age_box)
         
-        outer.addWidget(age_section)
+        body.addWidget(age_section)
+        body.addWidget(self._hline())
+
+        exclusions_section = QWidget()
+        exclusions_section.setObjectName("exclusionsSection")
+        exclusions_outer_layout = QVBoxLayout(exclusions_section)
+        exclusions_outer_layout.setContentsMargins(0, 0, 0, 0)
+        exclusions_outer_layout.setSpacing(4)
+
+        lbl_exclusions = QLabel("Exclusions")
+        lbl_exclusions.setObjectName("ageThresholdHeader")
+        exclusions_outer_layout.addWidget(lbl_exclusions)
+
+        exclusions_box = QWidget()
+        exclusions_layout = QVBoxLayout(exclusions_box)
+        exclusions_layout.setContentsMargins(16, 4, 16, 4)
+        exclusions_layout.setSpacing(8)
+
+        lbl_folders = QLabel("Folders")
+        lbl_folders.setObjectName("manualLabel")
+        exclusions_layout.addWidget(lbl_folders)
+
+        self.txt_excluded_folders = QLineEdit()
+        self.txt_excluded_folders.setObjectName("scanExclusionInput")
+        self.txt_excluded_folders.setPlaceholderText("node_modules, *.git*, Temp")
+        self.txt_excluded_folders.setToolTip("Folder names or simple patterns to skip on the next scan")
+        self.txt_excluded_folders.setFixedHeight(32)
+        exclusions_layout.addWidget(self.txt_excluded_folders)
+
+        lbl_extensions = QLabel("Extensions")
+        lbl_extensions.setObjectName("manualLabel")
+        exclusions_layout.addWidget(lbl_extensions)
+
+        self.txt_excluded_extensions = QLineEdit()
+        self.txt_excluded_extensions.setObjectName("scanExclusionInput")
+        self.txt_excluded_extensions.setPlaceholderText(".tmp, .log, .iso")
+        self.txt_excluded_extensions.setToolTip("File extensions to skip on the next scan")
+        self.txt_excluded_extensions.setFixedHeight(32)
+        exclusions_layout.addWidget(self.txt_excluded_extensions)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(8)
+        lbl_min_size = QLabel("Ignore under:")
+        lbl_min_size.setObjectName("manualLabel")
+        self.min_size_input = QSpinBox()
+        self.min_size_input.setObjectName("scanExclusionSize")
+        self.min_size_input.setRange(0, 999999)
+        self.min_size_input.setValue(0)
+        self.min_size_input.setFixedWidth(86)
+        self.min_size_input.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.min_size_unit = QComboBox()
+        self.min_size_unit.setObjectName("scanExclusionUnit")
+        self.min_size_unit.addItems(["KB", "MB", "GB"])
+        self.min_size_unit.setFixedWidth(72)
+        self.min_size_unit.setCursor(Qt.CursorShape.PointingHandCursor)
+        size_row.addWidget(lbl_min_size)
+        size_row.addStretch()
+        size_row.addWidget(self.min_size_input)
+        size_row.addWidget(self.min_size_unit)
+        exclusions_layout.addLayout(size_row)
+
+        self.lbl_exclusions_hint = QLabel("Exclusion changes apply on next scan - click Re-scan to apply.")
+        self.lbl_exclusions_hint.setObjectName("manualLabel")
+        self.lbl_exclusions_hint.setWordWrap(True)
+        self.lbl_exclusions_hint.setVisible(False)
+        exclusions_layout.addWidget(self.lbl_exclusions_hint)
+
+        self.btn_reset_exclusions = QPushButton("Reset exclusions")
+        self.btn_reset_exclusions.setObjectName("resetExclusions")
+        self.btn_reset_exclusions.setToolTip("Restore the default scan exclusions")
+        self.btn_reset_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
+        exclusions_layout.addWidget(self.btn_reset_exclusions, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        exclusions_outer_layout.addWidget(exclusions_box)
+        body.addWidget(exclusions_section)
 
         self._update_age_label(self.slider.value())
-        outer.addStretch()
+        self._restore_scan_exclusions()
+        self.txt_excluded_folders.editingFinished.connect(self._normalize_and_save_scan_exclusions)
+        self.txt_excluded_extensions.editingFinished.connect(self._normalize_and_save_scan_exclusions)
+        self.min_size_input.valueChanged.connect(self._save_scan_exclusions_from_controls)
+        self.min_size_unit.currentTextChanged.connect(self._save_scan_exclusions_from_controls)
+        self.btn_reset_exclusions.clicked.connect(self.reset_scan_exclusions_to_defaults)
+        body.addStretch()
+        outer.addWidget(scroll, 1)
 
         # Section 4: Actions
         action_box = QWidget()
+        action_box.setObjectName("sidebarActionBox")
         action_layout = QVBoxLayout(action_box)
-        action_layout.setContentsMargins(16, 16, 16, 16)
-        action_layout.setSpacing(10)
+        action_layout.setContentsMargins(16, 12, 16, 16)
+        action_layout.setSpacing(8)
         
         self.btn_reset = QPushButton("Reset all filters")
         self.btn_reset.setObjectName("resetFilters")
@@ -2314,6 +2419,82 @@ class FilterPanel(QFrame):
         if self.rb_view_files.isChecked(): return 'Files'
         if self.rb_view_folders.isChecked(): return 'Folders'
         return 'Tree'
+
+    def get_scan_exclusions(self):
+        return self._scan_exclusions_from_controls()
+
+    def show_exclusions_rescan_hint(self, visible=True):
+        self.lbl_exclusions_hint.setVisible(visible)
+
+    def reset_scan_exclusions_to_defaults(self):
+        self._set_scan_exclusions_controls(ScanExclusions())
+        self._save_scan_exclusions_from_controls()
+
+    def _restore_scan_exclusions(self):
+        raw_value = self.settings.value("scan_exclusions", "")
+        try:
+            data = json.loads(raw_value) if raw_value else {}
+        except (TypeError, ValueError):
+            data = {}
+        self._set_scan_exclusions_controls(ScanExclusions.from_dict(data))
+
+    def _save_scan_exclusions_from_controls(self):
+        exclusions = self._scan_exclusions_from_controls()
+        self.settings.setValue("scan_exclusions", json.dumps(exclusions.to_dict()))
+        self.exclusionChanged.emit()
+
+    def _normalize_and_save_scan_exclusions(self):
+        exclusions = self._scan_exclusions_from_controls()
+        self._set_scan_exclusions_controls(exclusions)
+        self._save_scan_exclusions_from_controls()
+
+    def _scan_exclusions_from_controls(self):
+        folders = [
+            item.strip()
+            for item in self.txt_excluded_folders.text().split(",")
+            if item.strip()
+        ]
+        extensions = [
+            item.strip()
+            for item in self.txt_excluded_extensions.text().split(",")
+            if item.strip()
+        ]
+        min_value = self.min_size_input.value()
+        unit = self.min_size_unit.currentText()
+        multiplier = {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}.get(unit, 1024)
+        return ScanExclusions(
+            folder_names=folders,
+            extensions=extensions,
+            min_file_size_bytes=min_value * multiplier if min_value > 0 else 0,
+        )
+
+    def _set_scan_exclusions_controls(self, exclusions):
+        blockers = [
+            QSignalBlocker(self.txt_excluded_folders),
+            QSignalBlocker(self.txt_excluded_extensions),
+            QSignalBlocker(self.min_size_input),
+            QSignalBlocker(self.min_size_unit),
+        ]
+        try:
+            exclusions = exclusions or ScanExclusions()
+            data = exclusions.to_dict()
+            self.txt_excluded_folders.setText(", ".join(data["folder_names"]))
+            self.txt_excluded_extensions.setText(", ".join(data["extensions"]))
+            size = data["min_file_size_bytes"]
+            if size <= 0:
+                self.min_size_input.setValue(0)
+                self.min_size_unit.setCurrentText("MB")
+            else:
+                for unit, multiplier in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+                    if size % multiplier == 0:
+                        self.min_size_input.setValue(size // multiplier)
+                        self.min_size_unit.setCurrentText(unit)
+                        break
+                else:
+                    self.min_size_input.setValue(max(1, size // 1024))
+                    self.min_size_unit.setCurrentText("KB")
+        finally:
+            del blockers
 
     def apply_default_browse_preset(self):
         self.rb_all.setChecked(True)
@@ -2429,6 +2610,7 @@ class MainWindow(QMainWindow):
         self.current_lazy_show_all_tree = False
         self.refresh_tree_state_key = None
         self.refresh_collapsed_tree_paths = set()
+        self.last_scan_excluded_count = 0
 
         self.sort_column = 3 # Default sort by Age
         self.sort_order = Qt.SortOrder.DescendingOrder
@@ -2573,6 +2755,7 @@ class MainWindow(QMainWindow):
         self.fp.slider.valueChanged.connect(self._on_age_slider_changed)
         self.fp.slider.sliderReleased.connect(self._on_age_slider_released)
         self.fp.age_input.editingFinished.connect(self._on_manual_age_finished)
+        self.fp.exclusionChanged.connect(self._on_scan_exclusions_changed)
         
         # View mode connections
         self.fp.rb_view_tree.toggled.connect(self._on_filter_changed)
@@ -2650,6 +2833,8 @@ class MainWindow(QMainWindow):
 
         # Empty state + Tree + Scanning state wrapped in a stacked widget
         self.content_stack = QStackedWidget()
+        self.content_stack.setMinimumHeight(0)
+        self.content_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Page 0: Empty state
         empty_page = QWidget()
@@ -2733,6 +2918,9 @@ class MainWindow(QMainWindow):
 
         # Page 1: Tree view
         self.tree = QTreeView()
+        self.tree.setMinimumHeight(0)
+        self.tree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.tree.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.tree.setAlternatingRowColors(False)
         self.tree.setSortingEnabled(False)
@@ -2808,7 +2996,10 @@ class MainWindow(QMainWindow):
         # Wrap content_stack in container so we can overlay the floating button
         self.tree_container = QWidget()
         self.tree_container.setObjectName("tableCard")
+        self.tree_container.setMinimumHeight(0)
+        self.tree_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         tc_layout = QVBoxLayout(self.tree_container)
+        tc_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         tc_layout.setContentsMargins(1, 1, 1, 1) # Internal border gap
         tc_layout.setSpacing(0)
         tc_layout.addWidget(self.content_stack)
@@ -2989,6 +3180,14 @@ class MainWindow(QMainWindow):
 
     def _scroll_to_top(self):
         self.tree.scrollToTop()
+
+    def _restore_tree_scroll_position(self, vertical_value, horizontal_value=0):
+        if not hasattr(self, 'tree'):
+            return
+        vbar = self.tree.verticalScrollBar()
+        hbar = self.tree.horizontalScrollBar()
+        vbar.setValue(max(vbar.minimum(), min(vertical_value, vbar.maximum())))
+        hbar.setValue(max(hbar.minimum(), min(horizontal_value, hbar.maximum())))
 
     def eventFilter(self, obj, event):
         if hasattr(self, 'tree') and obj == self.tree.viewport():
@@ -3234,6 +3433,13 @@ class MainWindow(QMainWindow):
         del blocker
         self.fp.search_clear_action.setVisible(False)
         self._apply_default_browse_preset()
+
+    def _on_scan_exclusions_changed(self):
+        if self._has_completed_scan_context():
+            self.fp.show_exclusions_rescan_hint(True)
+
+    def _on_scan_exclusions_summary(self, excluded_count):
+        self.last_scan_excluded_count = excluded_count or 0
 
     def _has_completed_scan_context(self):
         return bool(getattr(self, 'current_scan_root', None)) and not self.is_scanning
@@ -4636,6 +4842,7 @@ class MainWindow(QMainWindow):
         
         self.current_page = 0
         self.total_scanned = 0
+        self.last_scan_excluded_count = 0
         self.is_scanning = True
         self.active_extension_filter = None
         self.current_scan_root = os.path.normcase(os.path.normpath(path))
@@ -4655,10 +4862,16 @@ class MainWindow(QMainWindow):
             detail="Preparing the index and waiting for the first batch of results.",
         )
 
-        self.scanner_thread = ScannerThread(path, stale_months=self.fp.get_stale_months_for_scan())
+        self.fp.show_exclusions_rescan_hint(False)
+        self.scanner_thread = ScannerThread(
+            path,
+            stale_months=self.fp.get_stale_months_for_scan(),
+            exclusions=self.fp.get_scan_exclusions(),
+        )
         self.folder_cache = self.scanner_thread.cache
         self.scanner_thread.scan_started.connect(self._on_scan_started)
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
+        self.scanner_thread.scan_exclusions_summary.connect(self._on_scan_exclusions_summary)
         self.scanner_thread.scan_progress.connect(self._on_progress)
         self.scanner_thread.first_batch_ready.connect(self._on_first_batch_ready)
         self.scanner_thread.batch_ready.connect(self._on_batch_ready)
@@ -4681,7 +4894,12 @@ class MainWindow(QMainWindow):
         if self.is_scanning:
             self.lbl_status.setText(f"Scanning... Found {total_matches} matching items")
         else:
-            self.lbl_status.setText("Scan complete")
+            self.lbl_status.setText(self._scan_complete_status_text())
+
+    def _scan_complete_status_text(self):
+        if getattr(self, 'last_scan_excluded_count', 0):
+            return f"Scan complete. {self.last_scan_excluded_count:,} items skipped by exclusion rules."
+        return "Scan complete."
 
     def _on_first_batch_ready(self):
         options = self._page_load_options()
@@ -4795,7 +5013,7 @@ class MainWindow(QMainWindow):
         if self.scanner_thread and self.scanner_thread.is_cancelled:
             self.lbl_status.setText("Scan stopped by user.")
         else:
-            self.lbl_status.setText("Scan complete.")
+            self.lbl_status.setText(self._scan_complete_status_text())
 
         if self.content_stack.currentIndex() in (0, 2, 3):
             self._load_page()
@@ -5653,9 +5871,10 @@ class MainWindow(QMainWindow):
         source_index = self.proxy_model.mapToSource(proxy_index)
         if source_index.isValid():
             self._start_lazy_child_load(source_index)
+        QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
 
     def _on_tree_collapsed(self, proxy_index):
-        pass
+        QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
 
     def _start_lazy_child_load(self, source_index):
         folder_path = self.tree_model.begin_async_child_load(source_index)
@@ -5713,12 +5932,20 @@ class MainWindow(QMainWindow):
         expanded_path_keys.add(self._path_key(folder_path))
 
         source_index = QModelIndex(persistent_index)
-        self.proxy_model.setSourceModel(None)
+        vbar = self.tree.verticalScrollBar()
+        hbar = self.tree.horizontalScrollBar()
+        previous_vertical = vbar.value()
+        previous_horizontal = hbar.value()
+        self.tree.setUpdatesEnabled(False)
         try:
-            self.tree_model.finish_async_child_load(source_index, children)
+            self.proxy_model.setSourceModel(None)
+            try:
+                self.tree_model.finish_async_child_load(source_index, children)
+            finally:
+                self.proxy_model.setSourceModel(self.tree_model)
+                self.tree.setModel(self.proxy_model)
         finally:
-            self.proxy_model.setSourceModel(self.tree_model)
-            self.tree.setModel(self.proxy_model)
+            self.tree.setUpdatesEnabled(True)
         self._rebuild_source_index_map()
         self._restore_persistent_selection_to_model()
         self._restore_bulk_scope_selection_to_model()
@@ -5733,6 +5960,12 @@ class MainWindow(QMainWindow):
                 self.tree.setExpanded(proxy_index, True)
         finally:
             self.is_programmatic_expand = False
+        self._restore_tree_scroll_position(previous_vertical, previous_horizontal)
+        QTimer.singleShot(
+            0,
+            lambda v=previous_vertical, h=previous_horizontal: self._restore_tree_scroll_position(v, h),
+        )
+        QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
 
     def _on_lazy_children_failed(self, request_id, folder_path, error):
         state = self.lazy_child_threads.get(request_id)

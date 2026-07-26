@@ -3,18 +3,21 @@ import stat
 from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 from .folder_cache import FolderCache
+from .scan_exclusions import ScanExclusions
 
 class ScannerThread(QThread):
     scan_started = pyqtSignal()
     scan_progress = pyqtSignal(str) # current_path
     scan_finished = pyqtSignal() # no root_node anymore!
+    scan_exclusions_summary = pyqtSignal(int)
     first_batch_ready = pyqtSignal()
     batch_ready = pyqtSignal()
     
-    def __init__(self, start_path, stale_months=6):
+    def __init__(self, start_path, stale_months=6, exclusions: ScanExclusions | None = None):
         super().__init__()
         self.start_path = start_path
         self.stale_months = stale_months
+        self.exclusions = exclusions or ScanExclusions()
         self.is_cancelled = False
         self.last_emit_time = 0
         self.cache = FolderCache()
@@ -73,13 +76,15 @@ class ScannerThread(QThread):
                 self.last_emitted_count = inserted
                 self.batch_ready.emit()
 
-        tool.scan(
+        excluded_count = tool.scan(
             root_folder=start_path,
             inactive_months=self.stale_months,
             batch_size=1000,
             cache=self.cache,
             cancel_callback=cancel_cb,
-            progress_callback=progress_cb
+            progress_callback=progress_cb,
+            exclusions=self.exclusions,
         )
+        self.scan_exclusions_summary.emit(excluded_count)
 
         tool.close()

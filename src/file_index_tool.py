@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+from .scan_exclusions import ScanExclusions
+
 DEFAULT_DB = "file_index.db"
 
 class FileIndexTool:
@@ -80,16 +82,19 @@ class FileIndexTool:
         cache=None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         cancel_callback: Optional[Callable[[], bool]] = None,
-    ) -> None:
+        exclusions: ScanExclusions | None = None,
+    ) -> int:
         root_folder = str(Path(root_folder).resolve())
         if inactive_years is not None:
             inactive_months = inactive_years * 12
+        exclusions = exclusions or ScanExclusions()
         cutoff_timestamp = (datetime.now() - timedelta(days=30 * inactive_months)).timestamp()
         self._active_cache = cache
 
         max_workers = max_workers or self._default_worker_count(root_folder)
         scanned_count = 0
         inserted_count = 0
+        excluded_count = 0
         latest_folder = root_folder
 
         rows_queue: queue.Queue = queue.Queue(maxsize=max_workers * 4)
@@ -197,14 +202,14 @@ class FileIndexTool:
             with progress_lock:
                 scanned_count += 1
         except (PermissionError, FileNotFoundError, OSError):
-            return
+            return 0
 
         writer = threading.Thread(target=writer_loop, name="file-index-writer", daemon=True)
         writer.start()
         queue_folder(root_folder)
 
         def scan_folder(current_folder: str) -> None:
-            nonlocal scanned_count, latest_folder
+            nonlocal scanned_count, latest_folder, excluded_count
             if cancel_callback and cancel_callback():
                 mark_folder_done()
                 return
@@ -225,6 +230,25 @@ class FileIndexTool:
                             size = 0 if is_folder else stat.st_size
                             modified_time = stat.st_mtime
                             extension = "" if is_folder else Path(name).suffix.lower()
+                            is_excluded = (
+                                exclusions.matches_excluded_folder(name)
+                                if is_folder
+                                else (
+                                    exclusions.matches_excluded_extension(extension)
+                                    or (
+                                        exclusions.min_file_size_bytes > 0
+                                        and size < exclusions.min_file_size_bytes
+                                    )
+                                )
+                            )
+
+                            if is_excluded:
+                                with progress_lock:
+                                    scanned_count += 1
+                                    excluded_count += 1
+                                    latest_folder = current_folder
+                                continue
+
                             inactive = 1 if modified_time < cutoff_timestamp else 0
                             status = "Inactive" if inactive else "Active"
 
@@ -253,8 +277,7 @@ class FileIndexTool:
                                     cache.add_item(path, name, is_folder, size, modified_time, current_folder, status)
                                 if is_folder:
                                     ensure_folder(path, current_folder, modified_time)
-                                    if name not in {"venv", "__pycache__", "node_modules", ".git"}:
-                                        queue_folder(path)
+                                    queue_folder(path)
                                 else:
                                     current_info["total_size"] += size or 0
                                     current_info["file_count"] += 1
@@ -299,6 +322,8 @@ class FileIndexTool:
 
         if progress_callback:
             progress_callback(scanned_count, inserted_count, root_folder)
+
+        return excluded_count
 
     def _write_folder_summaries(self, folder_info: dict[str, dict]) -> None:
         if not folder_info:
