@@ -3,6 +3,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
 from PyQt6.QtGui import QFont, QIcon
+from .theme import FONT_FAMILY, TYPE_SCALE
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 FOLDER_ICON = QIcon(os.path.join(ASSETS_DIR, "folder_blue.svg"))
@@ -383,16 +384,15 @@ class WatchdogTreeModel(QAbstractItemModel):
             if col in (3, 4): return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
         if role == Qt.ItemDataRole.FontRole:
+            font = QFont(FONT_FAMILY)
+            font.setPixelSize(TYPE_SCALE["body"]["size_px"])
             if col == 4:
-                font = QFont()
-                font.setWeight(QFont.Weight.Normal)
+                font.setWeight(QFont.Weight(TYPE_SCALE["muted"]["weight"]))
                 return font
             if item.itemData.get('is_dir', False) and col == 0:
-                font = QFont()
-                font.setWeight(QFont.Weight.Bold)
+                font.setWeight(QFont.Weight(TYPE_SCALE["header"]["weight"]))
                 return font
-            font = QFont()
-            font.setWeight(QFont.Weight.Medium)
+            font.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
             return font
 
         if role == Qt.ItemDataRole.DecorationRole and col == 0:
@@ -520,6 +520,8 @@ class WatchdogTreeModel(QAbstractItemModel):
             else:
                 headers = ["Name", "Location", "Last modified", "Age", "Size", "Status"]
             if section < len(headers):
+                if self.view_mode != 'Tree' and section == 1:
+                    return headers[section]
                 if section == self.sort_column:
                     arrow = "▲" if self.sort_order == Qt.SortOrder.AscendingOrder else "▼"
                     return f"{headers[section]}  {arrow}"

@@ -23,7 +23,18 @@ from .scanner import ScannerThread
 from .scan_exclusions import ScanExclusions
 from .scan_history import get_scan_history, record_scan_history
 from .auth import AuthStore, append_delete_audit
-from .theme import apply_theme, current_palette, resolve_theme_name
+from .theme import (
+    FONT_FAMILY,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SPACE_XL,
+    SPACE_XS,
+    TYPE_SCALE,
+    apply_theme,
+    current_palette,
+    resolve_theme_name,
+)
 
 VIDEO_EXTENSIONS = (
     ".3g2", ".3gp", ".avi", ".divx", ".flv", ".m2ts", ".m4v",
@@ -32,8 +43,7 @@ VIDEO_EXTENSIONS = (
 )
 
 def paint_tree_row_border(painter, option):
-    painter.setPen(QPen(QColor(current_palette()["row_border"]), 1))
-    painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+    return
 
 EMPTY_FOLDER_SQL = (
     "is_folder = 1 AND NOT EXISTS ("
@@ -298,18 +308,18 @@ class DeleteProgressDialog(QDialog):
         self.setWindowTitle("Deleting items")
         self.setModal(True)
         self.setFixedSize(520, 190)
-        self.setObjectName("deleteProgressDialog")
+        self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
 
         self.title_label = QLabel("Moving items to the Recycle Bin")
-        self.title_label.setObjectName("deleteProgressTitle")
+        self.title_label.setObjectName("modalTitle")
         layout.addWidget(self.title_label)
 
         self.count_label = QLabel(f"Deleting 0 of {total}")
-        self.count_label.setObjectName("deleteProgressCount")
+        self.count_label.setObjectName("modalDetail")
         layout.addWidget(self.count_label)
 
         self.progress = QProgressBar()
@@ -320,7 +330,7 @@ class DeleteProgressDialog(QDialog):
         layout.addWidget(self.progress)
 
         self.path_label = QLabel("Preparing deletion...")
-        self.path_label.setObjectName("deleteProgressPath")
+        self.path_label.setObjectName("modalSecondary")
         self.path_label.setWordWrap(True)
         self.path_label.setMinimumHeight(36)
         layout.addWidget(self.path_label)
@@ -328,7 +338,7 @@ class DeleteProgressDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel after current item")
-        self.cancel_button.setObjectName("deleteProgressCancel")
+        self.cancel_button.setObjectName("modalCancel")
         self.cancel_button.clicked.connect(self._cancel)
         btn_row.addWidget(self.cancel_button)
         layout.addLayout(btn_row)
@@ -361,18 +371,18 @@ class LoadingDialog(QDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.setFixedSize(360, 122)
-        self.setObjectName("loadingDialog")
+        self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
 
         title = QLabel(title)
-        title.setObjectName("loadingTitle")
+        title.setObjectName("modalTitle")
         layout.addWidget(title)
 
         detail_label = QLabel(detail)
-        detail_label.setObjectName("loadingDetail")
+        detail_label.setObjectName("modalSecondary")
         layout.addWidget(detail_label)
 
         bar = QProgressBar()
@@ -611,24 +621,24 @@ class DeletePreviewDialog(QDialog):
         self.setWindowTitle("Delete preview")
         self.setModal(True)
         self.setFixedSize(520, 230)
-        self.setObjectName("deleteProgressDialog")
+        self.setObjectName("modalDialog")
         self.preview_paths = []
         self.preview_payload = {}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
 
         self.title_label = QLabel("Preparing delete preview")
-        self.title_label.setObjectName("deleteProgressTitle")
+        self.title_label.setObjectName("modalTitle")
         layout.addWidget(self.title_label)
 
         self.detail_label = QLabel("Calculating selected items and size...")
-        self.detail_label.setObjectName("deleteProgressCount")
+        self.detail_label.setObjectName("modalDetail")
         layout.addWidget(self.detail_label)
 
         self.path_label = QLabel("Please wait while we gather the delete summary.")
-        self.path_label.setObjectName("deleteProgressPath")
+        self.path_label.setObjectName("modalSecondary")
         self.path_label.setWordWrap(True)
         self.path_label.setMinimumHeight(42)
         layout.addWidget(self.path_label)
@@ -642,11 +652,11 @@ class DeletePreviewDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setObjectName("deleteProgressCancel")
+        self.cancel_button.setObjectName("modalCancel")
         self.cancel_button.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_button)
         self.delete_button = QPushButton("Delete Selected")
-        self.delete_button.setObjectName("primaryBtn")
+        self.delete_button.setObjectName("destructiveBtn")
         self.delete_button.setEnabled(False)
         self.delete_button.clicked.connect(self.accept)
         btn_row.addWidget(self.delete_button)
@@ -705,14 +715,14 @@ class DeleteAuthDialog(QDialog):
         self.setWindowTitle("Delete authorization")
         self.setModal(True)
         self.setFixedSize(520, 250)
-        self.setObjectName("deleteProgressDialog")
+        self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
 
         title = QLabel("Authorization required")
-        title.setObjectName("deleteProgressTitle")
+        title.setObjectName("modalTitle")
         layout.addWidget(title)
 
         size_text = format_size(self.total_size) if self.total_size else "0 B"
@@ -720,12 +730,12 @@ class DeleteAuthDialog(QDialog):
             f"Enter your credentials to permanently delete {self.item_count} "
             f"item{'s' if self.item_count != 1 else ''} ({size_text})."
         )
-        detail.setObjectName("deleteProgressCount")
+        detail.setObjectName("modalDetail")
         detail.setWordWrap(True)
         layout.addWidget(detail)
 
         self.message_label = QLabel("")
-        self.message_label.setObjectName("deleteProgressCount")
+        self.message_label.setObjectName("authMessage")
         self.message_label.setWordWrap(True)
         layout.addWidget(self.message_label)
 
@@ -745,7 +755,7 @@ class DeleteAuthDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setObjectName("deleteProgressCancel")
+        self.cancel_button.setObjectName("modalCancel")
         self.cancel_button.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_button)
         self.submit_button = QPushButton("Authorize delete")
@@ -861,13 +871,13 @@ class FileTypeBarDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
         palette = current_palette()
-        painter.setBrush(QColor(palette["bar_track"]))
+        painter.setBrush(QColor(palette["border"]))
         painter.drawRoundedRect(rect, 5, 5)
 
         if share > 0:
             width = max(3, int(rect.width() * min(1.0, share)))
             bar_rect = QRect(rect.left(), rect.top(), width, rect.height())
-            painter.setBrush(QColor(palette["bar_fill"]))
+            painter.setBrush(QColor(palette["accent"]))
             painter.drawRoundedRect(bar_rect, 5, 5)
         painter.restore()
 
@@ -880,21 +890,22 @@ class FileTypesDialog(QDialog):
         self.setWindowTitle("File Types")
         self.setModal(False)
         self.resize(620, 520)
-        self.setObjectName("deleteProgressDialog")
+        self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
 
         title = QLabel("File Types")
-        title.setObjectName("deleteProgressTitle")
+        title.setObjectName("modalTitle")
         layout.addWidget(title)
 
         self.detail_label = QLabel("Calculating file type breakdown...")
-        self.detail_label.setObjectName("deleteProgressCount")
+        self.detail_label.setObjectName("modalDetail")
         layout.addWidget(self.detail_label)
 
         self.table = QTableWidget(0, 4)
+        self.table.setFrameShape(QFrame.Shape.NoFrame)
         self.table.setHorizontalHeaderLabels(["Type", "Share", "Size", "Files"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -916,13 +927,13 @@ class FileTypesDialog(QDialog):
         layout.addWidget(self.table, 1)
 
         hint = QLabel("Click a file type to show matching files.")
-        hint.setObjectName("deleteProgressCount")
+        hint.setObjectName("modalSecondary")
         layout.addWidget(hint)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         close_btn = QPushButton("Close")
-        close_btn.setObjectName("deleteProgressCancel")
+        close_btn.setObjectName("modalCancel")
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
@@ -995,7 +1006,7 @@ class PageLoadThread(QThread):
             try:
                 relative = os.path.relpath(normalized_folder, root)
                 if relative == ".":
-                    return "."
+                    return "Root directory"
                 if not relative.startswith(".."):
                     return relative
             except ValueError:
@@ -2066,34 +2077,29 @@ class StatusDelegate(QStyledItemDelegate):
         palette = current_palette()
         mapping = {
             'Empty': (
-                palette["status_empty_text"],
-                palette["status_empty_bg"],
-                palette["status_empty_border"],
+                palette["status_danger"],
+                palette["status_danger_bg"],
             ),
             'Inactive': (
-                palette["status_inactive_text"],
-                palette["status_inactive_bg"],
-                palette["status_inactive_border"],
+                palette["status_warning"],
+                palette["status_warning_bg"],
             ),
             'Pending': (
-                palette["status_inactive_text"],
-                palette["status_inactive_bg"],
-                palette["status_inactive_border"],
+                palette["status_warning"],
+                palette["status_warning_bg"],
             ),
             'Active': (
-                palette["status_active_text"],
-                palette["status_active_bg"],
-                palette["status_active_border"],
+                palette["status_success"],
+                palette["status_success_bg"],
             ),
             'Context': (
-                palette["status_context_text"],
-                palette["status_context_bg"],
-                palette["status_context_border"],
+                palette["accent"],
+                palette["accent_tint"],
             ),
         }
         return tuple(QColor(value) for value in mapping.get(
             status,
-            (palette["text_muted"], palette["bg_sec"], palette["border"]),
+            (palette["text_muted"], palette["surface"]),
         ))
 
     def paint(self, painter, option, index):
@@ -2101,33 +2107,25 @@ class StatusDelegate(QStyledItemDelegate):
         if not status:
             paint_tree_row_border(painter, option)
             return
-        text_color, bg_color, border_color = self._colors_for_status(status)
+        text_color, bg_color = self._colors_for_status(status)
         rect = option.rect
         pill = QRect(rect.left() + (rect.width() - 64) // 2,
                      rect.top() + (rect.height() - 20) // 2, 64, 20)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(QBrush(bg_color))
-        painter.setPen(QPen(border_color, 1))
-        painter.drawRoundedRect(pill, 10, 10)
-
-        
-        # Colored dot
-        dot_size = 6
-        dot_rect = QRect(pill.left() + 8, pill.top() + (pill.height() - dot_size) // 2, dot_size, dot_size)
-        painter.setBrush(QBrush(text_color))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(dot_rect)
+        painter.drawRoundedRect(pill, 10, 10)
         
-        f = QFont("Segoe UI", 8)
-        f.setBold(True)
+        f = QFont(FONT_FAMILY)
+        f.setPixelSize(TYPE_SCALE["muted"]["size_px"])
+        f.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
 
 
         painter.setFont(f)
         painter.setPen(text_color)
         
-        text_rect = QRect(pill.left() + 18, pill.top(), pill.width() - 18, pill.height())
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, status)
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, status)
         painter.restore()
         paint_tree_row_border(painter, option)
 
@@ -2196,27 +2194,29 @@ class ActionDelegate(QStyledItemDelegate):
         
         if "queued" in text:
             # Draw red badge for queued items
-            painter.setBrush(QBrush(QColor(palette["danger_soft"])))
-            painter.setPen(QPen(QColor(palette["chip_red"]), 1))
+            painter.setBrush(QBrush(QColor(palette["status_danger_bg"])))
+            painter.setPen(QPen(QColor(palette["status_danger"]), 1))
             painter.drawRoundedRect(btn, 10, 10) # Rounded capsule
-            f = QFont("Segoe UI", 8)
-            f.setBold(True)
+            f = QFont(FONT_FAMILY)
+            f.setPixelSize(TYPE_SCALE["muted"]["size_px"])
+            f.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
 
 
             painter.setFont(f)
-            painter.setPen(QColor(palette["chip_red"]))
+            painter.setPen(QColor(palette["status_danger"]))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, "X Queued")
         else:
             if not is_hovered:
                 painter.restore()
                 return
             # Modern Small Outline Button for "Open"
-            bg = QColor(palette["accent_soft"])
+            bg = QColor(palette["accent_tint"])
             painter.setBrush(QBrush(bg))
             painter.setPen(QPen(QColor(palette["accent"]), 1.2))
             painter.drawRoundedRect(btn, 5, 5)
-            f = QFont("Segoe UI", 8)
-            f.setBold(True)
+            f = QFont(FONT_FAMILY)
+            f.setPixelSize(TYPE_SCALE["muted"]["size_px"])
+            f.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
             painter.setFont(f)
             painter.setPen(QColor(palette["accent"]))
             painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, text)
@@ -2252,26 +2252,26 @@ class FilterPanel(QFrame):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         scroll_content = QWidget()
         scroll_content.setObjectName("filterScrollContent")
         scroll_content.setMinimumHeight(0)
-        scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         body = QVBoxLayout(scroll_content)
-        body.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        body.setContentsMargins(0, 16, 0, 12)
-        body.setSpacing(4)
+        body.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        body.setContentsMargins(0, SPACE_LG, 0, SPACE_MD)
+        body.setSpacing(0)
         scroll.setWidget(scroll_content)
 
         search_section = QWidget()
         search_section.setObjectName("searchSection")
         search_layout = QVBoxLayout(search_section)
-        search_layout.setContentsMargins(16, 0, 16, 8)
-        search_layout.setSpacing(4)
+        search_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        search_layout.setSpacing(SPACE_MD)
 
-        lbl_search = QLabel("Search")
+        lbl_search = QLabel("SEARCH")
         lbl_search.setObjectName("searchHeader")
         search_layout.addWidget(lbl_search)
 
@@ -2295,17 +2295,16 @@ class FilterPanel(QFrame):
         search_layout.addWidget(self.txt_search)
 
         body.addWidget(search_section)
-        body.addWidget(self._hline())
-        body.addSpacing(8)
+        body.addSpacing(SPACE_XL)
 
         # Section 1: Display Mode
         display_section = QWidget()
         display_section.setObjectName("displayModeSection")
         display_layout = QVBoxLayout(display_section)
-        display_layout.setContentsMargins(0, 0, 0, 0)
-        display_layout.setSpacing(4)
+        display_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        display_layout.setSpacing(SPACE_SM)
 
-        lbl_display = QLabel("Display Mode")
+        lbl_display = QLabel("DISPLAY MODE")
         lbl_display.setObjectName("displayModeHeader")
 
         display_layout.addWidget(lbl_display)
@@ -2318,20 +2317,21 @@ class FilterPanel(QFrame):
         self.bg = QButtonGroup()
         for rb in [self.rb_all, self.rb_inactive, self.rb_empty, self.rb_videos]:
             self.bg.addButton(rb)
+            rb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             display_layout.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
         
         body.addWidget(display_section)
-        body.addWidget(self._hline())
+        body.addSpacing(SPACE_XL)
 
         # Section 1.5: View Mode
         view_section = QWidget()
         view_section.setObjectName("viewModeSection")
         view_layout = QVBoxLayout(view_section)
-        view_layout.setContentsMargins(0, 0, 0, 0)
-        view_layout.setSpacing(4)
+        view_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        view_layout.setSpacing(SPACE_SM)
 
-        lbl_view = QLabel("View Mode")
+        lbl_view = QLabel("VIEW MODE")
         lbl_view.setObjectName("viewModeHeader")
         view_layout.addWidget(lbl_view)
 
@@ -2343,11 +2343,12 @@ class FilterPanel(QFrame):
         self.bg_view = QButtonGroup()
         for rb in [self.rb_view_tree, self.rb_view_files, self.rb_view_folders]:
             self.bg_view.addButton(rb)
+            rb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             view_layout.addWidget(rb)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
             
         body.addWidget(view_section)
-        body.addWidget(self._hline())
+        body.addSpacing(SPACE_XL)
 
 
 
@@ -2359,21 +2360,22 @@ class FilterPanel(QFrame):
         age_section = QWidget()
         age_section.setObjectName("ageThresholdSection")
         age_outer_layout = QVBoxLayout(age_section)
-        age_outer_layout.setContentsMargins(0, 0, 0, 0)
-        age_outer_layout.setSpacing(4)
+        age_outer_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        age_outer_layout.setSpacing(SPACE_MD)
 
-        lbl_age = QLabel("Age Threshold")
+        lbl_age = QLabel("AGE THRESHOLD")
         lbl_age.setObjectName("ageThresholdHeader")
 
         age_outer_layout.addWidget(lbl_age)
 
-        age_box = QWidget()
+        age_box = QFrame()
+        age_box.setObjectName("ageControl")
         age_layout = QVBoxLayout(age_box)
-        age_layout.setContentsMargins(16, 4, 16, 4)
-        age_layout.setSpacing(8)
+        age_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        age_layout.setSpacing(SPACE_SM)
 
         age_hdr = QHBoxLayout()
-        age_hdr.setSpacing(6)
+        age_hdr.setSpacing(SPACE_SM)
         self.lbl_pill = QLabel()
         self.lbl_pill.setObjectName("agePill")
         self.lbl_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2403,8 +2405,8 @@ class FilterPanel(QFrame):
         self.age_input.valueChanged.connect(self._sync_slider_from_manual_age)
 
         bot_row = QHBoxLayout()
-        bot_row.setSpacing(8)
-        lbl_manual = QLabel("Manual:")
+        bot_row.setSpacing(SPACE_SM)
+        lbl_manual = QLabel("Months")
         lbl_manual.setObjectName("manualLabel")
 
         bot_row.addWidget(lbl_manual)
@@ -2414,22 +2416,22 @@ class FilterPanel(QFrame):
         age_outer_layout.addWidget(age_box)
         
         body.addWidget(age_section)
-        body.addWidget(self._hline())
+        body.addSpacing(SPACE_XL)
 
         exclusions_section = QWidget()
         exclusions_section.setObjectName("exclusionsSection")
         exclusions_outer_layout = QVBoxLayout(exclusions_section)
-        exclusions_outer_layout.setContentsMargins(0, 0, 0, 0)
-        exclusions_outer_layout.setSpacing(4)
+        exclusions_outer_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        exclusions_outer_layout.setSpacing(SPACE_MD)
 
-        lbl_exclusions = QLabel("Exclusions")
+        lbl_exclusions = QLabel("EXCLUSIONS")
         lbl_exclusions.setObjectName("ageThresholdHeader")
         exclusions_outer_layout.addWidget(lbl_exclusions)
 
         exclusions_box = QWidget()
         exclusions_layout = QVBoxLayout(exclusions_box)
-        exclusions_layout.setContentsMargins(16, 4, 16, 4)
-        exclusions_layout.setSpacing(8)
+        exclusions_layout.setContentsMargins(0, SPACE_MD, 0, SPACE_MD)
+        exclusions_layout.setSpacing(SPACE_MD)
 
         lbl_folders = QLabel("Folders")
         lbl_folders.setObjectName("manualLabel")
@@ -2454,7 +2456,7 @@ class FilterPanel(QFrame):
         exclusions_layout.addWidget(self.txt_excluded_extensions)
 
         size_row = QHBoxLayout()
-        size_row.setSpacing(8)
+        size_row.setSpacing(SPACE_SM)
         lbl_min_size = QLabel("Ignore under:")
         lbl_min_size.setObjectName("manualLabel")
         self.min_size_input = QSpinBox()
@@ -2503,8 +2505,8 @@ class FilterPanel(QFrame):
         action_box = QWidget()
         action_box.setObjectName("sidebarActionBox")
         action_layout = QVBoxLayout(action_box)
-        action_layout.setContentsMargins(16, 12, 16, 16)
-        action_layout.setSpacing(8)
+        action_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_LG)
+        action_layout.setSpacing(SPACE_SM)
         
         self.btn_reset = QPushButton("Reset all filters")
         self.btn_reset.setObjectName("resetFilters")
@@ -2679,7 +2681,7 @@ class FilterPanel(QFrame):
     def _make_section(self, title):
         col = QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(10)
+        col.setSpacing(SPACE_MD)
         lbl = QLabel(title)
         lbl.setObjectName("sectionLabel")
         col.addWidget(lbl)
@@ -2800,12 +2802,22 @@ class MainWindow(QMainWindow):
         self.scan_refresh_timer.timeout.connect(self._refresh_pagination_only)
 
         self._build_ui()
+        QApplication.instance().installEventFilter(self)
         self.tree.header().sectionClicked.connect(self._on_header_sort_clicked)
         self._apply_sort_indicator()
 
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
+
+    def _placeholder_icon(self, asset_name):
+        label = QLabel()
+        label.setObjectName("emptyIcon")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", asset_name)
+        label.setPixmap(QIcon(icon_path).pixmap(QSize(56, 56)))
+        label.setFixedSize(80, 80)
+        return label
 
     def _build_ui(self):
         root = QWidget()
@@ -2818,13 +2830,12 @@ class MainWindow(QMainWindow):
         topbar = QWidget()
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(16, 12, 16, 12)
-        tb.setSpacing(12)
+        tb.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        tb.setSpacing(SPACE_MD)
 
         lbl = QLabel("IBMS Watchdog")
         lbl.setObjectName("appTitle")
         tb.addWidget(lbl)
-        tb.addWidget(self._vbar())
 
         self.txt_path = QLineEdit()
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -2849,8 +2860,6 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
-
-        tb.addWidget(self._vbar())
 
         self.btn_filter = QPushButton("Filters")
         self.btn_filter.setObjectName("ghostBtn")
@@ -2902,6 +2911,7 @@ class MainWindow(QMainWindow):
         self.btn_delete.setToolTip("Permanently delete selected items")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.clicked.connect(self._delete_selected)
+        self._set_delete_armed(False)
         self.btn_delete.setEnabled(False)
         tb.addWidget(self.btn_delete)
 
@@ -2941,14 +2951,14 @@ class MainWindow(QMainWindow):
         self.right_content = QWidget()
         self.right_content.setObjectName("contentArea")
         right_v = QVBoxLayout(self.right_content)
-        right_v.setContentsMargins(24, 24, 24, 24)
-        right_v.setSpacing(16)
+        right_v.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        right_v.setSpacing(SPACE_LG)
 
         # Controls row (above tree): expand / select all
         self.controls_bar = QWidget()
         controls_layout = QHBoxLayout(self.controls_bar)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(12)
+        controls_layout.setSpacing(SPACE_MD)
         controls_layout.addWidget(self.btn_expand)
         self.btn_select_all = QPushButton("Select All")
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3011,7 +3021,9 @@ class MainWindow(QMainWindow):
         empty_page.setObjectName("emptyState")
         ep_layout = QVBoxLayout(empty_page)
         ep_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ep_layout.setSpacing(16)
+        ep_layout.setSpacing(SPACE_LG)
+
+        empty_icon = self._placeholder_icon("folder_blue.svg")
 
         title_lbl = QLabel("Choose a folder to scan")
         title_lbl.setObjectName("emptyTitle")
@@ -3030,9 +3042,10 @@ class MainWindow(QMainWindow):
         btn_browse_cta.clicked.connect(self._browse)
 
         ep_layout.addStretch()
+        ep_layout.addWidget(empty_icon, alignment=Qt.AlignmentFlag.AlignCenter)
         ep_layout.addWidget(title_lbl)
         ep_layout.addWidget(sub_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
-        ep_layout.addSpacing(8)
+        ep_layout.addSpacing(SPACE_SM)
         ep_layout.addWidget(btn_browse_cta, alignment=Qt.AlignmentFlag.AlignCenter)
         ep_layout.addStretch()
 
@@ -3040,9 +3053,11 @@ class MainWindow(QMainWindow):
         scanning_page = QWidget()
         scanning_page.setObjectName("emptyState")
         sp_layout = QVBoxLayout(scanning_page)
-        sp_layout.setContentsMargins(24, 36, 24, 36)
+        sp_layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
         sp_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sp_layout.setSpacing(18)
+        sp_layout.setSpacing(SPACE_LG)
+
+        scan_icon = self._placeholder_icon("toolbar_refresh.svg")
 
         sp_title = QLabel("Scanning in progress")
         sp_title.setObjectName("emptyTitle")
@@ -3053,14 +3068,13 @@ class MainWindow(QMainWindow):
         self.scan_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scan_detail.setWordWrap(True)
         self.scan_detail.setMaximumWidth(520)
-        self.scan_detail.setMinimumHeight(52)
 
         self.scan_path = QLabel()
         self.scan_path.setObjectName("scanPathValue")
-        self.scan_path.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.scan_path.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scan_path.setWordWrap(True)
-        self.scan_path.setMaximumWidth(760)
-        self.scan_path.setMinimumHeight(72)
+        self.scan_path.setMaximumWidth(640)
+        self.scan_path.setMinimumHeight(24)
         self.scan_path.setTextFormat(Qt.TextFormat.RichText)
 
         self.scan_progress = QProgressBar()
@@ -3070,27 +3084,13 @@ class MainWindow(QMainWindow):
         self.scan_progress.setFixedWidth(360)
         self.scan_progress.setFixedHeight(18)
 
-        self.scan_stats = QLabel("Elapsed 00:00 - rate calculating...")
-        self.scan_stats.setObjectName("emptySub")
-        self.scan_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scan_stats.setWordWrap(True)
-        self.scan_stats.setMaximumWidth(520)
-
-        scan_hint = QLabel("You can keep this window open while the scan runs in the background.")
-        scan_hint.setObjectName("emptySub")
-        scan_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        scan_hint.setWordWrap(True)
-        scan_hint.setMaximumWidth(520)
-
         sp_layout.addStretch()
+        sp_layout.addWidget(scan_icon, alignment=Qt.AlignmentFlag.AlignCenter)
         sp_layout.addWidget(sp_title)
         sp_layout.addWidget(self.scan_detail, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addWidget(self.scan_path, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addSpacing(4)
         sp_layout.addWidget(self.scan_progress, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addSpacing(4)
-        sp_layout.addWidget(self.scan_stats, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addWidget(scan_hint, alignment=Qt.AlignmentFlag.AlignCenter)
+        sp_layout.addSpacing(SPACE_XS)
+        sp_layout.addWidget(self.scan_path, alignment=Qt.AlignmentFlag.AlignCenter)
         sp_layout.addStretch()
 
         # Page 1: Tree view
@@ -3126,8 +3126,7 @@ class MainWindow(QMainWindow):
         hdr.setStretchLastSection(False)
         hdr.setSectionsClickable(True)
         try:
-            hdr.setSortIndicatorShown(True)
-            hdr.setSortIndicator(3, Qt.SortOrder.DescendingOrder) # Default sort by Age
+            hdr.setSortIndicatorShown(False)
         except Exception:
             pass
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3138,15 +3137,12 @@ class MainWindow(QMainWindow):
         no_results_page.setObjectName("emptyState")
         nr_layout = QVBoxLayout(no_results_page)
         nr_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        nr_layout.setSpacing(14)
-        nr_icon = QLabel("[Search]")
-        nr_icon.setObjectName("emptyIcon")
-        nr_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nr_layout.setSpacing(SPACE_LG)
         nr_title = QLabel("No matching items")
-        nr_title.setObjectName("emptyTitle")
+        nr_title.setObjectName("noResultsTitle")
         nr_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.nr_sub = QLabel("Try adjusting your filters or age threshold.")
-        self.nr_sub.setObjectName("emptySub")
+        self.nr_sub.setObjectName("noResultsSub")
         self.nr_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.nr_sub.setWordWrap(True)
         self.nr_sub.setMaximumWidth(400)
@@ -3156,10 +3152,9 @@ class MainWindow(QMainWindow):
         btn_reset_nr.setFixedWidth(160)
         btn_reset_nr.clicked.connect(self._reset_filters)
         nr_layout.addStretch()
-        nr_layout.addWidget(nr_icon)
         nr_layout.addWidget(nr_title)
         nr_layout.addWidget(self.nr_sub, alignment=Qt.AlignmentFlag.AlignCenter)
-        nr_layout.addSpacing(8)
+        nr_layout.addSpacing(SPACE_MD)
         nr_layout.addWidget(btn_reset_nr, alignment=Qt.AlignmentFlag.AlignCenter)
         nr_layout.addStretch()
 
@@ -3177,7 +3172,7 @@ class MainWindow(QMainWindow):
         self.tree_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         tc_layout = QVBoxLayout(self.tree_container)
         tc_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        tc_layout.setContentsMargins(1, 1, 1, 1) # Internal border gap
+        tc_layout.setContentsMargins(SPACE_XS, SPACE_XS, SPACE_XS, SPACE_XS) # Internal border gap
         tc_layout.setSpacing(0)
         tc_layout.addWidget(self.content_stack)
 
@@ -3208,8 +3203,8 @@ class MainWindow(QMainWindow):
         sb.setObjectName("statusbar")
         sb.setFixedHeight(40)
         sbl = QHBoxLayout(sb)
-        sbl.setContentsMargins(12, 5, 12, 5)
-        sbl.setSpacing(8)
+        sbl.setContentsMargins(SPACE_MD, SPACE_XS, SPACE_MD, SPACE_XS)
+        sbl.setSpacing(SPACE_SM)
         self.lbl_status = QLabel("Ready - select a folder and click Re-scan")
         self.lbl_status.setObjectName("statusMessage")
 
@@ -3243,7 +3238,7 @@ class MainWindow(QMainWindow):
         if self.scanner_thread and self.scanner_thread.isRunning():
             palette = current_palette()
             self.btn_rescan.setStyleSheet(
-                f"background-color: {palette['danger']}; border-color: {palette['danger_hover']};"
+                f"background-color: {palette['status_danger']}; border-color: {palette['status_danger']};"
             )
         if hasattr(self, 'tree'):
             self._update_status_column_visibility()
@@ -3320,18 +3315,12 @@ class MainWindow(QMainWindow):
     def _scan_path_html(self, path):
         palette = current_palette()
         if not path:
-            return (
-                f"<div><span style='font-weight:600;color:{palette['text']};'>Current folder</span></div>"
-                f"<div style='margin-top:6px;color:{palette['text_muted']};'>--</div>"
-            )
+            return f"<span style='color:{palette['text_muted']};'>Current folder: --</span>"
 
         escaped = html.escape(path)
         for separator in ("\\", "/", "_", "-", "."):
             escaped = escaped.replace(separator, f"{separator}<wbr>")
-        return (
-            f"<div><span style='font-weight:600;color:{palette['text']};'>Current folder</span></div>"
-            f"<div style='margin-top:6px;color:{palette['text_soft']};'>{escaped}</div>"
-        )
+        return f"<span style='color:{palette['text_muted']};'>Current folder: {escaped}</span>"
 
     def _set_scanning_panel(self, path=None, detail=None):
         if hasattr(self, 'scan_path'):
@@ -3350,13 +3339,16 @@ class MainWindow(QMainWindow):
         return f"{minutes:02d}:{secs:02d}"
 
     def _scan_stats_text(self, detail=None):
+        if not detail:
+            return "Preparing the index and waiting for the first batch of results."
         elapsed = 0.0 if not detail else detail.get("elapsed_secs", 0.0)
         rate = 0.0 if not detail else detail.get("rate", 0.0)
+        scanned = 0 if not detail else detail.get("scanned", 0) or 0
         percent = None if not detail else detail.get("percent")
         eta_secs = None if not detail else detail.get("eta_secs")
 
         rate_text = "rate calculating..." if rate <= 0 else f"{rate:,.0f} items/sec"
-        parts = [rate_text, f"{self._format_scan_duration(elapsed)} elapsed"]
+        parts = [f"{scanned:,} items scanned", rate_text, f"{self._format_scan_duration(elapsed)} elapsed"]
         if percent is not None and eta_secs is not None:
             parts.append(f"~{self._format_scan_duration(eta_secs)} remaining ({percent:.0f}%)")
         return " - ".join(parts)
@@ -3372,8 +3364,8 @@ class MainWindow(QMainWindow):
                 self.scan_progress.setRange(0, 100)
                 self.scan_progress.setValue(max(0, min(99, int(percent))))
 
-        if hasattr(self, 'scan_stats'):
-            self.scan_stats.setText(self._scan_stats_text(detail))
+        if hasattr(self, 'scan_detail'):
+            self.scan_detail.setText(self._scan_stats_text(detail))
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
@@ -3420,7 +3412,21 @@ class MainWindow(QMainWindow):
         vbar.setValue(max(vbar.minimum(), min(vertical_value, vbar.maximum())))
         hbar.setValue(max(hbar.minimum(), min(horizontal_value, hbar.maximum())))
 
+    def _clear_path_focus_for_external_click(self, obj, event):
+        if event.type() != QEvent.Type.MouseButtonPress:
+            return
+        if not hasattr(self, 'txt_path') or not self.txt_path.hasFocus():
+            return
+        if not isinstance(obj, QWidget):
+            return
+        if obj == self.txt_path or self.txt_path.isAncestorOf(obj):
+            return
+
+        self.txt_path.deselect()
+        self.txt_path.clearFocus()
+
     def eventFilter(self, obj, event):
+        self._clear_path_focus_for_external_click(obj, event)
         if hasattr(self, 'tree') and obj == self.tree.viewport():
             if event.type() == QEvent.Type.MouseMove:
                 pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
@@ -4017,6 +4023,7 @@ class MainWindow(QMainWindow):
         self.page_only_selection_page = None
         self.cached_selected_total = None
         self.btn_delete.setText("Delete Selected")
+        self._set_delete_armed(False)
         self.btn_delete.setEnabled(False)
 
     def _on_filter_changed(self):
@@ -4567,8 +4574,9 @@ class MainWindow(QMainWindow):
         has_selection = bool(self.bulk_delete_scope or self.selected_paths or self.page_only_selected_paths)
         all_targets, inactive_targets, empty_targets = self._collect_selection_button_targets(mode)
 
-        self.btn_select_all.setVisible(not has_selection)
-        self.btn_clear_selection.setVisible(has_selection)
+        focused_selection_mode = mode in ('Inactive', 'Empty')
+        self.btn_select_all.setVisible(not has_selection and not focused_selection_mode)
+        self.btn_clear_selection.setVisible(has_selection and not focused_selection_mode)
         self.btn_clear_selection.setEnabled(has_selection)
 
         if mode == 'Videos':
@@ -4598,7 +4606,8 @@ class MainWindow(QMainWindow):
             if empty_enabled
             else "No empty folders are available in the current view."
         )
-        self.btn_select_inactive.setVisible(mode != 'All')
+        self.btn_select_inactive.setVisible(mode == 'Inactive')
+        self.btn_select_empty.setVisible(mode == 'Empty')
 
     def _collect_selection_button_targets(self, mode):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
@@ -5091,7 +5100,7 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("Stop")
         palette = current_palette()
         self.btn_rescan.setStyleSheet(
-            f"background-color: {palette['danger']}; border-color: {palette['danger_hover']};"
+            f"background-color: {palette['status_danger']}; border-color: {palette['status_danger']};"
         )
         self._set_size_totals_pending(browse=True, page=True, selected=True)
         self.content_stack.setCurrentIndex(3)
@@ -5338,8 +5347,7 @@ class MainWindow(QMainWindow):
     def _apply_sort_indicator(self):
         hdr = self.tree.header()
         blocker = QSignalBlocker(hdr)
-        hdr.setSortIndicatorShown(True)
-        hdr.setSortIndicator(self.sort_column, self.sort_order)
+        hdr.setSortIndicatorShown(False)
         del blocker
         model = getattr(self, 'tree_model', None)
         if model is not None and hasattr(model, 'set_sort_header_state'):
@@ -6060,15 +6068,18 @@ class MainWindow(QMainWindow):
     def _do_recount(self):
         if not self.tree_model:
             self.btn_delete.setText("Delete Selected")
+            self._set_delete_armed(False)
             self.btn_delete.setEnabled(False)
             self._refresh_selection_buttons()
             return
         if self.bulk_delete_scope:
             scope = self.bulk_delete_scope
+            armed = scope['total'] > 0
             self.btn_delete.setText(
                 f"Delete Selected (All pages: {scope['total']} items)"
             )
-            self.btn_delete.setEnabled(scope['total'] > 0)
+            self._set_delete_armed(armed)
+            self.btn_delete.setEnabled(armed)
             self._refresh_selection_buttons()
             self._update_chips_sql()
             return
@@ -6078,10 +6089,18 @@ class MainWindow(QMainWindow):
             self.btn_delete.setText(f"Delete Selected ({total} item{'s' if total != 1 else ''})")
         else:
             self.btn_delete.setText("Delete Selected")
-        self.btn_delete.setEnabled(total > 0)
+        armed = total > 0
+        self._set_delete_armed(armed)
+        self.btn_delete.setEnabled(armed)
         self._set_size_totals_pending(selected=True)
         self._refresh_selection_buttons()
         self._update_chips_sql()
+
+    def _set_delete_armed(self, armed):
+        self.btn_delete.setProperty("armed", bool(armed))
+        self.btn_delete.style().unpolish(self.btn_delete)
+        self.btn_delete.style().polish(self.btn_delete)
+        self.btn_delete.update()
 
     # -------------------------------------------------------------------------
     # Tree interactions
@@ -6106,7 +6125,7 @@ class MainWindow(QMainWindow):
             try:
                 relative = os.path.relpath(normalized_folder, root)
                 if relative == ".":
-                    return "."
+                    return "Root directory"
                 if not relative.startswith(".."):
                     return relative
             except ValueError:
@@ -6268,11 +6287,11 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         palette = current_palette()
         menu.setStyleSheet(f"""
-            QMenu {{ background:{palette['menu_bg']}; color:{palette['menu_text']}; border:1px solid {palette['menu_border']};
-                    border-radius:6px; padding:4px; }}
-            QMenu::item {{ padding:6px 16px; border-radius:4px; }}
+            QMenu {{ background:{palette['surface']}; color:{palette['text']}; border:1px solid {palette['border']};
+                    border-radius:6px; padding:{SPACE_XS}px; }}
+            QMenu::item {{ padding:{SPACE_SM}px {SPACE_LG}px; border-radius:4px; }}
             QMenu::item:selected {{ background:{palette['accent']}; color:white; }}
-            QMenu::separator {{ background:{palette['border']}; height:1px; margin:4px 0; }}
+            QMenu::separator {{ background:{palette['border']}; height:1px; margin:{SPACE_XS}px 0; }}
         """)
         a_open   = menu.addAction("Open Location")
         a_copy   = menu.addAction("Copy Path")

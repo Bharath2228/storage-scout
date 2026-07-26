@@ -1,16 +1,30 @@
 {
+  "c:\\users": {
+    "item_count": 517989,
+    "last_scan_duration_secs": 214.8620563000004,
+    "last_scanned_at": 1785083380.7993565,
+    "root": "c:\\users",
+    "total_size": 180470301570
+  },
   "c:\\users\\bharath\\desktop": {
     "item_count": 28386,
-    "last_scan_duration_secs": 4.709225299986429,
-    "last_scanned_at": 1785073258.2756805,
+    "last_scan_duration_secs": 2.4716660999984015,
+    "last_scanned_at": 1785092036.8288033,
     "root": "c:\\users\\bharath\\desktop",
-    "total_size": 70623227819
+    "total_size": 70617480410
+  },
+  "c:\\users\\bharath\\desktop\\germany\\hochschule offenburg": {
+    "item_count": 1113,
+    "last_scan_duration_secs": 0.14590210000460502,
+    "last_scanned_at": 1785075864.4913118,
+    "root": "c:\\users\\bharath\\desktop\\germany\\hochschule offenburg",
+    "total_size": 3186629168
   },
   "c:\\users\\bharath\\desktop\\ibms\\watchdog": {
     "item_count": 52,
-    "last_scan_duration_secs": 1.2752195999928517,
-    "last_scanned_at": 1785073077.1661031,
+    "last_scan_duration_secs": 0.13142159998824354,
+    "last_scanned_at": 1785091925.0752594,
     "root": "c:\\users\\bharath\\desktop\\ibms\\watchdog",
-    "total_size": 433754441
+    "total_size": 421122300
   }
 }
