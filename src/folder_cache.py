@@ -68,6 +68,105 @@ class FolderCache:
             if item:
                 item['size'] = total_size or 0
 
+    def remove_path(self, path):
+        if not path:
+            return False
+
+        key = self._key(path)
+        with self._lock:
+            item = self.items.get(key)
+            parent_path = item.get('location') if item else os.path.dirname(path)
+            parent_key = self._key(parent_path)
+            exists = item is not None or key in self.children
+            if not exists:
+                siblings = self.children.get(parent_key, [])
+                if key not in siblings:
+                    return False
+
+            subtree_keys = []
+            pending = [key]
+            visited = set()
+            while pending:
+                current_key = pending.pop()
+                if current_key in visited:
+                    continue
+                visited.add(current_key)
+                subtree_keys.append(current_key)
+                pending.extend(self.children.get(current_key, []))
+
+            removed_size = 0
+            removed_files = 0
+            removed_folders = 0
+            for subtree_key in subtree_keys:
+                subtree_item = self.items.get(subtree_key)
+                if not subtree_item:
+                    continue
+                if subtree_item.get('is_dir'):
+                    removed_folders += 1
+                else:
+                    removed_files += 1
+                    removed_size += subtree_item.get('size', 0) or 0
+
+            if item and item.get('is_dir'):
+                summary_counts = self.folder_counts.get(key, {})
+                removed_size = max(removed_size, self.folder_sizes.get(key, 0) or 0)
+                removed_files = max(removed_files, summary_counts.get('files', 0) or 0)
+                removed_folders = max(
+                    removed_folders,
+                    summary_counts.get('folders', 0) or 0,
+                )
+
+            siblings = self.children.get(parent_key)
+            if siblings is not None:
+                self.children[parent_key] = [
+                    child_key for child_key in siblings if child_key != key
+                ]
+
+            ancestor_key = parent_key
+            ancestor_seen = set()
+            while ancestor_key and ancestor_key not in ancestor_seen:
+                ancestor_seen.add(ancestor_key)
+                ancestor_item = self.items.get(ancestor_key)
+                if not ancestor_item:
+                    break
+
+                updated_size = max(
+                    0,
+                    (self.folder_sizes.get(ancestor_key, 0) or 0) - removed_size,
+                )
+                self.folder_sizes[ancestor_key] = updated_size
+                ancestor_item['size'] = updated_size
+
+                counts = self.folder_counts.get(ancestor_key)
+                if counts is not None:
+                    counts['files'] = max(
+                        0,
+                        (counts.get('files', 0) or 0) - removed_files,
+                    )
+                    counts['folders'] = max(
+                        0,
+                        (counts.get('folders', 0) or 0) - removed_folders,
+                    )
+                    if ancestor_key == parent_key:
+                        counts['children'] = len(self.children.get(parent_key, []))
+
+                ancestor_path = ancestor_item.get('location')
+                if ancestor_path is None:
+                    break
+                ancestor_key = self._key(ancestor_path)
+
+            for subtree_key in subtree_keys:
+                self.items.pop(subtree_key, None)
+                self.children.pop(subtree_key, None)
+                self.folder_sizes.pop(subtree_key, None)
+                self.folder_counts.pop(subtree_key, None)
+
+            self.running_total_size = max(
+                0,
+                self.running_total_size - removed_size,
+            )
+            return True
+
     def has_children_for(self, path):
         with self._lock:
             return self._key(path) in self.children

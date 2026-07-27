@@ -24,6 +24,9 @@ Built with **Python 3.10+** and **PyQt6**, featuring a modern, responsive interf
 
 ```text
 Watchdog/
+|-- data/                # Runtime database, history, and legacy local data
+|-- tests/               # Automated regression tests
+|-- tools/               # Administrative utilities
 ├── main.py              # Application entry point
 ├── requirements.txt     # Python dependencies
 ├── README.md            # Documentation
@@ -97,7 +100,7 @@ python tools/setup_auth.py --remove-user jsmith
 python tools/setup_auth.py --list-users
 ```
 
-Passwords are stored as salted PBKDF2 hashes in `%APPDATA%\IBMS\Watchdog\auth_store.json`, never plaintext. Delete authorization and completion events are appended to `%APPDATA%\IBMS\Watchdog\delete_audit.log`. Existing files beside the application are copied there once when needed.
+Passwords are stored as salted PBKDF2 hashes in `%APPDATA%\IBMS\Watchdog\auth_store.json`, never plaintext. Delete authorization and completion events are appended to `%APPDATA%\IBMS\Watchdog\delete_audit.log`. Existing files in the project's `data` directory are copied there once when needed.
 
 This local authorization is deterrence-grade protection for shared workstations. It is not a substitute for enterprise identity controls. On Windows, the app restricts the credential, lockout, and audit files to the current Windows account.
 

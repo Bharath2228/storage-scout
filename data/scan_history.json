@@ -1,0 +1,44 @@
+{
+  "c:\\": {
+    "item_count": 1318883,
+    "last_scan_duration_secs": 286.0227226999996,
+    "last_scanned_at": 1785142668.922774,
+    "root": "c:\\",
+    "total_size": 346806981230
+  },
+  "c:\\users": {
+    "item_count": 511253,
+    "last_scan_duration_secs": 133.06441240000004,
+    "last_scanned_at": 1785143169.520273,
+    "root": "c:\\users",
+    "total_size": 177386410462
+  },
+  "c:\\users\\bharath\\desktop": {
+    "item_count": 28276,
+    "last_scan_duration_secs": 18.64393939999991,
+    "last_scanned_at": 1785142995.8758807,
+    "root": "c:\\users\\bharath\\desktop",
+    "total_size": 68418464388
+  },
+  "c:\\users\\bharath\\desktop\\germany\\hochschule offenburg": {
+    "item_count": 1113,
+    "last_scan_duration_secs": 0.14590210000460502,
+    "last_scanned_at": 1785075864.4913118,
+    "root": "c:\\users\\bharath\\desktop\\germany\\hochschule offenburg",
+    "total_size": 3186629168
+  },
+  "c:\\users\\bharath\\desktop\\ibms\\watchdog": {
+    "item_count": 52,
+    "last_scan_duration_secs": 0.544997399993008,
+    "last_scanned_at": 1785136765.8587327,
+    "root": "c:\\users\\bharath\\desktop\\ibms\\watchdog",
+    "total_size": 421128825
+  },
+  "c:\\users\\bharath\\downloads": {
+    "item_count": 228,
+    "last_scan_duration_secs": 0.12042079999991984,
+    "last_scanned_at": 1785143026.453887,
+    "root": "c:\\users\\bharath\\downloads",
+    "total_size": 7985684104
+  }
+}

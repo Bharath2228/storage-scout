@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 
-HISTORY_FILE = Path(__file__).resolve().parent.parent / "scan_history.json"
+HISTORY_FILE = Path(__file__).resolve().parent.parent / "data" / "scan_history.json"
 
 
 def normalize_root(root):

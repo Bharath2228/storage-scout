@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
     QTableWidget, QTableWidgetItem, QComboBox, QScrollArea, QAbstractScrollArea,
-    QLayout
+    QLayout, QSystemTrayIcon
 )
 from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
@@ -406,9 +406,16 @@ class DeletePreviewThread(QThread):
         self.bulk_scope = dict(bulk_scope or {}) if bulk_scope else None
         self.excluded_paths = dict(excluded_paths or {})
         self.is_cancelled = False
+        self._connection = None
 
     def cancel(self):
         self.is_cancelled = True
+        connection = self._connection
+        if connection is not None:
+            try:
+                connection.interrupt()
+            except Exception:
+                pass
 
     def _raise_if_cancelled(self):
         if self.is_cancelled:
@@ -421,6 +428,7 @@ class DeletePreviewThread(QThread):
         pruned_paths = []
         selected_roots = []
         for path in sorted(paths, key=lambda value: (len(os.path.normpath(value)), value.lower())):
+            self._raise_if_cancelled()
             normalized = os.path.normcase(os.path.normpath(path))
             if any(
                 normalized == root or normalized.startswith(root + os.sep)
@@ -453,8 +461,7 @@ class DeletePreviewThread(QThread):
 
         expanded = []
         for root_path in selected_roots:
-            if self.is_cancelled:
-                return []
+            self._raise_if_cancelled()
             root_key = self._path_key(root_path)
             if not any(
                 excluded_key == root_key or excluded_key.startswith(root_key + os.sep)
@@ -474,8 +481,7 @@ class DeletePreviewThread(QThread):
                 (root_path, *descendant_params),
             )
             for path, is_folder in cursor.fetchall():
-                if self.is_cancelled:
-                    return []
+                self._raise_if_cancelled()
                 if self._has_excluded_ancestor(path):
                     continue
                 if is_folder and self._has_excluded_descendant(path):
@@ -551,8 +557,7 @@ class DeletePreviewThread(QThread):
 
         paths = []
         for path, is_folder in rows:
-            if self.is_cancelled:
-                return []
+            self._raise_if_cancelled()
             if not is_folder:
                 paths.append(path)
             elif folder_delete_mode == 'all':
@@ -571,6 +576,8 @@ class DeletePreviewThread(QThread):
 
         tool = FileIndexTool()
         try:
+            self._connection = tool.conn
+            self._raise_if_cancelled()
             cursor = tool.conn.cursor()
             if self.bulk_scope:
                 where_sql = self.bulk_scope.get('where_sql', '')
@@ -592,8 +599,7 @@ class DeletePreviewThread(QThread):
                 folders = 0
                 files = 0
 
-            if self.is_cancelled:
-                return
+            self._raise_if_cancelled()
 
             if not self.bulk_scope:
                 paths, folders, files, total_size = self._summarize_paths(cursor, paths)
@@ -611,8 +617,10 @@ class DeletePreviewThread(QThread):
         except DeletePreviewThread._Cancelled:
             return
         except Exception as exc:
-            self.preview_failed.emit(str(exc))
+            if not self.is_cancelled:
+                self.preview_failed.emit(str(exc))
         finally:
+            self._connection = None
             tool.close()
 
 
@@ -621,7 +629,7 @@ class DeletePreviewDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Delete preview")
         self.setModal(True)
-        self.setFixedSize(520, 230)
+        self.setFixedSize(560, 350)
         self.setObjectName("modalDialog")
         self.preview_paths = []
         self.preview_payload = {}
@@ -638,19 +646,90 @@ class DeletePreviewDialog(QDialog):
         self.detail_label.setObjectName("modalDetail")
         layout.addWidget(self.detail_label)
 
-        self.path_label = QLabel("Please wait while we gather the delete summary.")
-        self.path_label.setObjectName("modalSecondary")
-        self.path_label.setWordWrap(True)
-        self.path_label.setMinimumHeight(42)
-        layout.addWidget(self.path_label)
-
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
         self.progress.setObjectName("deleteProgressBar")
         layout.addWidget(self.progress)
 
+        self.summary_widget = QWidget()
+        summary_layout = QGridLayout(self.summary_widget)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setHorizontalSpacing(SPACE_XL)
+        summary_layout.setVerticalSpacing(SPACE_SM)
+        summary_layout.setColumnStretch(0, 1)
+
+        matched_label = QLabel("Matched items")
+        matched_label.setObjectName("modalSecondary")
+        self.matched_value = QLabel("0")
+        self.matched_value.setObjectName("modalDetail")
+        self.matched_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        summary_layout.addWidget(matched_label, 0, 0)
+        summary_layout.addWidget(self.matched_value, 0, 1)
+
+        recycle_count_label = QLabel("Items sent to Recycle Bin")
+        recycle_count_label.setObjectName("modalSecondary")
+        self.recycle_count_value = QLabel("0")
+        self.recycle_count_value.setObjectName("modalTitle")
+        self.recycle_count_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        summary_layout.addWidget(recycle_count_label, 1, 0)
+        summary_layout.addWidget(self.recycle_count_value, 1, 1)
+
+        folders_label = QLabel("Folders")
+        folders_label.setObjectName("modalSecondary")
+        self.folders_value = QLabel("0")
+        self.folders_value.setObjectName("modalDetail")
+        self.folders_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        summary_layout.addWidget(folders_label, 2, 0)
+        summary_layout.addWidget(self.folders_value, 2, 1)
+
+        files_label = QLabel("Files")
+        files_label.setObjectName("modalSecondary")
+        self.files_value = QLabel("0")
+        self.files_value.setObjectName("modalDetail")
+        self.files_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        summary_layout.addWidget(files_label, 3, 0)
+        summary_layout.addWidget(self.files_value, 3, 1)
+
+        size_label = QLabel("Total size")
+        size_label.setObjectName("modalSecondary")
+        self.size_value = QLabel("0 B")
+        self.size_value.setObjectName("modalDetail")
+        self.size_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        summary_layout.addWidget(size_label, 4, 0)
+        summary_layout.addWidget(self.size_value, 4, 1)
+
+        self.summary_widget.setVisible(False)
+        layout.addWidget(self.summary_widget)
+
+        self.preview_note = QLabel("")
+        self.preview_note.setObjectName("modalSecondary")
+        self.preview_note.setWordWrap(True)
+        self.preview_note.setVisible(False)
+        layout.addWidget(self.preview_note)
+
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("modalSecondary")
+        self.error_label.setWordWrap(True)
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
+
+        layout.addStretch()
+
         btn_row = QHBoxLayout()
+        self.recycle_bin_note = QLabel(
+            "Items will be moved to the Recycle Bin and can be restored."
+        )
+        self.recycle_bin_note.setObjectName("modalSecondary")
+        self.recycle_bin_note.setWordWrap(True)
+        self.recycle_bin_note.setMaximumWidth(280)
+        btn_row.addWidget(self.recycle_bin_note)
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setObjectName("modalCancel")
@@ -664,42 +743,56 @@ class DeletePreviewDialog(QDialog):
         layout.addLayout(btn_row)
 
     def apply_preview(self, payload):
-        self.preview_payload = dict(payload or {})
-        self.preview_paths = payload.get('paths', [])
-        total = payload.get('total', len(self.preview_paths))
-        delete_operations = payload.get('delete_operations', len(self.preview_paths))
-        folders = payload.get('folders', 0)
-        files = payload.get('files', 0)
-        size = payload.get('size')
-        size_text = 'Calculating...' if size is None else ('0 B' if size == 0 else format_size(size))
-        self.detail_label.setText(
-            f"Delete operations: {delete_operations}    Total size: {size_text}"
+        data = dict(payload or {})
+        self.preview_payload = data
+        self.preview_paths = list(data.get('paths', []) or [])
+        total = int(data.get('total', len(self.preview_paths)) or 0)
+        delete_operations = int(
+            data.get('delete_operations', len(self.preview_paths)) or 0
         )
-        if folders > 0:
-            path_summary = (
-                f"Selected folders will delete {folders} folders and {files} files inside them.\n"
-                f"Matched items: {total}\n"
-                f"Items sent to Recycle Bin: {delete_operations}"
-            )
-        else:
-            path_summary = (
-                f"Matched items: {total}\n"
-                f"Items sent to Recycle Bin: {delete_operations}"
-            )
-        self.path_label.setText(
-            f"{path_summary}\n"
-            f"Folders: {folders}\n"
-            f"Files: {files}"
+        folders = int(data.get('folders', 0) or 0)
+        files = int(data.get('files', 0) or 0)
+        size = data.get('size')
+
+        if size is None:
+            self.title_label.setText("Preparing delete preview")
+            self.detail_label.setText("Calculating selected items and size...")
+            self.summary_widget.setVisible(False)
+            self.preview_note.setVisible(False)
+            self.error_label.setVisible(False)
+            self.progress.setRange(0, 0)
+            self.progress.setVisible(True)
+            self.delete_button.setEnabled(False)
+            return
+
+        self.title_label.setText("Review before deleting")
+        self.detail_label.setText("Check the deletion summary before continuing.")
+        self.matched_value.setText(f"{total:,}")
+        self.recycle_count_value.setText(f"{delete_operations:,}")
+        self.folders_value.setText(f"{folders:,}")
+        self.files_value.setText(f"{files:,}")
+        self.size_value.setText("0 B" if size == 0 else format_size(size))
+        self.summary_widget.setVisible(True)
+        self.error_label.setVisible(False)
+        self.progress.setVisible(False)
+
+        show_note = total != delete_operations
+        self.preview_note.setText(
+            "Non-empty folders outside your filter won't be deleted."
+            if show_note
+            else ""
         )
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        self.delete_button.setEnabled(size is not None)
+        self.preview_note.setVisible(show_note)
+        self.delete_button.setEnabled(True)
 
     def show_error(self, message):
-        self.detail_label.setText("Could not calculate delete preview.")
-        self.path_label.setText(message)
-        self.progress.setRange(0, 1)
-        self.progress.setValue(0)
+        self.title_label.setText("Could not calculate preview")
+        self.detail_label.setText("The delete summary could not be prepared.")
+        self.summary_widget.setVisible(False)
+        self.preview_note.setVisible(False)
+        self.error_label.setText(message)
+        self.error_label.setVisible(True)
+        self.progress.setVisible(False)
         self.delete_button.setEnabled(False)
 
 
@@ -2835,6 +2928,12 @@ class MainWindow(QMainWindow):
         self.active_extension_filter = None
         self.settings = QSettings("IBMS", "Watchdog")
         self.current_theme_name = resolve_theme_name(self.settings.value("theme", "light"))
+        self.notifications_enabled = self.settings.value(
+            "notifications_enabled",
+            True,
+            type=bool,
+        )
+        self.tray_icon = None
         self.bulk_select_thread = None
         self.bulk_select_request_id = 0
         self.bulk_select_active = False
@@ -2898,6 +2997,7 @@ class MainWindow(QMainWindow):
         self.scan_refresh_timer.timeout.connect(self._refresh_pagination_only)
 
         self._build_ui()
+        self._setup_tray_icon()
         QApplication.instance().installEventFilter(self)
         self.tree.header().sectionClicked.connect(self._on_header_sort_clicked)
         self._apply_sort_indicator()
@@ -2905,6 +3005,49 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
+
+    def _setup_tray_icon(self):
+        self.tray_icon = None
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            icon_path = os.path.join(
+                os.path.dirname(__file__),
+                "assets",
+                "folder_blue.svg",
+            )
+            icon = QIcon(icon_path)
+            if icon.isNull():
+                return
+            self.tray_icon = QSystemTrayIcon(icon, self)
+            self.tray_icon.setToolTip("IBMS Folder Watchdog")
+            self.tray_icon.show()
+        except Exception:
+            self.tray_icon = None
+
+    def _should_show_completion_notification(self, elapsed_secs=None, cancelled=False):
+        if cancelled or not getattr(self, 'notifications_enabled', True):
+            return False
+        if elapsed_secs is not None and elapsed_secs > 8:
+            return True
+        return not self.isActiveWindow()
+
+    def _show_system_notification(self, title, message):
+        tray_icon = getattr(self, 'tray_icon', None)
+        if not getattr(self, 'notifications_enabled', True) or tray_icon is None:
+            return False
+        try:
+            if not tray_icon.isVisible():
+                return False
+            tray_icon.showMessage(
+                title,
+                message,
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+            return True
+        except Exception:
+            return False
 
     def _placeholder_icon(self, asset_name, muted=False):
         label = QLabel()
@@ -3545,6 +3688,11 @@ class MainWindow(QMainWindow):
         if obj == self.txt_path or self.txt_path.isAncestorOf(obj):
             return
 
+        self._clear_path_input_focus()
+
+    def _clear_path_input_focus(self):
+        if not hasattr(self, 'txt_path'):
+            return
         self.txt_path.deselect()
         self.txt_path.clearFocus()
 
@@ -4937,26 +5085,22 @@ class MainWindow(QMainWindow):
         dialog = DeletePreviewDialog(self)
         dialog.preview_mode = 'bulk' if bulk_scope else 'direct'
         if bulk_scope:
-            self.delete_preview_thread = DeletePreviewThread(
+            thread = DeletePreviewThread(
                 bulk_scope=bulk_scope,
                 parent=self,
             )
-            self.delete_preview_thread.preview_ready.connect(dialog.apply_preview)
-            self.delete_preview_thread.preview_failed.connect(dialog.show_error)
-            dialog.finished.connect(self.delete_preview_thread.cancel)
-            self.delete_preview_thread.finished.connect(lambda: setattr(self, 'delete_preview_thread', None))
-            self.delete_preview_thread.start()
         else:
-            self.delete_preview_thread = DeletePreviewThread(
+            thread = DeletePreviewThread(
                 paths or [],
                 excluded_paths=self.excluded_paths,
                 parent=self,
             )
-            self.delete_preview_thread.preview_ready.connect(dialog.apply_preview)
-            self.delete_preview_thread.preview_failed.connect(dialog.show_error)
-            dialog.finished.connect(self.delete_preview_thread.cancel)
-            self.delete_preview_thread.finished.connect(lambda: setattr(self, 'delete_preview_thread', None))
-            self.delete_preview_thread.start()
+
+        self.delete_preview_thread = thread
+        thread.preview_ready.connect(dialog.apply_preview)
+        thread.preview_failed.connect(dialog.show_error)
+        dialog.finished.connect(thread.cancel)
+        thread.start()
 
         self.pending_delete_preview_dialog = dialog
         dialog.finished.connect(lambda *_: setattr(self, 'pending_delete_preview_dialog', None))
@@ -4964,6 +5108,11 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
         result = dialog.exec()
+        thread.cancel()
+        if thread.isRunning():
+            thread.wait()
+        if self.delete_preview_thread is thread:
+            self.delete_preview_thread = None
         if result == QDialog.DialogCode.Accepted:
             payload = dict(dialog.preview_payload or {})
             payload['paths'] = list(dialog.preview_paths or [])
@@ -5413,13 +5562,19 @@ class MainWindow(QMainWindow):
             if self.scan_progress_was_determinate:
                 self.scan_progress.setRange(0, 100)
                 self.scan_progress.setValue(100)
-            self.lbl_status.setText(self._scan_complete_status_text())
+            completion_message = self._scan_complete_status_text()
+            self.lbl_status.setText(completion_message)
             record_scan_history(
                 self.current_scan_root,
                 getattr(finished_thread, "scan_scanned_count", 0) or self.last_scan_item_count,
                 getattr(self.folder_cache, "running_total_size", 0) if self.folder_cache else 0,
                 self.last_scan_elapsed_secs,
             )
+            if self._should_show_completion_notification(
+                elapsed_secs=self.last_scan_elapsed_secs,
+                cancelled=False,
+            ):
+                self._show_system_notification("Scan complete", completion_message)
 
         if self.content_stack.currentIndex() in (0, 2, 3):
             self._load_page()
@@ -5436,14 +5591,18 @@ class MainWindow(QMainWindow):
             
     def _prev_page(self):
         if self.current_page > 0:
+            self._preserve_results_focus = True
             self.current_page -= 1
             self._update_pending_pagination_state()
             self._load_page()
+            self._clear_path_input_focus()
 
     def _next_page(self):
+        self._preserve_results_focus = True
         self.current_page += 1
         self._update_pending_pagination_state()
         self._load_page()
+        self._clear_path_input_focus()
 
     def _update_pending_pagination_state(self):
         if not hasattr(self, 'lbl_page_info'):
@@ -5476,7 +5635,7 @@ class MainWindow(QMainWindow):
             model.set_sort_header_state(self.sort_column, self.sort_order)
 
     def _focus_results_view(self):
-        self.txt_path.clearFocus()
+        self._clear_path_input_focus()
         self.tree.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_header_sort_clicked(self, col):
@@ -6585,9 +6744,16 @@ class MainWindow(QMainWindow):
         self.delete_audit_items = 0
         self.delete_audit_size = 0
         if deleted_paths:
+            if self.folder_cache is not None:
+                for path in deleted_paths:
+                    self.folder_cache.remove_path(path)
+                self.cached_folder_total = None
+                self.cached_folder_total_root = None
             self._remove_deleted_paths_from_selection(deleted_paths)
         self._set_delete_controls_enabled(True)
         self._load_page()
+        if deleted_paths:
+            self._start_totals_refresh()
 
         if cancelled:
             title = "Deletion stopped"
@@ -6598,6 +6764,14 @@ class MainWindow(QMainWindow):
 
         if errors:
             message += f"\n\nFailed: {len(errors)}"
+
+        if self._should_show_completion_notification(
+            elapsed_secs=None,
+            cancelled=cancelled,
+        ):
+            self._show_system_notification(title, message)
+
+        if errors:
             QMessageBox.warning(self, title, message + "\n\n" + "\n".join(errors[:10]))
         else:
             QMessageBox.information(self, title, message)
