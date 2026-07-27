@@ -224,16 +224,55 @@ def apply_theme(app, theme_name="light"):
             background-color: {bg};
             border-bottom: 1px solid {border};
         }}
+        QPushButton#toolbarStyleBtn {{
+            background-color: transparent;
+            color: {text_muted};
+            border: none;
+            padding: {SPACE_SM}px;
+            font-weight: {muted_weight};
+        }}
+        QPushButton#toolbarStyleBtn:hover {{
+            background-color: {surface_hover};
+            color: {text};
+        }}
         QWidget#sidebar {{
             background-color: {surface};
             border-right: none;
         }}
-        QScrollArea#filterScroll {{
+        QFrame#filterBar,
+        QWidget#filterBarMain {{
             background-color: {surface};
-            border: none;
         }}
-        QWidget#filterScrollContent {{
+        QFrame#filterBar {{
+            border-bottom: 1px solid {border};
+        }}
+        QFrame#filterBar QFrame#divider {{
+            background-color: {border};
+            margin-top: {SPACE_SM}px;
+            margin-bottom: {SPACE_SM}px;
+        }}
+        QFrame#filterBar QFrame#accordionHeader {{
+            background-color: {bg};
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 0 {SPACE_SM}px;
+        }}
+        QFrame#filterBar QFrame#accordionHeader:hover {{
+            background-color: {surface_hover};
+            border-color: {accent};
+        }}
+        QWidget#filterPopover {{
+            background-color: transparent;
+        }}
+        QFrame#filterPopoverCard {{
             background-color: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+        }}
+        QFrame#filterPopoverCard QFrame#ageControl,
+        QFrame#filterPopoverCard QWidget#exclusionsControl {{
+            background-color: transparent;
+            border: none;
         }}
         QWidget#sidebarActionBox {{
             background-color: {surface};

@@ -13,10 +13,10 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
-    QTableWidget, QTableWidgetItem, QComboBox, QScrollArea, QAbstractScrollArea,
-    QLayout, QSystemTrayIcon
+    QTableWidget, QTableWidgetItem, QComboBox, QAbstractScrollArea,
+    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect
 )
-from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings
+from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings, QAbstractItemModel
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
@@ -1275,6 +1275,7 @@ class PageLoadThread(QThread):
         videos_only = self.options['videos_only']
         name_filter = (self.options.get('name_filter') or '').strip()
         extension_filter = self.options.get('extension_filter')
+        folder_scope = self.options.get('folder_scope')
         lazy_show_all_tree = self.options.get('lazy_show_all_tree', False)
         filtered_expanded_tree = self.options.get('filtered_expanded_tree', False)
 
@@ -1331,6 +1332,11 @@ class PageLoadThread(QThread):
             where_clauses.append("is_folder = 0")
             where_clauses.append("extension = ? COLLATE NOCASE")
             params.append(extension_filter)
+
+        if folder_scope:
+            scope_sql, scope_params = descendant_like_sql(folder_scope)
+            where_clauses.append(f"({scope_sql})")
+            params.extend(scope_params)
 
         scan_root = self.options.get('scan_root')
         if scan_root:
@@ -1459,6 +1465,8 @@ class PageLoadThread(QThread):
 
         if view_mode == 'Tree':
             self._hide_scan_root_context(root_node)
+            if folder_scope:
+                self._hide_folder_scope_context(root_node, folder_scope)
             sort_tree_siblings(
                 root_node,
                 self.options['sort_column'],
@@ -1497,6 +1505,17 @@ class PageLoadThread(QThread):
                 replacement_children.append(child)
 
         root_node['children'] = replacement_children
+
+    def _hide_folder_scope_context(self, root_node, folder_scope):
+        scope_key = _path_key(folder_scope)
+        stack = list(root_node.get('children', []))
+        while stack:
+            node = stack.pop()
+            node_path = node.get('path')
+            if node_path and _path_key(node_path) == scope_key:
+                root_node['children'] = list(node.get('children', []))
+                return
+            stack.extend(node.get('children', []))
 
     def _load_lazy_show_all_tree(self):
         from src.file_index_tool import FileIndexTool
@@ -1753,7 +1772,17 @@ class LazyChildrenLoadThread(QThread):
     children_ready = pyqtSignal(int, str, list)
     children_failed = pyqtSignal(int, str, str)
 
-    def __init__(self, request_id, folder_path, sort_column=0, sort_desc=False, options=None, cache=None, parent=None):
+    def __init__(
+        self,
+        request_id,
+        folder_path,
+        sort_column=0,
+        sort_desc=False,
+        options=None,
+        cache=None,
+        folders_only=False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.request_id = request_id
         self.folder_path = folder_path
@@ -1762,6 +1791,7 @@ class LazyChildrenLoadThread(QThread):
         self.options = dict(options or {})
         self.apply_filter_options = options is not None
         self.cache = cache
+        self.folders_only = folders_only
 
     def _child_paths_with_children(self, cursor, child_paths):
         folders_with_children = set()
@@ -1770,11 +1800,13 @@ class LazyChildrenLoadThread(QThread):
             if not batch:
                 continue
             placeholders = ",".join("?" * len(batch))
+            folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
             cursor.execute(
                 f"""
                 SELECT DISTINCT parent_path
                 FROM file_index
                 WHERE parent_path COLLATE NOCASE IN ({placeholders})
+                {folders_only_sql}
                 """,
                 batch,
             )
@@ -1818,6 +1850,11 @@ class LazyChildrenLoadThread(QThread):
     def run(self):
         if self.cache and self.cache.has_children_for(self.folder_path):
             children = self.cache.children_for(self.folder_path, self.sort_column, self.sort_desc)
+            if self.folders_only:
+                children = [
+                    child for child in children
+                    if child.get('is_dir', False)
+                ]
             if self.apply_filter_options:
                 filtered = []
                 for child in children:
@@ -1838,10 +1875,12 @@ class LazyChildrenLoadThread(QThread):
         tool = FileIndexTool()
         try:
             cursor = tool.conn.cursor()
+            folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
             cursor.execute(
                 "SELECT path, name, is_folder, size, modified_time, parent_path "
                 "FROM file_index "
                 "WHERE parent_path = ? COLLATE NOCASE "
+                f"{folders_only_sql} "
                 f"ORDER BY {build_sort_order_clause('Tree', self.sort_column, self.sort_desc)}",
                 (self.folder_path,),
             )
@@ -2469,12 +2508,437 @@ class AccordionHeader(QFrame):
     def set_expanded(self, expanded):
         self.chevron.setText("▾" if expanded else "▸")
 
+    def set_text(self, text):
+        self.title.setText(text)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class FilterPopover(QWidget):
+    closed = pyqtSignal()
+
+    def __init__(self, width, parent=None):
+        super().__init__(
+            parent,
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint,
+        )
+        self.setObjectName("filterPopover")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedWidth(width)
+        self._last_hidden_at = 0.0
+        self._shown_once = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 8, 10, 12)
+        outer.setSpacing(0)
+
+        self.card = QFrame()
+        self.card.setObjectName("filterPopoverCard")
+        self.card_layout = QVBoxLayout(self.card)
+        self.card_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        self.card_layout.setSpacing(0)
+        outer.addWidget(self.card)
+
+        shadow = QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(22)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 90))
+        self.card.setGraphicsEffect(shadow)
+
+    def set_content(self, widget):
+        self.card_layout.addWidget(widget)
+
+    def show_below(self, anchor):
+        self.layout().activate()
+        self.adjustSize()
+        position = anchor.mapToGlobal(anchor.rect().bottomLeft())
+        screen = QApplication.screenAt(position)
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = min(
+                max(position.x(), available.left()),
+                available.right() - self.width() + 1,
+            )
+            y = position.y()
+            if y + self.height() > available.bottom():
+                y = anchor.mapToGlobal(anchor.rect().topLeft()).y() - self.height()
+            position.setX(x)
+            position.setY(max(available.top(), y))
+        self.move(position)
+        self._shown_once = True
+        self.show()
+        self.raise_()
+
+    def recently_hidden(self, threshold=0.18):
+        return time.monotonic() - self._last_hidden_at < threshold
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if not self._shown_once:
+            return
+        self._shown_once = False
+        self._last_hidden_at = time.monotonic()
+        self.closed.emit()
+
+
+class FolderBrowserNode:
+    def __init__(self, name="", path="", parent=None, has_children=False):
+        self.name = name
+        self.path = path
+        self.parent = parent
+        self.children = []
+        self.has_children = bool(has_children)
+        self.loaded = not self.has_children
+        self.loading = False
+
+    def row(self):
+        if self.parent is None:
+            return 0
+        try:
+            return self.parent.children.index(self)
+        except ValueError:
+            return 0
+
+
+class FolderBrowserTreeModel(QAbstractItemModel):
+    loadRequested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.root_node = FolderBrowserNode()
+        self.nodes_by_path = {}
+        self.folder_icon = QIcon(
+            os.path.join(os.path.dirname(__file__), "assets", "folder_blue.svg")
+        )
+
+    def columnCount(self, parent=QModelIndex()):
+        return 1
+
+    def rowCount(self, parent=QModelIndex()):
+        if parent.isValid() and parent.column() != 0:
+            return 0
+        node = parent.internalPointer() if parent.isValid() else self.root_node
+        return len(node.children)
+
+    def index(self, row, column, parent=QModelIndex()):
+        if column != 0 or row < 0:
+            return QModelIndex()
+        parent_node = parent.internalPointer() if parent.isValid() else self.root_node
+        if row >= len(parent_node.children):
+            return QModelIndex()
+        return self.createIndex(row, column, parent_node.children[row])
+
+    def parent(self, index):
+        if not index.isValid():
+            return QModelIndex()
+        node = index.internalPointer()
+        parent_node = node.parent
+        if parent_node is None or parent_node is self.root_node:
+            return QModelIndex()
+        return self.createIndex(parent_node.row(), 0, parent_node)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        node = index.internalPointer()
+        if role == Qt.ItemDataRole.DisplayRole:
+            return node.name
+        if role == Qt.ItemDataRole.DecorationRole:
+            return self.folder_icon
+        if role in (Qt.ItemDataRole.UserRole, Qt.ItemDataRole.ToolTipRole):
+            return node.path
+        return None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def hasChildren(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return bool(self.root_node.children)
+        node = parent.internalPointer()
+        return bool(node.children) or node.has_children
+
+    def canFetchMore(self, parent):
+        if not parent.isValid():
+            return False
+        node = parent.internalPointer()
+        return node.has_children and not node.loaded and not node.loading
+
+    def fetchMore(self, parent):
+        if not self.canFetchMore(parent):
+            return
+        node = parent.internalPointer()
+        node.loading = True
+        self.loadRequested.emit(node.path)
+
+    def reset_root(self, path=None):
+        self.beginResetModel()
+        self.root_node = FolderBrowserNode()
+        self.nodes_by_path = {}
+        if path:
+            normalized = os.path.normpath(path)
+            name = os.path.basename(normalized.rstrip("\\/")) or normalized
+            root = FolderBrowserNode(
+                name=name,
+                path=normalized,
+                parent=self.root_node,
+                has_children=True,
+            )
+            self.root_node.children.append(root)
+            self.nodes_by_path[_path_key(normalized)] = root
+        self.endResetModel()
+
+    def index_for_path(self, path):
+        node = self.nodes_by_path.get(_path_key(path))
+        if node is None:
+            return QModelIndex()
+        return self.createIndex(node.row(), 0, node)
+
+    def apply_children(self, parent_path, children):
+        parent_node = self.nodes_by_path.get(_path_key(parent_path))
+        if parent_node is None:
+            return
+        folder_children = [child for child in children if child.get('is_dir', False)]
+        parent_index = self.index_for_path(parent_path)
+        if parent_node.children:
+            self._remove_children(parent_node, parent_index)
+        if folder_children:
+            self.beginInsertRows(parent_index, 0, len(folder_children) - 1)
+            for child in folder_children:
+                node = FolderBrowserNode(
+                    name=child.get('name') or os.path.basename(child.get('path', '')),
+                    path=child.get('path', ''),
+                    parent=parent_node,
+                    has_children=not child.get('_children_loaded', True),
+                )
+                parent_node.children.append(node)
+                self.nodes_by_path[_path_key(node.path)] = node
+            self.endInsertRows()
+        parent_node.loaded = True
+        parent_node.loading = False
+        parent_node.has_children = bool(folder_children)
+        self.dataChanged.emit(parent_index, parent_index, [])
+
+    def merge_children(self, parent_path, children):
+        parent_node = self.nodes_by_path.get(_path_key(parent_path))
+        if parent_node is None:
+            return
+        parent_index = self.index_for_path(parent_path)
+        existing_keys = {
+            _path_key(child.path)
+            for child in parent_node.children
+        }
+        incoming_by_key = {
+            _path_key(child.get('path', '')): child
+            for child in children
+            if child.get('is_dir', False)
+        }
+        for existing in parent_node.children:
+            incoming = incoming_by_key.get(_path_key(existing.path))
+            if incoming and not incoming.get('_children_loaded', True):
+                existing.has_children = True
+        folder_children = sorted(
+            (
+                child for child in children
+                if child.get('is_dir', False)
+                and _path_key(child.get('path', '')) not in existing_keys
+            ),
+            key=lambda child: (
+                (child.get('name') or '').lower(),
+                (child.get('path') or '').lower(),
+            ),
+        )
+        for child in folder_children:
+            name = child.get('name') or os.path.basename(child.get('path', ''))
+            insert_at = len(parent_node.children)
+            sort_key = (name.lower(), (child.get('path') or '').lower())
+            for index, existing in enumerate(parent_node.children):
+                existing_key = (existing.name.lower(), existing.path.lower())
+                if sort_key < existing_key:
+                    insert_at = index
+                    break
+            self.beginInsertRows(parent_index, insert_at, insert_at)
+            node = FolderBrowserNode(
+                name=name,
+                path=child.get('path', ''),
+                parent=parent_node,
+                has_children=not child.get('_children_loaded', True),
+            )
+            parent_node.children.insert(insert_at, node)
+            self.nodes_by_path[_path_key(node.path)] = node
+            self.endInsertRows()
+        parent_node.loaded = True
+        parent_node.loading = False
+        parent_node.has_children = bool(parent_node.children)
+        self.dataChanged.emit(parent_index, parent_index, [])
+
+    def defer_load(self, path):
+        node = self.nodes_by_path.get(_path_key(path))
+        if node is not None:
+            node.loading = False
+            node.loaded = False
+            node.has_children = True
+
+    def mark_load_failed(self, path):
+        node = self.nodes_by_path.get(_path_key(path))
+        if node is not None:
+            node.loading = False
+            node.loaded = True
+
+    def refresh_path(self, path):
+        node = self.nodes_by_path.get(_path_key(path))
+        if node is None:
+            return QModelIndex()
+        index = self.index_for_path(path)
+        self._remove_children(node, index)
+        node.loaded = False
+        node.loading = False
+        node.has_children = True
+        self.dataChanged.emit(index, index, [])
+        return index
+
+    def _remove_children(self, node, parent_index):
+        if not node.children:
+            return
+        self.beginRemoveRows(parent_index, 0, len(node.children) - 1)
+        stack = list(node.children)
+        while stack:
+            child = stack.pop()
+            stack.extend(child.children)
+            self.nodes_by_path.pop(_path_key(child.path), None)
+        node.children = []
+        self.endRemoveRows()
+
+
+class FolderBrowserPanel(QFrame):
+    scopeChanged = pyqtSignal(str)
+    closeRequested = pyqtSignal()
+    loadRequested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sidebar")
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(240)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.resize(240, self.height())
+        self.root_path = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QWidget()
+        header.setObjectName("searchSection")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_MD)
+        title = QLabel("FOLDERS")
+        title.setObjectName("searchHeader")
+        header_layout.addWidget(title)
+        layout.addWidget(header)
+
+        self.tree = QTreeView()
+        self.tree.setHeaderHidden(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setAnimated(False)
+        self.tree.setIndentation(16)
+        self.tree.setIconSize(QSize(18, 18))
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setExpandsOnDoubleClick(True)
+        self.model = FolderBrowserTreeModel(self)
+        self.tree.setModel(self.model)
+        self.model.loadRequested.connect(self.loadRequested)
+        self.tree.selectionModel().currentChanged.connect(self._on_current_changed)
+        layout.addWidget(self.tree, 1)
+
+        self.empty_label = QLabel("Folder navigation is available after a scan completes.")
+        self.empty_label.setObjectName("modalSecondary")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        layout.addWidget(self.empty_label, 1)
+
+        action_box = QWidget()
+        action_box.setObjectName("sidebarActionBox")
+        action_layout = QVBoxLayout(action_box)
+        action_layout.setContentsMargins(SPACE_SM, SPACE_MD, SPACE_SM, SPACE_LG)
+        self.btn_close = QPushButton("Close folders")
+        self.btn_close.setObjectName("closeSidebar")
+        self.btn_close.setToolTip("Hide the folder browser")
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.clicked.connect(self.closeRequested)
+        action_layout.addWidget(self.btn_close)
+        layout.addWidget(action_box)
+
+        self.set_root(None)
+
+    def sizeHint(self):
+        return QSize(240, 0)
+
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+    def set_root(self, path):
+        self.root_path = os.path.normpath(path) if path else None
+        blocker = QSignalBlocker(self.tree.selectionModel())
+        self.model.reset_root(self.root_path)
+        self.tree.setVisible(bool(self.root_path))
+        self.empty_label.setVisible(not self.root_path)
+        if self.root_path:
+            root_index = self.model.index(0, 0)
+            self.tree.setCurrentIndex(root_index)
+            self.tree.expand(root_index)
+        del blocker
+
+    def select_root(self):
+        if not self.root_path:
+            return
+        index = self.model.index_for_path(self.root_path)
+        if index.isValid():
+            blocker = QSignalBlocker(self.tree.selectionModel())
+            self.tree.setCurrentIndex(index)
+            del blocker
+
+    def apply_children(self, parent_path, children):
+        self.model.apply_children(parent_path, children)
+
+    def merge_children(self, parent_path, children):
+        self.model.merge_children(parent_path, children)
+
+    def defer_load(self, path):
+        self.model.defer_load(path)
+
+    def mark_load_failed(self, path):
+        self.model.mark_load_failed(path)
+
+    def refresh_paths(self, parent_paths):
+        for path in dict.fromkeys(parent_paths):
+            index = self.model.refresh_path(path)
+            if index.isValid() and self.tree.isExpanded(index):
+                self.model.fetchMore(index)
+
+    def _on_current_changed(self, current, previous):
+        path = self.model.data(current, Qt.ItemDataRole.UserRole)
+        if path:
+            self.scopeChanged.emit(path)
 
 
 class FilterPanel(QFrame):
@@ -2491,24 +2955,19 @@ class FilterPanel(QFrame):
         super().__init__(parent)
         self.setObjectName("sidebar")
         self.setVisible(False)
-        self.setFixedWidth(280)
         self.settings = QSettings("IBMS", "Watchdog")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        scroll = QScrollArea()
-        scroll.setObjectName("filterScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        staging = QWidget()
+        staging_layout = QVBoxLayout(staging)
+        staging_layout.setContentsMargins(0, 0, 0, 0)
+        staging_layout.setSpacing(0)
 
         scroll_content = QWidget()
-        self.filter_scroll_content = scroll_content
-        scroll_content.setObjectName("filterScrollContent")
+        scroll_content.setObjectName("filterStagingContent")
         scroll_content.setMinimumHeight(0)
         scroll_content.setFixedWidth(self.width())
         scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -2516,7 +2975,7 @@ class FilterPanel(QFrame):
         body.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         body.setContentsMargins(0, SPACE_LG, 0, SPACE_MD)
         body.setSpacing(0)
-        scroll.setWidget(scroll_content)
+        staging_layout.addWidget(scroll_content)
 
         search_section = QWidget()
         search_section.setObjectName("searchSection")
@@ -2645,10 +3104,8 @@ class FilterPanel(QFrame):
         self.btn_age_toggle.clicked.connect(lambda: self._toggle_collapsible_section("age"))
         age_outer_layout.addWidget(self.btn_age_toggle)
 
-        accordion_content_width = self.width() - (2 * SPACE_LG)
         self.age_box = QFrame()
         self.age_box.setObjectName("ageControl")
-        self.age_box.setFixedWidth(accordion_content_width)
         age_layout = QVBoxLayout(self.age_box)
         age_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
         age_layout.setSpacing(SPACE_SM)
@@ -2721,7 +3178,6 @@ class FilterPanel(QFrame):
         exclusions_outer_layout.addWidget(self.btn_exclusions_toggle)
 
         self.exclusions_box = QWidget()
-        self.exclusions_box.setFixedWidth(accordion_content_width)
         exclusions_layout = QVBoxLayout(self.exclusions_box)
         exclusions_layout.setContentsMargins(0, SPACE_MD, 0, SPACE_MD)
         exclusions_layout.setSpacing(SPACE_MD)
@@ -2795,7 +3251,7 @@ class FilterPanel(QFrame):
         self.min_size_unit.currentTextChanged.connect(self._save_scan_exclusions_from_controls)
         self.btn_reset_exclusions.clicked.connect(self.reset_scan_exclusions_to_defaults)
         body.addStretch()
-        outer.addWidget(scroll, 1)
+        outer.addWidget(staging, 1)
 
         # Section 4: Actions
         action_box = QWidget()
@@ -2816,39 +3272,334 @@ class FilterPanel(QFrame):
         action_layout.addWidget(self.btn_reset)
         action_layout.addWidget(self.btn_close)
         outer.addWidget(action_box)
+        self._convert_to_horizontal_layout(
+            outer,
+            staging,
+            action_box,
+            search_section,
+            display_section,
+            view_section,
+        )
+
+    def _convert_to_horizontal_layout(
+        self,
+        outer,
+        old_scroll,
+        old_action_box,
+        search_section,
+        display_section,
+        view_section,
+    ):
+        """Move the existing filter controls into a compact two-row bar."""
+        self.setObjectName("filterBar")
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        outer.removeWidget(old_scroll)
+        outer.removeWidget(old_action_box)
+
+        main_row = QWidget()
+        main_row.setObjectName("filterBarMain")
+        main_row.setFixedHeight(56)
+        main_layout = QHBoxLayout(main_row)
+        main_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        main_layout.setSpacing(SPACE_SM)
+
+        search_layout = search_section.layout()
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(0)
+        search_layout.itemAt(0).widget().setVisible(False)
+        self.txt_search.setFixedWidth(180)
+        self.txt_search.setFixedHeight(36)
+        main_layout.addWidget(
+            search_section,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        main_layout.addWidget(self._vline())
+
+        self._make_segment_section_horizontal(
+            display_section,
+            (self.rb_all, self.rb_inactive, self.rb_empty, self.rb_videos),
+        )
+        main_layout.addWidget(
+            display_section,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        main_layout.addWidget(self._vline())
+
+        self._make_segment_section_horizontal(
+            view_section,
+            (self.rb_view_tree, self.rb_view_files, self.rb_view_folders),
+        )
+        main_layout.addWidget(
+            view_section,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        main_layout.addWidget(self._vline())
+        main_layout.addStretch(1)
+
+        self.btn_age_toggle.setParent(main_row)
+        self.btn_age_toggle.setFixedWidth(116)
+        self.btn_age_toggle.setFixedHeight(36)
+        main_layout.addWidget(
+            self.btn_age_toggle,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        self.btn_exclusions_toggle.setParent(main_row)
+        self.btn_exclusions_toggle.setFixedWidth(144)
+        self.btn_exclusions_toggle.setFixedHeight(36)
+        main_layout.addWidget(
+            self.btn_exclusions_toggle,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        self.btn_reset.setParent(main_row)
+        self.btn_reset.setFixedWidth(116)
+        self.btn_reset.setFixedHeight(36)
+        main_layout.addWidget(
+            self.btn_reset,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        self._prepare_filter_popover_contents()
+
+        self.age_popover = FilterPopover(340, self)
+        self.age_popover.set_content(self.age_box)
+        self.age_popover.closed.connect(
+            lambda: self._on_filter_popover_closed("age")
+        )
+
+        self.exclusions_box.setObjectName("exclusionsControl")
+        self.exclusions_popover = FilterPopover(360, self)
+        self.exclusions_popover.set_content(self.exclusions_box)
+        self.exclusions_popover.closed.connect(
+            lambda: self._on_filter_popover_closed("exclusions")
+        )
+
+        self.main_row = main_row
+        outer.addWidget(main_row)
+
+        self.btn_close.setParent(None)
+        self.btn_close.deleteLater()
+        del self.btn_close
+        old_scroll.setParent(None)
+        old_scroll.deleteLater()
+        old_action_box.setParent(None)
+        old_action_box.deleteLater()
+        self._age_section_expanded = False
+        self._exclusions_section_expanded = False
+        self._sync_collapsible_sections()
+
+    def _make_segment_section_horizontal(self, section, buttons):
+        layout = section.layout()
+        label = layout.itemAt(0).widget()
+        while layout.count():
+            layout.takeAt(0)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        label.setVisible(False)
+
+        segments = QHBoxLayout()
+        segments.setContentsMargins(0, 0, 0, 0)
+        segments.setSpacing(SPACE_XS)
+        for button in buttons:
+            button.setFixedWidth(76)
+            button.setFixedHeight(36)
+            segments.addWidget(button)
+        layout.addLayout(segments)
+
+    def _prepare_filter_popover_contents(self):
+        age_layout = self.age_box.layout()
+        while age_layout.count():
+            age_layout.takeAt(0)
+        age_layout.setContentsMargins(0, 0, 0, 0)
+        age_layout.setSpacing(SPACE_MD)
+
+        age_summary = QHBoxLayout()
+        age_summary.setContentsMargins(0, 0, 0, 0)
+        age_summary.setSpacing(SPACE_SM)
+        age_summary.addWidget(self.lbl_pill)
+        self.lbl_val.setMinimumWidth(0)
+        self.lbl_val.setWordWrap(True)
+        age_summary.addWidget(self.lbl_val, 1)
+        age_layout.addLayout(age_summary)
+
+        self.slider.setMinimumWidth(0)
+        age_layout.addWidget(self.slider)
+
+        manual_label = next(
+            (
+                label for label in self.age_box.findChildren(QLabel)
+                if label.objectName() == "manualLabel" and label.text() == "Months"
+            ),
+            None,
+        )
+        manual_row = QHBoxLayout()
+        manual_row.setContentsMargins(0, 0, 0, 0)
+        manual_row.setSpacing(SPACE_SM)
+        if manual_label is not None:
+            manual_row.addWidget(manual_label)
+        manual_row.addWidget(self.age_input, 1)
+        manual_row.addWidget(self.btn_apply_age)
+        age_layout.addLayout(manual_row)
+
+        exclusions_layout = self.exclusions_box.layout()
+        while exclusions_layout.count():
+            exclusions_layout.takeAt(0)
+        exclusions_layout.setContentsMargins(0, 0, 0, 0)
+        exclusions_layout.setSpacing(SPACE_SM)
+
+        detail_labels = {
+            label.text(): label
+            for label in self.exclusions_box.findChildren(QLabel)
+            if label.objectName() == "manualLabel"
+        }
+        folders_label = detail_labels.get("Folders")
+        extensions_label = detail_labels.get("Extensions")
+        size_label = detail_labels.get("Ignore under:")
+        if folders_label is not None:
+            exclusions_layout.addWidget(folders_label)
+        self.txt_excluded_folders.setMinimumWidth(0)
+        exclusions_layout.addWidget(self.txt_excluded_folders)
+        if extensions_label is not None:
+            exclusions_layout.addWidget(extensions_label)
+        self.txt_excluded_extensions.setMinimumWidth(0)
+        exclusions_layout.addWidget(self.txt_excluded_extensions)
+
+        size_row = QHBoxLayout()
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(SPACE_SM)
+        if size_label is not None:
+            size_row.addWidget(size_label)
+        size_row.addStretch()
+        size_row.addWidget(self.min_size_input)
+        size_row.addWidget(self.min_size_unit)
+        exclusions_layout.addLayout(size_row)
+
+        self.lbl_exclusions_hint.setMaximumWidth(16777215)
+        exclusions_layout.addWidget(self.lbl_exclusions_hint)
+        exclusions_layout.addWidget(
+            self.btn_reset_exclusions,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
 
     def _make_accordion_header(self, text):
         return AccordionHeader(text, self)
 
     def _toggle_collapsible_section(self, section):
         if section == "age":
-            self._age_section_expanded = not self._age_section_expanded
+            if (
+                hasattr(self, "age_popover")
+                and (
+                    self.age_popover.isVisible()
+                    or self.age_popover.recently_hidden()
+                )
+            ):
+                self._age_section_expanded = False
+            else:
+                self._age_section_expanded = True
+                self._exclusions_section_expanded = False
         elif section == "exclusions":
-            self._exclusions_section_expanded = not self._exclusions_section_expanded
+            if (
+                hasattr(self, "exclusions_popover")
+                and (
+                    self.exclusions_popover.isVisible()
+                    or self.exclusions_popover.recently_hidden()
+                )
+            ):
+                self._exclusions_section_expanded = False
+            else:
+                self._exclusions_section_expanded = True
+                self._age_section_expanded = False
         self._sync_collapsible_sections()
 
     def _sync_collapsible_sections(self):
-        if hasattr(self, 'age_box'):
+        self._update_popover_summaries()
+        if hasattr(self, 'age_popover'):
+            self.age_box.setVisible(True)
+            self.exclusions_box.setVisible(True)
+            if self._age_section_expanded and self.isVisible():
+                self.exclusions_popover.hide()
+                self.age_popover.show_below(self.btn_age_toggle)
+            else:
+                self.age_popover.hide()
+            if self._exclusions_section_expanded and self.isVisible():
+                self.age_popover.hide()
+                self.exclusions_popover.show_below(self.btn_exclusions_toggle)
+            else:
+                self.exclusions_popover.hide()
+        elif hasattr(self, 'age_box'):
             self.age_box.setVisible(self._age_section_expanded)
             self.age_box.updateGeometry()
+            self.exclusions_box.setVisible(self._exclusions_section_expanded)
+            self.exclusions_box.updateGeometry()
         if hasattr(self, 'btn_age_toggle'):
             self.btn_age_toggle.set_expanded(self._age_section_expanded)
             self.btn_age_toggle.updateGeometry()
-        if hasattr(self, 'exclusions_box'):
-            self.exclusions_box.setVisible(self._exclusions_section_expanded)
-            self.exclusions_box.updateGeometry()
         if hasattr(self, 'btn_exclusions_toggle'):
             self.btn_exclusions_toggle.set_expanded(self._exclusions_section_expanded)
             self.btn_exclusions_toggle.updateGeometry()
-        if hasattr(self, 'filter_scroll_content'):
-            self.filter_scroll_content.setFixedWidth(self.width())
-            layout = self.filter_scroll_content.layout()
-            if layout is not None:
-                layout.invalidate()
-                layout.activate()
-            self.filter_scroll_content.setFixedWidth(self.width())
-            self.filter_scroll_content.updateGeometry()
         self.updateGeometry()
+
+    def _on_filter_popover_closed(self, section):
+        if section == "age":
+            self._age_section_expanded = False
+            self.btn_age_toggle.set_expanded(False)
+        elif section == "exclusions":
+            self._exclusions_section_expanded = False
+            self.btn_exclusions_toggle.set_expanded(False)
+
+    def close_popovers(self):
+        self._age_section_expanded = False
+        self._exclusions_section_expanded = False
+        if hasattr(self, "age_popover"):
+            self.age_popover.hide()
+        if hasattr(self, "exclusions_popover"):
+            self.exclusions_popover.hide()
+        if hasattr(self, "btn_age_toggle"):
+            self.btn_age_toggle.set_expanded(False)
+        if hasattr(self, "btn_exclusions_toggle"):
+            self.btn_exclusions_toggle.set_expanded(False)
+
+    def _update_popover_summaries(self):
+        if hasattr(self, "btn_age_toggle") and hasattr(self, "applied_age_value"):
+            age_text = (
+                "Off"
+                if self.applied_age_value == self.AGE_FILTER_DISABLED
+                else f"{self.applied_age_value}mo"
+            )
+            self.btn_age_toggle.set_text(f"Age: {age_text}")
+        if hasattr(self, "btn_exclusions_toggle") and hasattr(
+            self,
+            "txt_excluded_folders",
+        ):
+            exclusions = self._scan_exclusions_from_controls()
+            if exclusions.differs_from_default():
+                current = exclusions.to_dict()
+                default = ScanExclusions().to_dict()
+                rule_count = (
+                    len(
+                        set(current["folder_names"])
+                        ^ set(default["folder_names"])
+                    )
+                    + len(
+                        set(current["extensions"])
+                        ^ set(default["extensions"])
+                    )
+                    + int(
+                        current["min_file_size_bytes"]
+                        != default["min_file_size_bytes"]
+                    )
+                )
+                summary = f"{rule_count} rule{'s' if rule_count != 1 else ''}"
+            else:
+                summary = "Default"
+            self.btn_exclusions_toggle.set_text(f"Exclusions: {summary}")
 
     def _update_age_label(self, value):
         palette = current_palette()
@@ -2931,6 +3682,7 @@ class FilterPanel(QFrame):
     def _save_scan_exclusions_from_controls(self):
         exclusions = self._scan_exclusions_from_controls()
         self.settings.setValue("scan_exclusions", json.dumps(exclusions.to_dict()))
+        self._update_popover_summaries()
         self.exclusionChanged.emit()
 
     def _normalize_and_save_scan_exclusions(self):
@@ -2998,6 +3750,7 @@ class FilterPanel(QFrame):
         self.applied_age_value = self.AGE_FILTER_DISABLED
         self._update_age_label(self.AGE_FILTER_DISABLED)
         self._update_age_apply_state()
+        self._update_popover_summaries()
 
     def eventFilter(self, obj, event):
         if (
@@ -3049,6 +3802,10 @@ class MainWindow(QMainWindow):
         self.page_load_request_id = 0
         self.lazy_child_threads = {}
         self.lazy_child_request_id = 0
+        self.folder_browser_threads = {}
+        self.folder_browser_request_id = 0
+        self.folder_browser_scope = None
+        self.folder_browser_live_refresh_at = 0.0
         self.totals_thread = None
         self.totals_threads = []
         self.totals_request_id = 0
@@ -3215,9 +3972,9 @@ class MainWindow(QMainWindow):
         vbox.setSpacing(0)
 
         # Top bar
-        topbar = QWidget()
-        topbar.setObjectName("topbar")
-        tb = QHBoxLayout(topbar)
+        self.topbar = QWidget()
+        self.topbar.setObjectName("topbar")
+        tb = QHBoxLayout(self.topbar)
         tb.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         tb.setSpacing(SPACE_MD)
 
@@ -3228,32 +3985,50 @@ class MainWindow(QMainWindow):
         self.txt_path = QLineEdit()
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.txt_path.setMinimumWidth(240)
+        self.txt_path.setFixedHeight(38)
         self.txt_path.setPlaceholderText("Enter or browse a folder path...")
         
         # Add folder icon to the left of the path input
         path_icon = QIcon.fromTheme("folder-open", QIcon.fromTheme("folder"))
         self.txt_path.addAction(path_icon, QLineEdit.ActionPosition.LeadingPosition)
 
-        btn_browse = QPushButton("Browse")
-        btn_browse.setObjectName("primaryBtn")
-        btn_browse.setToolTip("Browse folder")
-        btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_browse.clicked.connect(self._browse)
+        self.btn_browse = QPushButton("Browse")
+        self.btn_browse.setObjectName("primaryBtn")
+        self.btn_browse.setToolTip("Browse folder")
+        self.btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_browse.setFixedHeight(38)
+        self.btn_browse.clicked.connect(self._browse)
         tb.addWidget(self.txt_path)
-        tb.addWidget(btn_browse)
+        tb.addWidget(self.btn_browse)
 
         self.btn_rescan = QPushButton("Re-scan")
         self.btn_rescan.setObjectName("primaryBtn")
         self.btn_rescan.setToolTip("Start scanning the selected folder path")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_rescan.setFixedHeight(38)
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
+
+        self.btn_folder_browser = QPushButton()
+        self.btn_folder_browser.setObjectName("ghostBtn")
+        self.btn_folder_browser.setCheckable(True)
+        self.btn_folder_browser.setChecked(True)
+        self.btn_folder_browser.setToolTip("Toggle folder browser")
+        self.btn_folder_browser.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_folder_browser.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "folder_blue.svg"))
+        )
+        self.btn_folder_browser.setIconSize(QSize(18, 18))
+        self.btn_folder_browser.setFixedSize(38, 38)
+        self.btn_folder_browser.clicked.connect(self._toggle_folder_browser)
+        tb.addWidget(self.btn_folder_browser)
 
         self.btn_filter = QPushButton("Filters")
         self.btn_filter.setObjectName("ghostBtn")
         self.btn_filter.setCheckable(True)
-        self.btn_filter.setToolTip("Toggle filter sidebar (Alt+F)")
+        self.btn_filter.setToolTip("Toggle filter bar (Alt+F)")
         self.btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_filter.setFixedHeight(38)
         self.btn_filter.clicked.connect(self._toggle_filters)
         tb.addWidget(self.btn_filter)
 
@@ -3261,6 +4036,7 @@ class MainWindow(QMainWindow):
         self.btn_file_types.setObjectName("ghostBtn")
         self.btn_file_types.setToolTip("File Types: show disk usage by extension")
         self.btn_file_types.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_file_types.setFixedHeight(38)
         self.btn_file_types.setEnabled(False)
         self.btn_file_types.clicked.connect(self._show_file_types)
         tb.addWidget(self.btn_file_types)
@@ -3271,6 +4047,7 @@ class MainWindow(QMainWindow):
         self.theme_selector.addItem("Dark", "dark")
         self.theme_selector.setToolTip("Switch theme")
         self.theme_selector.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_selector.setFixedHeight(38)
         theme_index = self.theme_selector.findData(self.current_theme_name)
         self.theme_selector.setCurrentIndex(max(0, theme_index))
         self.theme_selector.currentIndexChanged.connect(self._on_theme_changed)
@@ -3287,32 +4064,39 @@ class MainWindow(QMainWindow):
         tb.addStretch()
         tb.addWidget(self._vbar())
 
-        btn_export = QPushButton("Export CSV")
-        btn_export.setObjectName("primaryBtn")
-        btn_export.setToolTip("Export the current view to CSV")
-        btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_export.clicked.connect(self._export_csv)
-        tb.addWidget(btn_export)
+        self.btn_export = QPushButton("Export CSV")
+        self.btn_export.setObjectName("primaryBtn")
+        self.btn_export.setToolTip("Export the current view to CSV")
+        self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_export.setFixedHeight(38)
+        self.btn_export.clicked.connect(self._export_csv)
+        tb.addWidget(self.btn_export)
 
         self.btn_delete = QPushButton("Delete Selected")
         self.btn_delete.setObjectName("deleteBtn")
         self.btn_delete.setToolTip("Permanently delete selected items")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_delete.setFixedHeight(38)
         self.btn_delete.clicked.connect(self._delete_selected)
         self._set_delete_armed(False)
         self.btn_delete.setEnabled(False)
         tb.addWidget(self.btn_delete)
 
-        vbox.addWidget(topbar)
+        vbox.addWidget(self.topbar)
 
         # Main Content Area (Sidebar + Content)
         main_area = QHBoxLayout()
         main_area.setContentsMargins(0, 0, 0, 0)
         main_area.setSpacing(0)
 
-        # Left Sidebar (Filters)
+        # Left sidebar (folder browser only)
+        self.folder_browser = FolderBrowserPanel()
+        self.folder_browser.closeRequested.connect(self._toggle_folder_browser)
+        self.folder_browser.scopeChanged.connect(self._on_folder_browser_scope_changed)
+        self.folder_browser.loadRequested.connect(self._load_folder_browser_children)
+        main_area.addWidget(self.folder_browser)
+
         self.fp = FilterPanel()
-        self.fp.btn_close.clicked.connect(self._toggle_filters)
         self.fp.btn_reset.clicked.connect(self._reset_filters)
         # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
@@ -3330,7 +4114,7 @@ class MainWindow(QMainWindow):
         self._apply_default_browse_preset(apply_now=False)
         self._update_age_controls_enabled()
         self._update_expand_control_visibility()
-        main_area.addWidget(self.fp)
+        vbox.addWidget(self.fp)
 
         # Right Content Area
         self.right_content = QWidget()
@@ -3338,6 +4122,27 @@ class MainWindow(QMainWindow):
         right_v = QVBoxLayout(self.right_content)
         right_v.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
         right_v.setSpacing(SPACE_LG)
+
+        self.folder_scope_bar = QWidget()
+        scope_layout = QHBoxLayout(self.folder_scope_bar)
+        scope_layout.setContentsMargins(0, 0, 0, 0)
+        scope_layout.setSpacing(SPACE_SM)
+        self.folder_scope_label = QLabel("Viewing: All folders")
+        self.folder_scope_label.setObjectName("pageInfo")
+        self.folder_scope_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.btn_clear_folder_scope = QPushButton("Back to root")
+        self.btn_clear_folder_scope.setObjectName("ghostBtn")
+        self.btn_clear_folder_scope.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_folder_scope.setToolTip("Clear folder scope")
+        self.btn_clear_folder_scope.clicked.connect(self._clear_folder_browser_scope)
+        scope_layout.addWidget(self.folder_scope_label, 1)
+        scope_layout.addWidget(self.btn_clear_folder_scope)
+        self.folder_scope_bar.setVisible(False)
+        self.btn_clear_folder_scope.setVisible(False)
+        right_v.addWidget(self.folder_scope_bar)
 
         # Controls row (above tree): expand / select all
         self.controls_bar = QWidget()
@@ -3750,13 +4555,9 @@ class MainWindow(QMainWindow):
         elapsed = 0.0 if not detail else detail.get("elapsed_secs", 0.0)
         rate = 0.0 if not detail else detail.get("rate", 0.0)
         scanned = 0 if not detail else detail.get("scanned", 0) or 0
-        percent = None if not detail else detail.get("percent")
-        eta_secs = None if not detail else detail.get("eta_secs")
 
         rate_text = "rate calculating..." if rate <= 0 else f"{rate:,.0f} items/sec"
         parts = [f"{scanned:,} items scanned", rate_text, f"{self._format_scan_duration(elapsed)} elapsed"]
-        if percent is not None and eta_secs is not None:
-            parts.append(f"~{self._format_scan_duration(eta_secs)} remaining ({percent:.0f}%)")
         return " - ".join(parts)
 
     def _set_scan_stats(self, detail=None):
@@ -3890,31 +4691,163 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(0, name_width)
 
     # -------------------------------------------------------------------------
-    # Filter panel
+    # Folder browser and filter panel
     # -------------------------------------------------------------------------
 
+    def _toggle_folder_browser(self):
+        is_visible = self.folder_browser.isVisible()
+        self.folder_browser.setVisible(not is_visible)
+        self.btn_folder_browser.setChecked(not is_visible)
+
+    def _folder_scope_display_text(self):
+        scope = self.folder_browser_scope
+        root = (
+            getattr(self.folder_browser, 'root_path', None)
+            or getattr(self, 'current_scan_root', None)
+        )
+        if not root or not scope:
+            return "Viewing: All folders"
+        try:
+            relative = os.path.relpath(scope, root)
+        except ValueError:
+            relative = scope
+        root_name = os.path.basename(os.path.normpath(root).rstrip("\\/")) or root
+        display_path = root_name if relative == "." else os.path.join(root_name, relative)
+        return f"Viewing: {display_path}"
+
+    def _update_folder_scope_bar(self):
+        has_scan_root = bool(
+            getattr(self, 'current_scan_root', None)
+            and getattr(self.folder_browser, 'root_path', None)
+        )
+        self.folder_scope_bar.setVisible(has_scan_root)
+        text = self._folder_scope_display_text()
+        self.folder_scope_label.setText(text)
+        self.folder_scope_label.setToolTip(
+            self.folder_browser_scope
+            or self.folder_browser.root_path
+            or self.current_scan_root
+            or ""
+        )
+        self.btn_clear_folder_scope.setVisible(bool(self.folder_browser_scope))
+
+    def _set_folder_browser_scope(self, path, reload=True):
+        root = getattr(self, 'current_scan_root', None)
+        normalized = os.path.normpath(path) if path else None
+        if root and normalized and self._path_key(normalized) == self._path_key(root):
+            normalized = None
+        if normalized == self.folder_browser_scope:
+            return
+        self.folder_browser_scope = normalized
+        self._update_folder_scope_bar()
+        if reload:
+            self._on_filter_changed()
+
+    def _on_folder_browser_scope_changed(self, path):
+        self._set_folder_browser_scope(path)
+
+    def _clear_folder_browser_scope(self):
+        self.folder_browser.select_root()
+        self._set_folder_browser_scope(None)
+
+    def _load_folder_browser_children(self, folder_path):
+        if not folder_path or not getattr(self, 'current_scan_root', None):
+            return
+        cache = getattr(self, 'folder_cache', None)
+        if cache:
+            children = []
+            if cache.has_children_for(folder_path):
+                children = [
+                    child
+                    for child in cache.children_for(folder_path, 0, False)
+                    if child.get('is_dir', False)
+                ]
+            if children:
+                self.folder_browser.apply_children(folder_path, children)
+                return
+            if self.is_scanning:
+                # The live cache may not contain this folder yet. Leave the node
+                # fetchable so a later progress refresh can populate it.
+                self.folder_browser.defer_load(folder_path)
+                return
+        self.folder_browser_request_id += 1
+        request_id = self.folder_browser_request_id
+        thread = LazyChildrenLoadThread(
+            request_id,
+            folder_path,
+            sort_column=0,
+            sort_desc=False,
+            options=None,
+            cache=cache,
+            folders_only=True,
+            parent=self,
+        )
+        self.folder_browser_threads[request_id] = thread
+        thread.children_ready.connect(self._on_folder_browser_children_ready)
+        thread.children_failed.connect(self._on_folder_browser_children_failed)
+        thread.finished.connect(
+            lambda request_id=request_id: self.folder_browser_threads.pop(request_id, None)
+        )
+        thread.start()
+
+    def _on_folder_browser_children_ready(self, request_id, folder_path, children):
+        if request_id not in self.folder_browser_threads:
+            return
+        self.folder_browser.apply_children(folder_path, children)
+
+    def _on_folder_browser_children_failed(self, request_id, folder_path, error):
+        if request_id not in self.folder_browser_threads:
+            return
+        self.folder_browser.mark_load_failed(folder_path)
+
+    def _reset_folder_browser(self, root_path=None):
+        self.folder_browser_request_id += 1
+        self.folder_browser_threads.clear()
+        self.folder_browser_scope = None
+        self.folder_browser.set_root(root_path)
+        self._update_folder_scope_bar()
+
+    def _refresh_folder_browser_from_cache(self, force=False):
+        cache = getattr(self, 'folder_cache', None)
+        root_path = getattr(self, 'current_scan_root', None)
+        if not cache or not root_path or not hasattr(self, 'folder_browser'):
+            return
+
+        now = time.monotonic()
+        if not force and now - self.folder_browser_live_refresh_at < 0.75:
+            return
+        self.folder_browser_live_refresh_at = now
+
+        browser_root = self.folder_browser.root_path
+        if not browser_root or _path_key(browser_root) != _path_key(root_path):
+            self._reset_folder_browser(root_path)
+
+        model = self.folder_browser.model
+        nodes = list(model.nodes_by_path.values())
+        for node in nodes:
+            index = model.index_for_path(node.path)
+            should_refresh = (
+                _path_key(node.path) == _path_key(root_path)
+                or node.loaded
+                or (index.isValid() and self.folder_browser.tree.isExpanded(index))
+            )
+            if not should_refresh or not cache.has_children_for(node.path):
+                continue
+            children = [
+                child
+                for child in cache.children_for(node.path, 0, False)
+                if child.get('is_dir', False)
+            ]
+            if children:
+                self.folder_browser.merge_children(node.path, children)
+            elif self.is_scanning and not node.loaded:
+                self.folder_browser.defer_load(node.path)
+
     def _toggle_filters(self):
-        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
-        
         is_visible = self.fp.isVisible()
-        target_width = 280 if not is_visible else 0
-        
-        # Ensure it's ready for animation
-        if not is_visible:
-            self.fp.setVisible(True)
-            self.fp.setMinimumWidth(0)
-            self.fp.setMaximumWidth(0)
-            
-        self.sidebar_anim = QPropertyAnimation(self.fp, b"maximumWidth")
-        self.sidebar_anim.setDuration(250)
-        self.sidebar_anim.setStartValue(self.fp.width())
-        self.sidebar_anim.setEndValue(target_width)
-        self.sidebar_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        
         if is_visible:
-            self.sidebar_anim.finished.connect(lambda: self.fp.setVisible(False))
-            
-        self.sidebar_anim.start()
+            self.fp.close_popovers()
+        self.fp.setVisible(not is_visible)
         self.btn_filter.setChecked(not is_visible)
 
     def _apply_filters(self):
@@ -4263,6 +5196,7 @@ class MainWindow(QMainWindow):
             filter_mode,
             age_value,
             options.get('name_filter', ''),
+            options.get('folder_scope'),
             options.get('page'),
             bool(options.get('lazy_show_all_tree')),
             bool(options.get('filtered_expanded_tree')),
@@ -4473,6 +5407,7 @@ class MainWindow(QMainWindow):
         self.fp.age_input.interpretText()
         self.fp.applied_age_value = self.fp.age_input.value()
         self.fp._update_age_apply_state()
+        self.fp._update_popover_summaries()
         self._on_filter_changed()
 
     def _on_videos_mode_toggled(self, checked):
@@ -4714,6 +5649,11 @@ class MainWindow(QMainWindow):
             where_clauses.append("is_folder = 0")
             where_clauses.append("extension = ? COLLATE NOCASE")
             params.append(self.active_extension_filter)
+
+        if self.folder_browser_scope:
+            scope_sql, scope_params = descendant_like_sql(self.folder_browser_scope)
+            where_clauses.append(f"({scope_sql})")
+            params.extend(scope_params)
 
         scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         if scan_root:
@@ -5400,6 +6340,7 @@ class MainWindow(QMainWindow):
         self.folder_cache = None
         self.current_scan_root = None
         self.active_extension_filter = None
+        self._reset_folder_browser(None)
 
         # Reset pagination state
         self.current_page = 0
@@ -5519,6 +6460,9 @@ class MainWindow(QMainWindow):
             estimated_total_items=estimated_total_items,
         )
         self.folder_cache = self.scanner_thread.cache
+        self.folder_browser_live_refresh_at = 0.0
+        self.folder_browser.setEnabled(True)
+        self._reset_folder_browser(self.current_scan_root)
         self.scanner_thread.scan_started.connect(self._on_scan_started)
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_exclusions_summary.connect(self._on_scan_exclusions_summary)
@@ -5540,6 +6484,7 @@ class MainWindow(QMainWindow):
         self.last_scan_item_count = detail.get("scanned", 0) or 0
         self._set_scan_stats(detail)
         self.lbl_status.setText(f"Scanning - {self._scan_stats_text(detail)}")
+        self._refresh_folder_browser_from_cache()
 
     def _on_scan_started(self):
         if self.is_scanning:
@@ -5562,6 +6507,7 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _on_first_batch_ready(self):
+        self._refresh_folder_browser_from_cache(force=True)
         options = self._page_load_options()
         if options.get('defer_tree_load_until_scan_done') and not self._can_live_load_from_cache(options):
             return
@@ -5570,6 +6516,7 @@ class MainWindow(QMainWindow):
 
     def _on_batch_ready(self):
         """Called during scanning when a new batch of items is indexed."""
+        self._refresh_folder_browser_from_cache(force=True)
         # Counting matches can be expensive on large scans, so throttle it.
         if self.content_stack.currentIndex() == 3:
             options = self._page_load_options()
@@ -5646,6 +6593,11 @@ class MainWindow(QMainWindow):
             elif view_mode == 'Folders':
                 where_clauses.append("is_folder = 1")
 
+            if self.folder_browser_scope:
+                scope_sql, scope_params = descendant_like_sql(self.folder_browser_scope)
+                where_clauses.append(f"({scope_sql})")
+                params.extend(scope_params)
+
             scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
             if scan_root:
                 where_clauses.append("path != ? COLLATE NOCASE")
@@ -5676,6 +6628,9 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("Re-scan")
         self.btn_rescan.setStyleSheet("") # reset style
         self.is_scanning = False
+        if hasattr(self, 'folder_browser'):
+            self.folder_browser.setEnabled(True)
+            self._refresh_folder_browser_from_cache(force=True)
         self._update_file_types_enabled()
         
         if finished_thread and finished_thread.is_cancelled:
@@ -5697,7 +6652,6 @@ class MainWindow(QMainWindow):
                 cancelled=False,
             ):
                 self._show_system_notification("Scan complete", completion_message)
-
         if self.content_stack.currentIndex() in (0, 2, 3):
             self._load_page()
         elif self.content_stack.currentIndex() == 1:
@@ -5794,6 +6748,7 @@ class MainWindow(QMainWindow):
         paginated = True
         name_filter = self.applied_name_filter
         extension_filter = self.active_extension_filter
+        folder_scope = self.folder_browser_scope
 
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
@@ -5815,6 +6770,7 @@ class MainWindow(QMainWindow):
             and age_cutoff is None
             and not name_filter
             and extension_filter is None
+            and folder_scope is None
         )
         filtered_expanded_tree = (
             view_mode == 'Tree'
@@ -5842,6 +6798,7 @@ class MainWindow(QMainWindow):
             'videos_only': self.fp.rb_videos.isChecked(),
             'name_filter': name_filter,
             'extension_filter': extension_filter,
+            'folder_scope': folder_scope,
             'sort_column': self.sort_column,
             'sort_desc': self.sort_order == Qt.SortOrder.DescendingOrder,
             'scan_root': getattr(self, 'current_scan_root', os.path.normpath(self.txt_path.text().strip() or "")),
@@ -6882,11 +7839,31 @@ class MainWindow(QMainWindow):
         if not enabled:
             self.btn_delete.setEnabled(False)
         self.btn_rescan.setEnabled(enabled)
+        self.btn_folder_browser.setEnabled(enabled)
         self.btn_filter.setEnabled(enabled)
         if hasattr(self, 'btn_file_types'):
             self.btn_file_types.setEnabled(enabled and self._has_completed_scan_context())
         self.controls_bar.setEnabled(enabled)
         self.tree.setEnabled(enabled)
+        self.folder_browser.setEnabled(enabled)
+
+    def _refresh_folder_browser_after_delete(self, deleted_paths):
+        if not deleted_paths or not self.folder_browser.root_path:
+            return
+        deleted_keys = [_path_key(path) for path in deleted_paths if path]
+        deleted_index = PathKeyIndex(deleted_keys)
+        if (
+            self.folder_browser_scope
+            and deleted_index.has_ancestor(_path_key(self.folder_browser_scope))
+        ):
+            self.folder_browser.select_root()
+            self._set_folder_browser_scope(None, reload=False)
+        parent_paths = [
+            os.path.dirname(os.path.normpath(path))
+            for path in deleted_paths
+            if path
+        ]
+        self.folder_browser.refresh_paths(parent_paths)
 
     def _authorize_delete(self, item_count, total_size=0):
         dialog = DeleteAuthDialog(item_count, total_size, self)
@@ -6961,6 +7938,8 @@ class MainWindow(QMainWindow):
                 self.cached_folder_total = None
                 self.cached_folder_total_root = None
             self._remove_deleted_paths_from_selection(deleted_paths)
+            if hasattr(self, '_refresh_folder_browser_after_delete'):
+                self._refresh_folder_browser_after_delete(deleted_paths)
         self._set_delete_controls_enabled(True)
         self._load_page()
         if deleted_paths:

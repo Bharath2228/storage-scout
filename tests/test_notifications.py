@@ -1,5 +1,5 @@
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest import mock
 
 from PyQt6.QtWidgets import QSystemTrayIcon
@@ -113,6 +113,26 @@ class CompletionNotificationTests(unittest.TestCase):
         self.assertFalse(
             MainWindow._show_system_notification(failing_window, "Title", "Message")
         )
+
+    def test_scan_stats_do_not_show_remaining_time(self):
+        window = SimpleNamespace(
+            _format_scan_duration=MethodType(MainWindow._format_scan_duration, object()),
+        )
+
+        text = MainWindow._scan_stats_text(
+            window,
+            {
+                "elapsed_secs": 12,
+                "rate": 44.4,
+                "scanned": 1200,
+                "percent": 50,
+                "eta_secs": 12,
+            },
+        )
+
+        self.assertEqual(text, "1,200 items scanned - 44 items/sec - 00:12 elapsed")
+        self.assertNotIn("remaining", text.lower())
+        self.assertNotIn("eta", text.lower())
 
     def test_unavailable_system_tray_is_skipped(self):
         window = SimpleNamespace(tray_icon=object())
