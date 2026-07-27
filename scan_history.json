@@ -7,11 +7,11 @@
     "total_size": 180470301570
   },
   "c:\\users\\bharath\\desktop": {
-    "item_count": 28386,
-    "last_scan_duration_secs": 2.4716660999984015,
-    "last_scanned_at": 1785092036.8288033,
+    "item_count": 28389,
+    "last_scan_duration_secs": 7.698522000000139,
+    "last_scanned_at": 1785139811.2736712,
     "root": "c:\\users\\bharath\\desktop",
-    "total_size": 70617480410
+    "total_size": 70911143075
   },
   "c:\\users\\bharath\\desktop\\germany\\hochschule offenburg": {
     "item_count": 1113,
@@ -22,9 +22,9 @@
   },
   "c:\\users\\bharath\\desktop\\ibms\\watchdog": {
     "item_count": 52,
-    "last_scan_duration_secs": 0.13142159998824354,
-    "last_scanned_at": 1785091925.0752594,
+    "last_scan_duration_secs": 0.544997399993008,
+    "last_scanned_at": 1785136765.8587327,
     "root": "c:\\users\\bharath\\desktop\\ibms\\watchdog",
-    "total_size": 421122300
+    "total_size": 421128825
   }
 }

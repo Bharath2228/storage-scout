@@ -48,14 +48,18 @@ def list_users(store: AuthStore) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Manage IBMS Watchdog delete authorization users.")
-    parser.add_argument("--store", default="auth_store.json", help="Path to auth_store.json")
+    parser.add_argument(
+        "--store",
+        default=None,
+        help="Path to auth_store.json (defaults to the application data directory)",
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--add-user", metavar="USERNAME")
     group.add_argument("--remove-user", metavar="USERNAME")
     group.add_argument("--list-users", action="store_true")
     args = parser.parse_args(argv)
 
-    store = AuthStore(args.store)
+    store = AuthStore(args.store) if args.store else AuthStore()
     if args.add_user:
         return add_user(store, args.add_user)
     if args.remove_user:

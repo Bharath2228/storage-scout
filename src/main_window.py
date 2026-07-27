@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QRadioButton, QSlider, QTreeView, QHeaderView,
+    QPushButton, QRadioButton, QSlider, QTreeView, QHeaderView, QGridLayout,
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
@@ -34,6 +34,7 @@ from .theme import (
     apply_theme,
     current_palette,
     resolve_theme_name,
+    safe_point_size,
 )
 
 VIDEO_EXTENSIONS = (
@@ -703,9 +704,6 @@ class DeletePreviewDialog(QDialog):
 
 
 class DeleteAuthDialog(QDialog):
-    consecutive_failures = 0
-    lockout_until = 0.0
-
     def __init__(self, item_count, total_size=0, parent=None):
         super().__init__(parent)
         self.authorized_username = None
@@ -766,13 +764,14 @@ class DeleteAuthDialog(QDialog):
 
         self.password_input.returnPressed.connect(self._submit)
         self.username_input.returnPressed.connect(self.password_input.setFocus)
+        self.username_input.textChanged.connect(self._update_lockout_state)
         self.cooldown_timer = QTimer(self)
         self.cooldown_timer.setInterval(1000)
         self.cooldown_timer.timeout.connect(self._update_lockout_state)
         self._update_lockout_state()
 
     def _update_lockout_state(self):
-        remaining = int(max(0, DeleteAuthDialog.lockout_until - time.time()))
+        remaining = self.store.lockout_remaining(self.username_input.text())
         if remaining > 0:
             self.submit_button.setEnabled(False)
             self.message_label.setText(f"Too many failed attempts - try again in {remaining}s.")
@@ -798,11 +797,10 @@ class DeleteAuthDialog(QDialog):
         if not self.submit_button.isEnabled():
             return
 
-        username = self.username_input.text().strip()
+        attempted_username = self.username_input.text()
+        username = attempted_username.strip()
         password = self.password_input.text()
-        if self.store.verify(username, password):
-            DeleteAuthDialog.consecutive_failures = 0
-            DeleteAuthDialog.lockout_until = 0.0
+        if self.store.verify(attempted_username, password):
             self.authorized_username = self.store.canonical_username(username)
             append_delete_audit(
                 "delete_authorized",
@@ -813,7 +811,6 @@ class DeleteAuthDialog(QDialog):
             self.accept()
             return
 
-        DeleteAuthDialog.consecutive_failures += 1
         append_delete_audit(
             "delete_denied",
             username="UNKNOWN",
@@ -824,9 +821,7 @@ class DeleteAuthDialog(QDialog):
         )
         self.password_input.clear()
         self.message_label.setText("Invalid username or password.")
-        if DeleteAuthDialog.consecutive_failures >= 3:
-            DeleteAuthDialog.lockout_until = time.time() + 30
-            self._update_lockout_state()
+        self._update_lockout_state()
 
 
 class FileTypeBreakdownThread(QThread):
@@ -2118,7 +2113,7 @@ class StatusDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(pill, 10, 10)
         
         f = QFont(FONT_FAMILY)
-        f.setPixelSize(TYPE_SCALE["muted"]["size_px"])
+        f.setPointSize(safe_point_size(TYPE_SCALE["muted"]["point_size"], 8))
         f.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
 
 
@@ -2198,7 +2193,7 @@ class ActionDelegate(QStyledItemDelegate):
             painter.setPen(QPen(QColor(palette["status_danger"]), 1))
             painter.drawRoundedRect(btn, 10, 10) # Rounded capsule
             f = QFont(FONT_FAMILY)
-            f.setPixelSize(TYPE_SCALE["muted"]["size_px"])
+            f.setPointSize(safe_point_size(TYPE_SCALE["muted"]["point_size"], 8))
             f.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
 
 
@@ -2215,7 +2210,7 @@ class ActionDelegate(QStyledItemDelegate):
             painter.setPen(QPen(QColor(palette["accent"]), 1.2))
             painter.drawRoundedRect(btn, 5, 5)
             f = QFont(FONT_FAMILY)
-            f.setPixelSize(TYPE_SCALE["muted"]["size_px"])
+            f.setPointSize(safe_point_size(TYPE_SCALE["muted"]["point_size"], 8))
             f.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
             painter.setFont(f)
             painter.setPen(QColor(palette["accent"]))
@@ -2225,6 +2220,41 @@ class ActionDelegate(QStyledItemDelegate):
 # ---------------------------------------------------------------------------
 # Filter Panel (standalone widget)
 # ---------------------------------------------------------------------------
+
+class AccordionHeader(QFrame):
+    clicked = pyqtSignal()
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.setObjectName("accordionHeader")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE_SM)
+
+        self.chevron = QLabel()
+        self.chevron.setObjectName("accordionChevron")
+        self.chevron.setFixedWidth(18)
+        self.chevron.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.title = QLabel(text)
+        self.title.setObjectName("accordionTitle")
+        self.title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        layout.addWidget(self.chevron)
+        layout.addWidget(self.title, 1)
+
+    def set_expanded(self, expanded):
+        self.chevron.setText("▾" if expanded else "▸")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 class FilterPanel(QFrame):
     searchCleared = pyqtSignal()
@@ -2256,11 +2286,13 @@ class FilterPanel(QFrame):
         scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         scroll_content = QWidget()
+        self.filter_scroll_content = scroll_content
         scroll_content.setObjectName("filterScrollContent")
         scroll_content.setMinimumHeight(0)
+        scroll_content.setFixedWidth(self.width())
         scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         body = QVBoxLayout(scroll_content)
-        body.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        body.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         body.setContentsMargins(0, SPACE_LG, 0, SPACE_MD)
         body.setSpacing(0)
         scroll.setWidget(scroll_content)
@@ -2297,6 +2329,9 @@ class FilterPanel(QFrame):
         body.addWidget(search_section)
         body.addSpacing(SPACE_XL)
 
+        self._age_section_expanded = False
+        self._exclusions_section_expanded = False
+
         # Section 1: Display Mode
         display_section = QWidget()
         display_section.setObjectName("displayModeSection")
@@ -2315,11 +2350,23 @@ class FilterPanel(QFrame):
         self.rb_videos   = QRadioButton("Videos only")
         self.rb_all.setChecked(True)
         self.bg = QButtonGroup()
+        segment_width = (self.width() - (2 * SPACE_LG) - SPACE_SM) // 2
+        display_grid = QGridLayout()
+        display_grid.setContentsMargins(0, 0, 0, 0)
+        display_grid.setSpacing(SPACE_SM)
+        display_grid.setColumnStretch(0, 1)
+        display_grid.setColumnStretch(1, 1)
         for rb in [self.rb_all, self.rb_inactive, self.rb_empty, self.rb_videos]:
             self.bg.addButton(rb)
-            rb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            display_layout.addWidget(rb)
+            rb.setFixedWidth(segment_width)
+            rb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            rb.setProperty("segment", True)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
+        display_grid.addWidget(self.rb_all, 0, 0)
+        display_grid.addWidget(self.rb_inactive, 0, 1)
+        display_grid.addWidget(self.rb_empty, 1, 0)
+        display_grid.addWidget(self.rb_videos, 1, 1)
+        display_layout.addLayout(display_grid)
         
         body.addWidget(display_section)
         body.addSpacing(SPACE_XL)
@@ -2341,11 +2388,21 @@ class FilterPanel(QFrame):
         self.rb_view_tree.setChecked(True)
         
         self.bg_view = QButtonGroup()
+        view_grid = QGridLayout()
+        view_grid.setContentsMargins(0, 0, 0, 0)
+        view_grid.setSpacing(SPACE_SM)
+        view_grid.setColumnStretch(0, 1)
+        view_grid.setColumnStretch(1, 1)
         for rb in [self.rb_view_tree, self.rb_view_files, self.rb_view_folders]:
             self.bg_view.addButton(rb)
-            rb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            view_layout.addWidget(rb)
+            rb.setFixedWidth(segment_width)
+            rb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            rb.setProperty("segment", True)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
+        view_grid.addWidget(self.rb_view_tree, 0, 0)
+        view_grid.addWidget(self.rb_view_files, 0, 1)
+        view_grid.addWidget(self.rb_view_folders, 1, 0)
+        view_layout.addLayout(view_grid)
             
         body.addWidget(view_section)
         body.addSpacing(SPACE_XL)
@@ -2363,14 +2420,15 @@ class FilterPanel(QFrame):
         age_outer_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         age_outer_layout.setSpacing(SPACE_MD)
 
-        lbl_age = QLabel("AGE THRESHOLD")
-        lbl_age.setObjectName("ageThresholdHeader")
+        self.btn_age_toggle = self._make_accordion_header("AGE THRESHOLD")
+        self.btn_age_toggle.clicked.connect(lambda: self._toggle_collapsible_section("age"))
+        age_outer_layout.addWidget(self.btn_age_toggle)
 
-        age_outer_layout.addWidget(lbl_age)
-
-        age_box = QFrame()
-        age_box.setObjectName("ageControl")
-        age_layout = QVBoxLayout(age_box)
+        accordion_content_width = self.width() - (2 * SPACE_LG)
+        self.age_box = QFrame()
+        self.age_box.setObjectName("ageControl")
+        self.age_box.setFixedWidth(accordion_content_width)
+        age_layout = QVBoxLayout(self.age_box)
         age_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
         age_layout.setSpacing(SPACE_SM)
 
@@ -2382,6 +2440,7 @@ class FilterPanel(QFrame):
         self.lbl_pill.setFixedHeight(20)
         self.lbl_val = QLabel()
         self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_val.setWordWrap(True)
         age_hdr.addWidget(self.lbl_pill)
         age_hdr.addWidget(self.lbl_val)
         age_hdr.addStretch()
@@ -2413,7 +2472,7 @@ class FilterPanel(QFrame):
         bot_row.addWidget(self.age_input)
         bot_row.addStretch()
         age_layout.addLayout(bot_row)
-        age_outer_layout.addWidget(age_box)
+        age_outer_layout.addWidget(self.age_box)
         
         body.addWidget(age_section)
         body.addSpacing(SPACE_XL)
@@ -2424,12 +2483,13 @@ class FilterPanel(QFrame):
         exclusions_outer_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         exclusions_outer_layout.setSpacing(SPACE_MD)
 
-        lbl_exclusions = QLabel("EXCLUSIONS")
-        lbl_exclusions.setObjectName("ageThresholdHeader")
-        exclusions_outer_layout.addWidget(lbl_exclusions)
+        self.btn_exclusions_toggle = self._make_accordion_header("EXCLUSIONS")
+        self.btn_exclusions_toggle.clicked.connect(lambda: self._toggle_collapsible_section("exclusions"))
+        exclusions_outer_layout.addWidget(self.btn_exclusions_toggle)
 
-        exclusions_box = QWidget()
-        exclusions_layout = QVBoxLayout(exclusions_box)
+        self.exclusions_box = QWidget()
+        self.exclusions_box.setFixedWidth(accordion_content_width)
+        exclusions_layout = QVBoxLayout(self.exclusions_box)
         exclusions_layout.setContentsMargins(0, SPACE_MD, 0, SPACE_MD)
         exclusions_layout.setSpacing(SPACE_MD)
 
@@ -2488,11 +2548,14 @@ class FilterPanel(QFrame):
         self.btn_reset_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
         exclusions_layout.addWidget(self.btn_reset_exclusions, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        exclusions_outer_layout.addWidget(exclusions_box)
+        exclusions_outer_layout.addWidget(self.exclusions_box)
         body.addWidget(exclusions_section)
 
         self._update_age_label(self.slider.value())
         self._restore_scan_exclusions()
+        self._age_section_expanded = self.age_input.value() != self.AGE_FILTER_DISABLED
+        self._exclusions_section_expanded = self._scan_exclusions_from_controls().differs_from_default()
+        self._sync_collapsible_sections()
         self.txt_excluded_folders.editingFinished.connect(self._normalize_and_save_scan_exclusions)
         self.txt_excluded_extensions.editingFinished.connect(self._normalize_and_save_scan_exclusions)
         self.min_size_input.valueChanged.connect(self._save_scan_exclusions_from_controls)
@@ -2520,6 +2583,39 @@ class FilterPanel(QFrame):
         action_layout.addWidget(self.btn_reset)
         action_layout.addWidget(self.btn_close)
         outer.addWidget(action_box)
+
+    def _make_accordion_header(self, text):
+        return AccordionHeader(text, self)
+
+    def _toggle_collapsible_section(self, section):
+        if section == "age":
+            self._age_section_expanded = not self._age_section_expanded
+        elif section == "exclusions":
+            self._exclusions_section_expanded = not self._exclusions_section_expanded
+        self._sync_collapsible_sections()
+
+    def _sync_collapsible_sections(self):
+        if hasattr(self, 'age_box'):
+            self.age_box.setVisible(self._age_section_expanded)
+            self.age_box.updateGeometry()
+        if hasattr(self, 'btn_age_toggle'):
+            self.btn_age_toggle.set_expanded(self._age_section_expanded)
+            self.btn_age_toggle.updateGeometry()
+        if hasattr(self, 'exclusions_box'):
+            self.exclusions_box.setVisible(self._exclusions_section_expanded)
+            self.exclusions_box.updateGeometry()
+        if hasattr(self, 'btn_exclusions_toggle'):
+            self.btn_exclusions_toggle.set_expanded(self._exclusions_section_expanded)
+            self.btn_exclusions_toggle.updateGeometry()
+        if hasattr(self, 'filter_scroll_content'):
+            self.filter_scroll_content.setFixedWidth(self.width())
+            layout = self.filter_scroll_content.layout()
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+            self.filter_scroll_content.setFixedWidth(self.width())
+            self.filter_scroll_content.updateGeometry()
+        self.updateGeometry()
 
     def _update_age_label(self, value):
         palette = current_palette()
@@ -2810,12 +2906,18 @@ class MainWindow(QMainWindow):
     # UI
     # -------------------------------------------------------------------------
 
-    def _placeholder_icon(self, asset_name):
+    def _placeholder_icon(self, asset_name, muted=False):
         label = QLabel()
         label.setObjectName("emptyIcon")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_path = os.path.join(os.path.dirname(__file__), "assets", asset_name)
-        label.setPixmap(QIcon(icon_path).pixmap(QSize(56, 56)))
+        pixmap = QIcon(icon_path).pixmap(QSize(56, 56))
+        if muted:
+            painter = QPainter(pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), QColor(current_palette()["text_muted"]))
+            painter.end()
+        label.setPixmap(pixmap)
         label.setFixedSize(80, 80)
         return label
 
@@ -3053,11 +3155,19 @@ class MainWindow(QMainWindow):
         scanning_page = QWidget()
         scanning_page.setObjectName("emptyState")
         sp_layout = QVBoxLayout(scanning_page)
-        sp_layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        sp_layout.setContentsMargins(56, 56, 56, 56)
         sp_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sp_layout.setSpacing(SPACE_LG)
+        sp_layout.setSpacing(0)
 
-        scan_icon = self._placeholder_icon("toolbar_refresh.svg")
+        scan_content = QWidget()
+        scan_content.setObjectName("scanStateContent")
+        scan_content.setMaximumWidth(720)
+        scan_content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        scan_layout = QVBoxLayout(scan_content)
+        scan_layout.setContentsMargins(0, 0, 0, 0)
+        scan_layout.setSpacing(14)
+
+        scan_icon = self._placeholder_icon("toolbar_refresh.svg", muted=True)
 
         sp_title = QLabel("Scanning in progress")
         sp_title.setObjectName("emptyTitle")
@@ -3067,30 +3177,40 @@ class MainWindow(QMainWindow):
         self.scan_detail.setObjectName("emptySub")
         self.scan_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scan_detail.setWordWrap(True)
-        self.scan_detail.setMaximumWidth(520)
+        self.scan_detail.setMaximumWidth(680)
+        self.scan_detail.setMinimumHeight(26)
+
+        self.scan_stats = QLabel("Preparing scan...")
+        self.scan_stats.setObjectName("scanStats")
+        self.scan_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scan_stats.setWordWrap(True)
+        self.scan_stats.setMaximumWidth(700)
+        self.scan_stats.setMinimumHeight(30)
 
         self.scan_path = QLabel()
         self.scan_path.setObjectName("scanPathValue")
         self.scan_path.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scan_path.setWordWrap(True)
-        self.scan_path.setMaximumWidth(640)
-        self.scan_path.setMinimumHeight(24)
+        self.scan_path.setMaximumWidth(700)
+        self.scan_path.setMinimumHeight(46)
         self.scan_path.setTextFormat(Qt.TextFormat.RichText)
+        self.scan_path.setVisible(False)
 
         self.scan_progress = QProgressBar()
         self.scan_progress.setRange(0, 0)
         self.scan_progress.setTextVisible(False)
         self.scan_progress.setObjectName("loadingBar")
-        self.scan_progress.setFixedWidth(360)
-        self.scan_progress.setFixedHeight(18)
+        self.scan_progress.setFixedWidth(480)
+        self.scan_progress.setFixedHeight(12)
 
         sp_layout.addStretch()
-        sp_layout.addWidget(scan_icon, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addWidget(sp_title)
-        sp_layout.addWidget(self.scan_detail, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addWidget(self.scan_progress, alignment=Qt.AlignmentFlag.AlignCenter)
-        sp_layout.addSpacing(SPACE_XS)
-        sp_layout.addWidget(self.scan_path, alignment=Qt.AlignmentFlag.AlignCenter)
+        scan_layout.addWidget(scan_icon, alignment=Qt.AlignmentFlag.AlignCenter)
+        scan_layout.addWidget(sp_title)
+        scan_layout.addWidget(self.scan_detail, alignment=Qt.AlignmentFlag.AlignCenter)
+        scan_layout.addSpacing(12)
+        scan_layout.addWidget(self.scan_progress, alignment=Qt.AlignmentFlag.AlignCenter)
+        scan_layout.addWidget(self.scan_stats, alignment=Qt.AlignmentFlag.AlignCenter)
+        sp_layout.addWidget(scan_content, alignment=Qt.AlignmentFlag.AlignCenter)
         sp_layout.addStretch()
 
         # Page 1: Tree view
@@ -3315,12 +3435,15 @@ class MainWindow(QMainWindow):
     def _scan_path_html(self, path):
         palette = current_palette()
         if not path:
-            return f"<span style='color:{palette['text_muted']};'>Current folder: --</span>"
+            return f"<span style='color:{palette['text_muted']};'>Current folder<br>--</span>"
 
         escaped = html.escape(path)
         for separator in ("\\", "/", "_", "-", "."):
             escaped = escaped.replace(separator, f"{separator}<wbr>")
-        return f"<span style='color:{palette['text_muted']};'>Current folder: {escaped}</span>"
+        return (
+            f"<span style='font-weight:600;color:{palette['text_muted']};'>Current folder</span>"
+            f"<br><span style='color:{palette['text_muted']};'>{escaped}</span>"
+        )
 
     def _set_scanning_panel(self, path=None, detail=None):
         if hasattr(self, 'scan_path'):
@@ -3364,8 +3487,8 @@ class MainWindow(QMainWindow):
                 self.scan_progress.setRange(0, 100)
                 self.scan_progress.setValue(max(0, min(99, int(percent))))
 
-        if hasattr(self, 'scan_detail'):
-            self.scan_detail.setText(self._scan_stats_text(detail))
+        if hasattr(self, 'scan_stats'):
+            self.scan_stats.setText(self._scan_stats_text(detail))
 
     def _set_size_totals_pending(self, browse=False, page=False, selected=False):
         if browse:
@@ -5136,7 +5259,6 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, path):
         s = ("..." + path[-72:]) if len(path) > 75 else path
-        self.lbl_status.setText(f"Scanning: {s}")
         if self.is_scanning:
             self._set_scanning_total_chip()
         if self.content_stack.currentIndex() == 3:
@@ -5155,7 +5277,7 @@ class MainWindow(QMainWindow):
 
     def _set_match_status(self, total_matches):
         if self.is_scanning:
-            self.lbl_status.setText(f"Scanning... Found {total_matches} matching items")
+            return
         else:
             self.lbl_status.setText(self._scan_complete_status_text())
 
@@ -5906,7 +6028,6 @@ class MainWindow(QMainWindow):
 
         if rows_count == 0 and self.current_page == 0:
             if self.is_scanning:
-                self.lbl_status.setText("Scanning... waiting for matching results")
                 self.content_stack.setCurrentIndex(3)
                 self._set_scanning_panel(
                     detail="Indexing is still running. The first batch will replace this panel as soon as it is ready.",
@@ -6398,8 +6519,8 @@ class MainWindow(QMainWindow):
         self.tree.setEnabled(enabled)
 
     def _authorize_delete(self, item_count, total_size=0):
-        store = AuthStore()
-        if store.is_empty():
+        dialog = DeleteAuthDialog(item_count, total_size, self)
+        if dialog.store.is_empty():
             QMessageBox.warning(
                 self,
                 "Delete authorization",
@@ -6407,7 +6528,6 @@ class MainWindow(QMainWindow):
             )
             return None
 
-        dialog = DeleteAuthDialog(item_count, total_size, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return dialog.authorized_username
         return None

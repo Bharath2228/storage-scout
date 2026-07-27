@@ -97,9 +97,9 @@ python tools/setup_auth.py --remove-user jsmith
 python tools/setup_auth.py --list-users
 ```
 
-Passwords are stored in `auth_store.json` as salted PBKDF2 hashes, never plaintext. Delete authorization and completion events are appended to `delete_audit.log`.
+Passwords are stored as salted PBKDF2 hashes in `%APPDATA%\IBMS\Watchdog\auth_store.json`, never plaintext. Delete authorization and completion events are appended to `%APPDATA%\IBMS\Watchdog\delete_audit.log`. Existing files beside the application are copied there once when needed.
 
-This local authorization is deterrence-grade protection for shared workstations. It is not a substitute for OS file permissions or enterprise identity controls. Restrict NTFS permissions on `auth_store.json` and `delete_audit.log` so only the tool administrator can modify the auth store, while the app only needs read access to verify users.
+This local authorization is deterrence-grade protection for shared workstations. It is not a substitute for enterprise identity controls. On Windows, the app restricts the credential, lockout, and audit files to the current Windows account.
 
 ---
 

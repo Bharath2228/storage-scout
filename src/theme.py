@@ -3,11 +3,19 @@ from PyQt6.QtGui import QFont
 
 FONT_FAMILY = "Segoe UI"
 TYPE_SCALE = {
-    "title": {"size_px": 16, "weight": 700},
-    "header": {"size_px": 11, "weight": 600},
+    "title": {"size_px": 16, "point_size": 12, "weight": 700},
+    "header": {"size_px": 11, "point_size": 8, "weight": 600},
     "body": {"size_px": 12, "point_size": 9, "weight": 500},
-    "muted": {"size_px": 11, "weight": 400},
+    "muted": {"size_px": 11, "point_size": 8, "weight": 400},
 }
+
+
+def safe_point_size(value, fallback=9):
+    try:
+        point_size = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return point_size if point_size > 0 else fallback
 
 SPACE_XS = 4
 SPACE_SM = 8
@@ -113,7 +121,7 @@ def apply_theme(app, theme_name="light"):
 
     # Set application-wide font
     font = QFont(FONT_FAMILY)
-    font.setPointSize(body_point_size)
+    font.setPointSize(safe_point_size(body_point_size))
     font.setWeight(QFont.Weight.Medium)
     app.setFont(font)
 
@@ -331,6 +339,33 @@ def apply_theme(app, theme_name="light"):
             border: 6px solid {accent};
             border-radius: 15px;
             background-color: {surface};
+            image: none;
+        }}
+        QRadioButton[segment="true"] {{
+            background-color: {bg};
+            border: 1px solid {border};
+            border-radius: 6px;
+            color: {text_muted};
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+            padding: 6px {SPACE_XS}px;
+            spacing: 0;
+        }}
+        QRadioButton[segment="true"]:hover {{
+            background-color: {surface_hover};
+            color: {text};
+        }}
+        QRadioButton[segment="true"]:checked {{
+            background-color: {accent};
+            border-color: {accent};
+            color: white;
+        }}
+        QRadioButton[segment="true"]::indicator {{
+            width: 0;
+            height: 0;
+            margin: 0;
+            padding: 0;
+            border: none;
             image: none;
         }}
 
@@ -824,6 +859,32 @@ def apply_theme(app, theme_name="light"):
             color: {accent_hover};
             text-decoration: underline;
         }}
+        QFrame#accordionHeader {{
+            background-color: transparent;
+            border: none;
+            border-radius: 6px;
+            padding: {SPACE_SM}px 0;
+        }}
+        QFrame#accordionHeader:hover {{
+            background-color: {surface_hover};
+        }}
+        QLabel#accordionChevron {{
+            background-color: transparent;
+            color: {text_muted};
+            font-size: {header_size}px;
+            font-weight: {header_weight};
+        }}
+        QLabel#accordionTitle {{
+            background-color: transparent;
+            color: {text_muted};
+            font-size: {header_size}px;
+            font-weight: {header_weight};
+            letter-spacing: 0.4px;
+        }}
+        QFrame#accordionHeader:hover QLabel#accordionChevron,
+        QFrame#accordionHeader:hover QLabel#accordionTitle {{
+            color: {text};
+        }}
 
         QLabel#manualLabel {{
             color: {text_muted};
@@ -906,6 +967,11 @@ def apply_theme(app, theme_name="light"):
         QLabel#emptySub {{
             font-size: {muted_size}px;
             font-weight: {muted_weight};
+            color: {text_muted};
+        }}
+        QLabel#scanStats {{
+            font-size: {body_size}px;
+            font-weight: 600;
             color: {text_muted};
         }}
         QLabel#noResultsTitle {{

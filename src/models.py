@@ -3,7 +3,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
 from PyQt6.QtGui import QFont, QIcon
-from .theme import FONT_FAMILY, TYPE_SCALE
+from .theme import FONT_FAMILY, TYPE_SCALE, safe_point_size
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 FOLDER_ICON = QIcon(os.path.join(ASSETS_DIR, "folder_blue.svg"))
@@ -385,7 +385,7 @@ class WatchdogTreeModel(QAbstractItemModel):
 
         if role == Qt.ItemDataRole.FontRole:
             font = QFont(FONT_FAMILY)
-            font.setPixelSize(TYPE_SCALE["body"]["size_px"])
+            font.setPointSize(safe_point_size(TYPE_SCALE["body"]["point_size"], 9))
             if col == 4:
                 font.setWeight(QFont.Weight(TYPE_SCALE["muted"]["weight"]))
                 return font

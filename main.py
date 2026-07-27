@@ -1,4 +1,8 @@
+import os
 import sys
+
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.screen=false")
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QSettings
 from src.main_window import MainWindow
