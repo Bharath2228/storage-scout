@@ -5,6 +5,7 @@ import json
 import subprocess
 import send2trash
 import time
+from bisect import bisect_left, insort
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -42,6 +43,155 @@ VIDEO_EXTENSIONS = (
     ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".ogv",
     ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
 )
+
+PERF_DEBUG = os.environ.get("WATCHDOG_PERF_DEBUG", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+
+def _path_key(path):
+    return os.path.normcase(os.path.normpath(path))
+
+
+class PathKeyIndex:
+    """Indexed normalized paths with depth-based ancestor and bisected descendant lookup."""
+
+    def __init__(self, keys=()):
+        self._keys = set(keys)
+        self._sorted_keys = sorted(self._keys)
+
+    def add(self, key):
+        if key in self._keys:
+            return
+        self._keys.add(key)
+        insort(self._sorted_keys, key)
+
+    def discard(self, key):
+        if key not in self._keys:
+            return
+        self._keys.remove(key)
+        position = bisect_left(self._sorted_keys, key)
+        if position < len(self._sorted_keys) and self._sorted_keys[position] == key:
+            self._sorted_keys.pop(position)
+
+    def clear(self):
+        self._keys.clear()
+        self._sorted_keys.clear()
+
+    def has_ancestor(self, key, include_self=True):
+        current = key if include_self else os.path.dirname(key)
+        while current:
+            if current in self._keys:
+                return True
+            parent = os.path.dirname(current.rstrip("\\/"))
+            if not parent or parent == current:
+                break
+            current = parent
+        return False
+
+    def descendant_keys(self, key, include_self=False):
+        matches = []
+        if include_self and key in self._keys:
+            matches.append(key)
+        prefix = key if key.endswith(("\\", "/")) else key + os.sep
+        position = bisect_left(self._sorted_keys, prefix)
+        while position < len(self._sorted_keys):
+            candidate = self._sorted_keys[position]
+            if not candidate.startswith(prefix):
+                break
+            if candidate != key:
+                matches.append(candidate)
+            position += 1
+        return matches
+
+    def has_descendant(self, key):
+        prefix = key if key.endswith(("\\", "/")) else key + os.sep
+        position = bisect_left(self._sorted_keys, prefix)
+        while (
+            position < len(self._sorted_keys)
+            and self._sorted_keys[position] == key
+        ):
+            position += 1
+        return (
+            position < len(self._sorted_keys)
+            and self._sorted_keys[position].startswith(prefix)
+        )
+
+    def remove_many(self, keys):
+        removed = set(keys)
+        if not removed:
+            return
+        self._keys.difference_update(removed)
+        self._sorted_keys = [
+            key for key in self._sorted_keys
+            if key not in removed
+        ]
+
+
+class IndexedPathDict(dict):
+    """Dictionary that keeps a path-prefix index synchronized with key mutations."""
+
+    _MISSING = object()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.path_index = PathKeyIndex(self.keys())
+
+    def __setitem__(self, key, value):
+        is_new = key not in self
+        super().__setitem__(key, value)
+        if is_new:
+            self.path_index.add(key)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self.path_index.discard(key)
+
+    def pop(self, key, default=_MISSING):
+        if key in self:
+            value = super().pop(key)
+            self.path_index.discard(key)
+            return value
+        if default is self._MISSING:
+            raise KeyError(key)
+        return default
+
+    def clear(self):
+        super().clear()
+        self.path_index.clear()
+
+    def update(self, *args, **kwargs):
+        values = dict(*args, **kwargs)
+        for key, value in values.items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def popitem(self):
+        key, value = super().popitem()
+        self.path_index.discard(key)
+        return key, value
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def remove_descendants(self, key, include_self=False):
+        keys = self.path_index.descendant_keys(key, include_self=include_self)
+        for descendant_key in keys:
+            dict.__delitem__(self, descendant_key)
+        self.path_index.remove_many(keys)
+
+
+def _perf_log(label, started_at, **counts):
+    if not PERF_DEBUG or started_at is None:
+        return
+    details = " ".join(f"{name}={value}" for name, value in counts.items())
+    print(f"[watchdog-perf] {label}: {(time.perf_counter() - started_at) * 1000:.1f} ms {details}".rstrip())
+
 
 def paint_tree_row_border(painter, option):
     return
@@ -133,22 +283,34 @@ def sort_tree_siblings(node, sort_column, sort_desc):
     ), reverse=sort_desc)
 
 
-def prune_contained_paths(paths):
+def prune_contained_paths(paths, cancel_check=None, sort_alpha=False):
     unique_paths = list(dict.fromkeys(path for path in paths if path))
-    sorted_paths = sorted(unique_paths, key=lambda value: len(os.path.normpath(value)))
+    if sort_alpha:
+        sort_key = lambda value: (len(os.path.normpath(value)), value.lower())
+    else:
+        sort_key = lambda value: len(os.path.normpath(value))
+    sorted_paths = sorted(unique_paths, key=sort_key)
     kept = []
-    kept_keys = []
+    kept_keys = set()
 
     for path in sorted_paths:
-        normalized = os.path.normcase(os.path.normpath(path)).rstrip("\\/")
-        is_contained = any(
-            normalized.startswith(parent + "\\") or normalized.startswith(parent + "/")
-            for parent in kept_keys
-        )
+        if cancel_check:
+            cancel_check()
+        normalized = _path_key(path)
+        current = normalized
+        is_contained = False
+        while current:
+            if current in kept_keys:
+                is_contained = True
+                break
+            parent = os.path.dirname(current.rstrip("\\/"))
+            if not parent or parent == current:
+                break
+            current = parent
         if is_contained:
             continue
         kept.append(path)
-        kept_keys.append(normalized)
+        kept_keys.add(normalized)
 
     return kept
 
@@ -411,6 +573,7 @@ class DeletePreviewThread(QThread):
         self.paths = list(paths or [])
         self.bulk_scope = dict(bulk_scope or {}) if bulk_scope else None
         self.excluded_paths = dict(excluded_paths or {})
+        self.excluded_path_index = PathKeyIndex(self.excluded_paths)
         self.is_cancelled = False
         self._connection = None
 
@@ -428,38 +591,23 @@ class DeletePreviewThread(QThread):
             raise DeletePreviewThread._Cancelled()
 
     def _path_key(self, path):
-        return os.path.normcase(os.path.normpath(path))
+        return _path_key(path)
 
     def _prune_paths(self, paths):
-        pruned_paths = []
-        selected_roots = []
-        for path in sorted(paths, key=lambda value: (len(os.path.normpath(value)), value.lower())):
-            self._raise_if_cancelled()
-            normalized = os.path.normcase(os.path.normpath(path))
-            if any(
-                normalized == root or normalized.startswith(root + os.sep)
-                for root in selected_roots
-            ):
-                continue
-            selected_roots.append(normalized)
-            pruned_paths.append(path)
-        return pruned_paths
+        return prune_contained_paths(
+            paths,
+            cancel_check=self._raise_if_cancelled,
+            sort_alpha=True,
+        )
 
     def _has_excluded_ancestor(self, path, include_self=True):
-        normalized = self._path_key(path)
-        for excluded_key in self.excluded_paths:
-            if normalized == excluded_key:
-                return include_self
-            if normalized.startswith(excluded_key + os.sep):
-                return True
-        return False
+        return self.excluded_path_index.has_ancestor(
+            self._path_key(path),
+            include_self=include_self,
+        )
 
     def _has_excluded_descendant(self, path):
-        normalized = self._path_key(path)
-        return any(
-            excluded_key.startswith(normalized + os.sep)
-            for excluded_key in self.excluded_paths
-        )
+        return self.excluded_path_index.has_descendant(self._path_key(path))
 
     def _expand_paths_around_exclusions(self, cursor, selected_roots):
         if not self.excluded_paths:
@@ -469,9 +617,9 @@ class DeletePreviewThread(QThread):
         for root_path in selected_roots:
             self._raise_if_cancelled()
             root_key = self._path_key(root_path)
-            if not any(
-                excluded_key == root_key or excluded_key.startswith(root_key + os.sep)
-                for excluded_key in self.excluded_paths
+            if (
+                root_key not in self.excluded_paths
+                and not self.excluded_path_index.has_descendant(root_key)
             ):
                 expanded.append(root_path)
                 continue
@@ -1892,23 +2040,10 @@ class TotalsThread(QThread):
         return total_size
 
     def _prune_contained_paths(self, paths):
-        unique_paths = list(dict.fromkeys(path for path in paths if path))
-        sorted_paths = sorted(unique_paths, key=lambda value: len(os.path.normpath(value)))
-        kept = []
-        kept_keys = []
-
-        for path in sorted_paths:
-            normalized = os.path.normcase(os.path.normpath(path)).rstrip("\\/")
-            is_contained = any(
-                normalized.startswith(parent + "\\") or normalized.startswith(parent + "/")
-                for parent in kept_keys
-            )
-            if is_contained:
-                continue
-            kept.append(path)
-            kept_keys.append(normalized)
-
-        return kept
+        return prune_contained_paths(
+            paths,
+            cancel_check=self._raise_if_cancelled,
+        )
 
     def _sum_file_paths_size(self, cursor, paths):
         unique_paths = list(dict.fromkeys(paths))
@@ -2048,23 +2183,10 @@ class PathSizeThread(QThread):
             raise PathSizeThread._Cancelled()
 
     def _prune_contained_paths(self, paths):
-        unique_paths = list(dict.fromkeys(path for path in paths if path))
-        sorted_paths = sorted(unique_paths, key=lambda value: len(os.path.normpath(value)))
-        kept = []
-        kept_keys = []
-
-        for path in sorted_paths:
-            normalized = os.path.normcase(os.path.normpath(path)).rstrip("\\/")
-            is_contained = any(
-                normalized.startswith(parent + "\\") or normalized.startswith(parent + "/")
-                for parent in kept_keys
-            )
-            if is_contained:
-                continue
-            kept.append(path)
-            kept_keys.append(normalized)
-
-        return kept
+        return prune_contained_paths(
+            paths,
+            cancel_check=self._raise_if_cancelled,
+        )
 
     def _summarize_paths(self, cursor, paths):
         _, folders, files, total_size = summarize_paths_batch(
@@ -2975,14 +3097,16 @@ class MainWindow(QMainWindow):
         self._preserve_results_focus = False
         self.applied_name_filter = ""
         self.source_index_by_path = {}
+        self._selection_button_targets_cache = None
+        self._selection_sync_suppressed = False
         self.bulk_select_batch_size = 250
         self.bulk_select_batch_delay_ms = 0
         self.tree_model     = None
         self.proxy_model    = WatchdogFilterProxyModel()
         self.bulk_delete_scope = None
-        self.selected_paths = {}
+        self.selected_paths = IndexedPathDict()
         self.page_only_selected_paths = {}
-        self.excluded_paths = {}
+        self.excluded_paths = IndexedPathDict()
         self.page_only_selection_page = None
         self.current_total_matches = 0
         self.current_lazy_show_all_tree = False
@@ -4242,7 +4366,11 @@ class MainWindow(QMainWindow):
 
         collect()
         if indices:
-            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Unchecked, explicit=False)
+            self._set_indices_check_state_direct_suppressed(
+                indices,
+                Qt.CheckState.Unchecked,
+                explicit=False,
+            )
         self._do_recount()
 
     def _clear_current_page_checks(self):
@@ -4254,16 +4382,20 @@ class MainWindow(QMainWindow):
 
         indices = self._collect_checked_source_indices()
         if indices:
-            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Unchecked, explicit=False)
+            self._set_indices_check_state_direct_suppressed(
+                indices,
+                Qt.CheckState.Unchecked,
+                explicit=False,
+            )
         visible_keys = {
             self._path_key(self.tree_model.data(idx, Qt.ItemDataRole.UserRole).get('path', ''))
             for idx in indices
             if self.tree_model.data(idx, Qt.ItemDataRole.UserRole)
         }
-        self.selected_paths = {
+        self.selected_paths = IndexedPathDict({
             key: path for key, path in self.selected_paths.items()
             if self._path_key(path) not in visible_keys
-        }
+        })
         for key in visible_keys:
             path = self.source_index_by_path.get(key)
             item_data = self.tree_model.data(path, Qt.ItemDataRole.UserRole) if path and path.isValid() else None
@@ -4398,16 +4530,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _path_key(self, path):
-        return os.path.normcase(os.path.normpath(path))
+        return _path_key(path)
 
     def _has_selected_ancestor(self, path, include_self=True):
-        normalized = self._path_key(path)
-        for selected_key in self.selected_paths:
-            if normalized == selected_key:
-                return include_self
-            if normalized.startswith(selected_key + os.sep):
-                return True
-        return False
+        return self.selected_paths.path_index.has_ancestor(
+            self._path_key(path),
+            include_self=include_self,
+        )
 
     def _has_any_selected_ancestor(self, path, include_self=True):
         return self._has_selected_ancestor(path, include_self=include_self)
@@ -4416,20 +4545,13 @@ class MainWindow(QMainWindow):
         return self._has_any_selected_ancestor(path, include_self=False)
 
     def _has_excluded_ancestor(self, path, include_self=True):
-        normalized = self._path_key(path)
-        for excluded_key in self.excluded_paths:
-            if normalized == excluded_key:
-                return include_self
-            if normalized.startswith(excluded_key + os.sep):
-                return True
-        return False
+        return self.excluded_paths.path_index.has_ancestor(
+            self._path_key(path),
+            include_self=include_self,
+        )
 
     def _has_excluded_descendant(self, path):
-        normalized = self._path_key(path)
-        return any(
-            excluded_key.startswith(normalized + os.sep)
-            for excluded_key in self.excluded_paths
-        )
+        return self.excluded_paths.path_index.has_descendant(self._path_key(path))
 
     def _is_effectively_selected(self, path):
         return (
@@ -4453,22 +4575,20 @@ class MainWindow(QMainWindow):
         if not self.tree_model:
             return
 
+        started_at = time.perf_counter() if PERF_DEBUG else None
+        visited = 0
         stack = [QModelIndex()]
         while stack:
             parent = stack.pop()
             for row in range(self.tree_model.rowCount(parent)):
                 index = self.tree_model.index(row, 0, parent)
+                visited += 1
                 item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
                 if item_data and item_data.get('path') and self._is_persistable_selection_index(index):
                     key = self._path_key(item_data['path'])
                     state = self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole)
                     if state == Qt.CheckState.Checked:
-                        self.excluded_paths.pop(key, None)
-                        self.excluded_paths = {
-                            excluded_key: excluded_path
-                            for excluded_key, excluded_path in self.excluded_paths.items()
-                            if not excluded_key.startswith(key + os.sep)
-                        }
+                        self.excluded_paths.remove_descendants(key, include_self=True)
                         if not self._is_descendant_of_selected_path(item_data['path']):
                             self.selected_paths[key] = item_data['path']
                     elif state == Qt.CheckState.Unchecked:
@@ -4477,44 +4597,13 @@ class MainWindow(QMainWindow):
                         self.selected_paths.pop(key, None)
                 if self.tree_model.hasChildren(index):
                     stack.append(index)
-
-    def _restore_persistent_selection_to_model(self):
-        if not self.tree_model or not self.selected_paths:
-            return
-
-        indices = []
-        stack = [QModelIndex()]
-        while stack:
-            parent = stack.pop()
-            for row in range(self.tree_model.rowCount(parent)):
-                index = self.tree_model.index(row, 0, parent)
-                item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-                if (
-                    item_data and item_data.get('path')
-                    and self._is_effectively_selected(item_data['path'])
-                    and self._is_persistable_selection_index(index)
-                ):
-                    indices.append(index)
-                if self.tree_model.hasChildren(index):
-                    stack.append(index)
-
-        if indices:
-            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Checked, explicit=True)
-
-    def _restore_bulk_scope_selection_to_model(self):
-        if not self.tree_model or not self.bulk_delete_scope:
-            return
-
-        indices = self._collect_bulk_target_indices(
-            status=self.bulk_delete_scope.get('status'),
-            videos_only=self.bulk_delete_scope.get('videos_only', False),
+        _perf_log(
+            "selection model sync",
+            started_at,
+            nodes=visited,
+            selected=len(self.selected_paths),
+            excluded=len(self.excluded_paths),
         )
-        indices = [
-            index for index in indices
-            if self._is_persistable_selection_index(index)
-        ]
-        if indices:
-            self.tree_model.set_indices_check_state_direct(indices, Qt.CheckState.Checked, explicit=True)
 
     def _promote_current_page_selection_to_page_only(self):
         if not self.tree_model:
@@ -4538,11 +4627,24 @@ class MainWindow(QMainWindow):
         to_change = [idx for idx in indices if self.tree_model.data(idx, Qt.ItemDataRole.CheckStateRole) != state]
         if to_change:
             self.cached_selected_total = None
-            if recursive:
-                self.tree_model.set_indices_check_state(to_change, state, explicit=True)
-            else:
-                self.tree_model.set_indices_check_state_direct(to_change, state, explicit=True)
+            previous_suppressed = self._selection_sync_suppressed
+            self._selection_sync_suppressed = True
+            try:
+                if recursive:
+                    self.tree_model.set_indices_check_state(to_change, state, explicit=True)
+                else:
+                    self.tree_model.set_indices_check_state_direct(to_change, state, explicit=True)
+            finally:
+                self._selection_sync_suppressed = previous_suppressed
             self._sync_persistent_selection_from_model()
+
+    def _set_indices_check_state_direct_suppressed(self, indices, state, explicit=True):
+        previous_suppressed = self._selection_sync_suppressed
+        self._selection_sync_suppressed = True
+        try:
+            self.tree_model.set_indices_check_state_direct(indices, state, explicit=explicit)
+        finally:
+            self._selection_sync_suppressed = previous_suppressed
 
     def _build_bulk_where(self, status=None, videos_only=False):
         where_clauses = []
@@ -4824,7 +4926,6 @@ class MainWindow(QMainWindow):
 
     def _finish_immediate_page_selection(self, label):
         self._set_bulk_selection_busy(False)
-        self._refresh_selection_buttons()
         self._do_recount()
 
     def _set_status_filter(self, status):
@@ -4895,9 +4996,19 @@ class MainWindow(QMainWindow):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
             return [], [], []
 
+        cached = self._selection_button_targets_cache
+        if (
+            cached
+            and cached.get('model') is self.tree_model
+            and cached.get('mode') == mode
+        ):
+            return cached['targets']
+
         all_targets = []
         inactive_targets = []
         empty_targets = []
+        started_at = time.perf_counter() if PERF_DEBUG else None
+        visited = 0
         exact_all = self.proxy_model.has_active_filters() or mode == 'Videos'
         seen_all = set()
         seen_inactive = set()
@@ -4910,9 +5021,11 @@ class MainWindow(QMainWindow):
             targets.append(source_index)
 
         def walk(parent=QModelIndex()):
+            nonlocal visited
             for row in range(self.proxy_model.rowCount(parent)):
                 proxy_index = self.proxy_model.index(row, 0, parent)
                 source_index = self.proxy_model.mapToSource(proxy_index)
+                visited += 1
                 item_data = self.tree_model.data(source_index, Qt.ItemDataRole.UserRole)
                 if item_data:
                     path = item_data.get('path')
@@ -4936,7 +5049,19 @@ class MainWindow(QMainWindow):
                     walk(proxy_index)
 
         walk()
-        return all_targets, inactive_targets, empty_targets
+        targets = (all_targets, inactive_targets, empty_targets)
+        self._selection_button_targets_cache = {
+            'model': self.tree_model,
+            'mode': mode,
+            'targets': targets,
+        }
+        _perf_log(
+            "selection button target walk",
+            started_at,
+            nodes=visited,
+            targets=sum(len(group) for group in targets),
+        )
+        return targets
 
     def _collect_checked_source_indices(self):
         if not self.tree_model:
@@ -4955,18 +5080,7 @@ class MainWindow(QMainWindow):
         return checked_indices
 
     def _prune_paths(self, paths):
-        pruned_paths = []
-        selected_roots = []
-        for path in sorted(paths, key=lambda value: (len(os.path.normpath(value)), value.lower())):
-            normalized = os.path.normcase(os.path.normpath(path))
-            if any(
-                normalized == root or normalized.startswith(root + os.sep)
-                for root in selected_roots
-            ):
-                continue
-            selected_roots.append(normalized)
-            pruned_paths.append(path)
-        return pruned_paths
+        return prune_contained_paths(paths, sort_alpha=True)
 
     def _checked_delete_paths(self):
         pruned = self._selected_roots_for_delete()
@@ -4987,9 +5101,9 @@ class MainWindow(QMainWindow):
             cursor = tool.conn.cursor()
             for root_path in selected_roots:
                 root_key = self._path_key(root_path)
-                if not any(
-                    excluded_key == root_key or excluded_key.startswith(root_key + os.sep)
-                    for excluded_key in self.excluded_paths
+                if (
+                    root_key not in self.excluded_paths
+                    and not self.excluded_paths.path_index.has_descendant(root_key)
                 ):
                     expanded.append(root_path)
                     continue
@@ -5071,26 +5185,23 @@ class MainWindow(QMainWindow):
         deleted_keys = [self._path_key(path) for path in deleted_paths if path]
         if not deleted_keys:
             return
+        deleted_path_index = PathKeyIndex(deleted_keys)
 
         def is_deleted(path):
-            normalized = self._path_key(path)
-            for deleted_key in deleted_keys:
-                if normalized == deleted_key or normalized.startswith(deleted_key + os.sep):
-                    return True
-            return False
+            return deleted_path_index.has_ancestor(self._path_key(path))
 
-        self.selected_paths = {
+        self.selected_paths = IndexedPathDict({
             key: path for key, path in self.selected_paths.items()
             if not is_deleted(path)
-        }
+        })
         self.page_only_selected_paths = {
             key: path for key, path in self.page_only_selected_paths.items()
             if not is_deleted(path)
         }
-        self.excluded_paths = {
+        self.excluded_paths = IndexedPathDict({
             key: path for key, path in self.excluded_paths.items()
             if not is_deleted(path)
-        }
+        })
 
     def _show_delete_preview(self, paths=None, bulk_scope=None):
         dialog = DeletePreviewDialog(self)
@@ -5848,21 +5959,114 @@ class MainWindow(QMainWindow):
         else:
             self._hide_selection_loading_dialog()
 
-    def _rebuild_source_index_map(self):
+    def _rebuild_and_restore_page_selection(self):
         self.source_index_by_path = {}
+        self._selection_button_targets_cache = None
         if not self.tree_model:
             return
+
+        started_at = time.perf_counter() if PERF_DEBUG else None
+        restore_by_key = {}
+        all_targets = []
+        inactive_targets = []
+        empty_targets = []
+        seen_all = set()
+        seen_inactive = set()
+        seen_empty = set()
+        mode = self._display_mode()
+        exact_all = self.proxy_model.has_active_filters() or mode == 'Videos'
+        bulk_scope = self.bulk_delete_scope
+        has_persistent_selection = bool(self.selected_paths)
+        bulk_status = bulk_scope.get('status') if bulk_scope else None
+        bulk_videos_only = bool(bulk_scope and bulk_scope.get('videos_only', False))
+        bulk_exact_only = bool(
+            bulk_scope
+            and (
+                self.proxy_model.has_active_filters()
+                or bulk_status is not None
+                or bulk_videos_only
+            )
+        )
+        visited = 0
+
+        def add_target(targets, seen, index, path):
+            if path in seen:
+                return
+            seen.add(path)
+            targets.append(index)
 
         stack = [QModelIndex()]
         while stack:
             parent = stack.pop()
             for row in range(self.tree_model.rowCount(parent)):
                 index = self.tree_model.index(row, 0, parent)
+                visited += 1
                 item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
                 if item_data and item_data.get('path'):
-                    self.source_index_by_path[self._path_key(item_data['path'])] = index
+                    path = item_data['path']
+                    path_key = self._path_key(path)
+                    self.source_index_by_path[path_key] = index
+                    persistable = (
+                        self._is_persistable_selection_index(index)
+                        if has_persistent_selection or bulk_scope else False
+                    )
+                    if (
+                        has_persistent_selection
+                        and persistable
+                        and self._is_effectively_selected(path)
+                    ):
+                        restore_by_key[path_key] = index
+
+                    proxy_index = self.proxy_model.mapFromSource(index)
+                    if proxy_index.isValid():
+                        is_exact_match = self.proxy_model.matches_source_index(index)
+                        is_page_result = item_data.get(
+                            '_is_page_result',
+                            not item_data.get('_is_context_fetched', False),
+                        )
+                        is_video = self._is_video_item(item_data)
+                        if is_page_result:
+                            if (
+                                (not exact_all or is_exact_match)
+                                and (mode != 'Videos' or is_video)
+                            ):
+                                add_target(all_targets, seen_all, index, path)
+                            if item_data.get('status') == 'Inactive' and is_exact_match:
+                                add_target(inactive_targets, seen_inactive, index, path)
+                            if item_data.get('status') == 'Empty' and is_exact_match:
+                                add_target(empty_targets, seen_empty, index, path)
+
+                            if (
+                                bulk_scope
+                                and persistable
+                                and (bulk_status is None or item_data.get('status') == bulk_status)
+                                and (not bulk_videos_only or is_video)
+                                and (not bulk_exact_only or is_exact_match)
+                            ):
+                                restore_by_key[path_key] = index
                 if self.tree_model.hasChildren(index):
                     stack.append(index)
+
+        targets = (all_targets, inactive_targets, empty_targets)
+        self._selection_button_targets_cache = {
+            'model': self.tree_model,
+            'mode': mode,
+            'targets': targets,
+        }
+        restore_indices = list(restore_by_key.values())
+        if restore_indices:
+            self._set_indices_check_state_direct_suppressed(
+                restore_indices,
+                Qt.CheckState.Checked,
+                explicit=True,
+            )
+        _perf_log(
+            "page selection preparation",
+            started_at,
+            nodes=visited,
+            restored=len(restore_indices),
+            button_targets=sum(len(group) for group in targets),
+        )
 
     def _snapshot_bulk_candidates(self):
         candidates = []
@@ -5910,6 +6114,7 @@ class MainWindow(QMainWindow):
             self._set_bulk_selection_busy(False)
             return
 
+        self.recount_timer.stop()
         self.bulk_select_active = True
         self.bulk_select_queue = list(indices)
         self.bulk_select_state = Qt.CheckState(state)
@@ -5967,7 +6172,6 @@ class MainWindow(QMainWindow):
         else:
             self.bulk_delete_scope = None
         self._set_bulk_selection_busy(False)
-        self._refresh_selection_buttons()
         self._do_recount()
         self._focus_results_view()
         self.bulk_select_precomputed_scope = None
@@ -6014,7 +6218,6 @@ class MainWindow(QMainWindow):
                 precomputed=result,
             )
             self._set_bulk_selection_busy(False)
-            self._refresh_selection_buttons()
             self._do_recount()
             self._focus_results_view()
             self.bulk_select_precomputed_scope = None
@@ -6028,7 +6231,6 @@ class MainWindow(QMainWindow):
             self.bulk_select_precomputed_scope = None
             self.bulk_select_forced_state = None
             self.bulk_select_requested_scope = 'current'
-            self._refresh_selection_buttons()
             self._do_recount()
             self._focus_results_view()
             return
@@ -6060,7 +6262,6 @@ class MainWindow(QMainWindow):
         self.bulk_select_forced_state = None
         self.bulk_select_requested_scope = 'current'
         self.lbl_status.setText("Selection failed.")
-        self._refresh_selection_buttons()
         self._do_recount()
         QMessageBox.critical(self, "Selection Error", error)
 
@@ -6218,9 +6419,7 @@ class MainWindow(QMainWindow):
         self.tree_model.options = self._page_load_options()
         self.proxy_model.setSourceModel(self.tree_model)
         self.tree.setModel(self.proxy_model)
-        self._rebuild_source_index_map()
-        self._restore_persistent_selection_to_model()
-        self._restore_bulk_scope_selection_to_model()
+        self._rebuild_and_restore_page_selection()
 
         self._update_page_controls(total_matches or 0)
 
@@ -6247,7 +6446,6 @@ class MainWindow(QMainWindow):
         self._set_match_status(total_matches)
         self._update_chips_sql()
         self._do_recount()
-        self._refresh_selection_buttons()
         self.tree_model.dataChanged.connect(self._on_checked)
         self.tree_model.layoutChanged.connect(self._on_checked)
         if self._preserve_results_focus:
@@ -6350,18 +6548,20 @@ class MainWindow(QMainWindow):
 
     def _on_checked(self, tl=None, br=None, roles=None):
         if roles is None or Qt.ItemDataRole.CheckStateRole in roles:
-            if self.bulk_select_active:
+            if self.bulk_select_active or self._selection_sync_suppressed:
                 return
             self._sync_persistent_selection_from_model()
             self._set_size_totals_pending(selected=True)
             self.recount_timer.start(80)
 
     def _do_recount(self):
+        started_at = time.perf_counter() if PERF_DEBUG else None
         if not self.tree_model:
             self.btn_delete.setText("Delete Selected")
             self._set_delete_armed(False)
             self.btn_delete.setEnabled(False)
             self._refresh_selection_buttons()
+            _perf_log("selection recount", started_at, roots=0)
             return
         if self.bulk_delete_scope:
             scope = self.bulk_delete_scope
@@ -6373,6 +6573,7 @@ class MainWindow(QMainWindow):
             self.btn_delete.setEnabled(armed)
             self._refresh_selection_buttons()
             self._update_chips_sql()
+            _perf_log("selection recount", started_at, roots=scope['total'])
             return
         selected_paths = self._selected_roots_for_delete()
         total = len(selected_paths)
@@ -6386,6 +6587,7 @@ class MainWindow(QMainWindow):
         self._set_size_totals_pending(selected=True)
         self._refresh_selection_buttons()
         self._update_chips_sql()
+        _perf_log("selection recount", started_at, roots=total)
 
     def _set_delete_armed(self, armed):
         self.btn_delete.setProperty("armed", bool(armed))
@@ -6532,9 +6734,7 @@ class MainWindow(QMainWindow):
                 self._update_status_column_visibility()
         finally:
             self.tree.setUpdatesEnabled(True)
-        self._rebuild_source_index_map()
-        self._restore_persistent_selection_to_model()
-        self._restore_bulk_scope_selection_to_model()
+        self._rebuild_and_restore_page_selection()
         self._refresh_selection_buttons()
         self.is_programmatic_expand = True
         try:
