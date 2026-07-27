@@ -371,7 +371,7 @@ class LoadingDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setFixedSize(360, 122)
+        self.setFixedSize(380, 140)
         self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
@@ -382,9 +382,15 @@ class LoadingDialog(QDialog):
         title.setObjectName("modalTitle")
         layout.addWidget(title)
 
-        detail_label = QLabel(detail)
-        detail_label.setObjectName("modalSecondary")
-        layout.addWidget(detail_label)
+        self.detail_label = QLabel(detail)
+        self.detail_label.setObjectName("modalSecondary")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setMinimumHeight(24)
+        self.detail_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
+        layout.addWidget(self.detail_label)
 
         bar = QProgressBar()
         bar.setRange(0, 0)
@@ -2556,6 +2562,14 @@ class FilterPanel(QFrame):
         self.age_input.setCursor(Qt.CursorShape.PointingHandCursor)
         self.age_input.valueChanged.connect(self._sync_slider_from_manual_age)
 
+        self.btn_apply_age = QPushButton("Go")
+        self.btn_apply_age.setObjectName("primaryBtn")
+        self.btn_apply_age.setFixedWidth(52)
+        self.btn_apply_age.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_apply_age.setToolTip("Apply age threshold")
+        self.btn_apply_age.setEnabled(False)
+        self.applied_age_value = self.AGE_FILTER_DISABLED
+
         bot_row = QHBoxLayout()
         bot_row.setSpacing(SPACE_SM)
         lbl_manual = QLabel("Months")
@@ -2563,9 +2577,13 @@ class FilterPanel(QFrame):
 
         bot_row.addWidget(lbl_manual)
         bot_row.addWidget(self.age_input)
+        bot_row.addWidget(self.btn_apply_age)
         bot_row.addStretch()
         age_layout.addLayout(bot_row)
         age_outer_layout.addWidget(self.age_box)
+
+        self.slider.valueChanged.connect(self._update_age_apply_state)
+        self.age_input.valueChanged.connect(self._update_age_apply_state)
         
         body.addWidget(age_section)
         body.addSpacing(SPACE_XL)
@@ -2748,9 +2766,14 @@ class FilterPanel(QFrame):
         del blocker
         self._update_age_label(value)
 
+    def _update_age_apply_state(self, _value=None):
+        controls_enabled = self.slider.isEnabled() and self.age_input.isEnabled()
+        has_pending_value = self.age_input.value() != self.applied_age_value
+        self.btn_apply_age.setEnabled(controls_enabled and has_pending_value)
+
     def get_older_than_secs(self):
         """Returns seconds threshold or None if age filtering is disabled."""
-        v = self.age_input.value()
+        v = self.applied_age_value
         if v == self.AGE_FILTER_DISABLED:
             return None
         return v * 30 * 24 * 3600  # months to seconds (approximate)
@@ -2850,7 +2873,9 @@ class FilterPanel(QFrame):
         self.age_input.setValue(self.AGE_FILTER_DISABLED)
         del blocker
         
+        self.applied_age_value = self.AGE_FILTER_DISABLED
         self._update_age_label(self.AGE_FILTER_DISABLED)
+        self._update_age_apply_state()
 
     def eventFilter(self, obj, event):
         if (
@@ -2974,12 +2999,6 @@ class MainWindow(QMainWindow):
         self.recount_timer = QTimer(self)
         self.recount_timer.setSingleShot(True)
         self.recount_timer.timeout.connect(self._do_recount)
-
-        # Debounce timer for age threshold so slider drags do not reload on every step.
-        self.filter_debounce_timer = QTimer(self)
-        self.filter_debounce_timer.setSingleShot(True)
-        self.filter_debounce_timer.setInterval(700)
-        self.filter_debounce_timer.timeout.connect(self._on_filter_changed)
 
         self.search_debounce_timer = QTimer(self)
         self.search_debounce_timer.setSingleShot(True)
@@ -3176,10 +3195,7 @@ class MainWindow(QMainWindow):
         self.fp.rb_videos.toggled.connect(self._on_videos_mode_toggled)
         self.fp.txt_search.returnPressed.connect(self._on_search_submitted)
         self.fp.searchCleared.connect(self._clear_search_filter)
-        # Age controls: wait for the user to pause before applying.
-        self.fp.slider.valueChanged.connect(self._on_age_slider_changed)
-        self.fp.slider.sliderReleased.connect(self._on_age_slider_released)
-        self.fp.age_input.editingFinished.connect(self._on_manual_age_finished)
+        self.fp.btn_apply_age.clicked.connect(self._on_age_filter_apply_clicked)
         self.fp.exclusionChanged.connect(self._on_scan_exclusions_changed)
         
         # View mode connections
@@ -3812,6 +3828,8 @@ class MainWindow(QMainWindow):
             self._load_page()
 
     def _apply_default_browse_preset(self, apply_now=True):
+        self.saved_age_threshold_value = self.fp.AGE_FILTER_DISABLED
+        self.age_controls_forced_disabled = False
         blockers = [
             QSignalBlocker(self.fp.bg),
             QSignalBlocker(self.fp.slider),
@@ -3890,7 +3908,7 @@ class MainWindow(QMainWindow):
         current_value = self.fp.age_input.value()
 
         if show_all:
-            if current_value != disabled_value:
+            if not getattr(self, 'age_controls_forced_disabled', False):
                 self.saved_age_threshold_value = current_value
             if current_value != disabled_value or self.fp.slider.value() != disabled_value:
                 blockers = [
@@ -3931,6 +3949,8 @@ class MainWindow(QMainWindow):
         cursor = Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
         self.fp.slider.setCursor(cursor)
         self.fp.age_input.setCursor(cursor)
+        self.fp.btn_apply_age.setCursor(cursor)
+        self.fp._update_age_apply_state()
 
     def _reset_filters(self):
         self.search_debounce_timer.stop()
@@ -4317,20 +4337,11 @@ class MainWindow(QMainWindow):
         self.applied_name_filter = ""
         self._on_filter_changed()
 
-    def _on_manual_age_finished(self):
-        if hasattr(self.fp, 'age_input'):
-            self.fp.age_input.interpretText()
+    def _on_age_filter_apply_clicked(self):
+        self.fp.age_input.interpretText()
+        self.fp.applied_age_value = self.fp.age_input.value()
+        self.fp._update_age_apply_state()
         self._on_filter_changed()
-
-    def _on_age_slider_changed(self, _value):
-        if not hasattr(self, 'fp') or not self.fp.slider.isEnabled():
-            return
-        self.filter_debounce_timer.start()
-
-    def _on_age_slider_released(self):
-        if not hasattr(self, 'fp') or not self.fp.slider.isEnabled():
-            return
-        self.filter_debounce_timer.start()
 
     def _on_videos_mode_toggled(self, checked):
         self._update_age_controls_enabled()
