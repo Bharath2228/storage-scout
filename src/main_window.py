@@ -236,6 +236,40 @@ def descendant_like_sql(path, column="path"):
     return sql, patterns
 
 
+def descendant_scope_sql(path, column="path"):
+    prefix_sql, prefix_params = descendant_like_sql(path, column)
+    normalized = os.path.normpath(str(path)).rstrip("\\/")
+    variants = list(dict.fromkeys((
+        str(path).rstrip("\\/"),
+        normalized,
+        normalized.replace("\\", "/"),
+        normalized.replace("/", "\\"),
+    )))
+    variants = [variant for variant in variants if variant]
+    if not variants:
+        return prefix_sql, prefix_params
+
+    placeholders = ",".join("?" * len(variants))
+    hierarchy_sql = (
+        f"{column} IN ("
+        "WITH RECURSIVE scoped_paths(path) AS ("
+        f"SELECT seed.path FROM file_index seed "
+        f"WHERE seed.path COLLATE NOCASE IN ({placeholders}) "
+        "UNION "
+        "SELECT child.path FROM file_index child "
+        "JOIN scoped_paths parent "
+        "ON child.parent_path = parent.path COLLATE NOCASE"
+        ") "
+        f"SELECT path FROM scoped_paths WHERE path COLLATE NOCASE NOT IN ({placeholders})"
+        ")"
+    )
+    return f"(({prefix_sql}) OR ({hierarchy_sql}))", [
+        *prefix_params,
+        *variants,
+        *variants,
+    ]
+
+
 def case_insensitive_path_sql(column="path"):
     return f"{column} = ? COLLATE NOCASE"
 
@@ -1868,7 +1902,7 @@ class PageLoadThread(QThread):
             params.append(extension_filter)
 
         if folder_scope:
-            scope_sql, scope_params = descendant_like_sql(folder_scope)
+            scope_sql, scope_params = descendant_scope_sql(folder_scope)
             where_clauses.append(f"({scope_sql})")
             params.extend(scope_params)
 
@@ -6263,7 +6297,7 @@ class MainWindow(QMainWindow):
             params.append(self.active_extension_filter)
 
         if self.folder_browser_scope:
-            scope_sql, scope_params = descendant_like_sql(self.folder_browser_scope)
+            scope_sql, scope_params = descendant_scope_sql(self.folder_browser_scope)
             where_clauses.append(f"({scope_sql})")
             params.extend(scope_params)
 

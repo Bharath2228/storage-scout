@@ -222,6 +222,31 @@ class FolderScopeQueryTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_nas_scope_follows_parent_links_when_child_path_uses_an_alias(self):
+        connection, root, scope = self._database()
+        aliased_child = os.path.normpath(r"Z:\dfs-alias\report.txt")
+        connection.execute(
+            "INSERT INTO file_index VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (aliased_child, "report.txt", 0, 25, 10, scope, ".txt", root),
+        )
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+            result = PageLoadThread(1, self._options(root, scope, "Files"))._load()
+
+        self.assertEqual(result["total_matches"], 2)
+        self.assertIn(
+            aliased_child,
+            [child["path"] for child in result["root_node"]["children"]],
+        )
+        connection.close()
+
     def test_tree_scope_hides_scope_and_ancestor_context_rows(self):
         connection, root, scope = self._database()
 
