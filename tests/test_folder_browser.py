@@ -291,7 +291,6 @@ class FolderScopeInteractionTests(unittest.TestCase):
         window = SimpleNamespace(
             current_scan_root=root,
             folder_browser_scope=os.path.join(root, "A"),
-            _update_folder_scope_bar=mock.Mock(),
             _on_filter_changed=mock.Mock(),
             _path_key=MethodType(MainWindow._path_key, SimpleNamespace()),
         )
@@ -299,7 +298,6 @@ class FolderScopeInteractionTests(unittest.TestCase):
         MainWindow._set_folder_browser_scope(window, root)
 
         self.assertIsNone(window.folder_browser_scope)
-        window._update_folder_scope_bar.assert_called_once_with()
         window._on_filter_changed.assert_called_once_with()
 
     def test_delete_of_scoped_folder_returns_to_root_and_refreshes_parent(self):

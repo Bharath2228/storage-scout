@@ -14,12 +14,12 @@ from PyQt6.QtWidgets import (
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
     QTableWidget, QTableWidgetItem, QComboBox, QAbstractScrollArea,
-    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect
+    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect, QCheckBox
 )
 from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings, QAbstractItemModel
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
 
-from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size
+from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size, format_age
 from .scanner import ScannerThread
 from .scan_exclusions import ScanExclusions
 from .scan_history import get_scan_history, record_scan_history
@@ -559,6 +559,540 @@ class LoadingDialog(QDialog):
         bar.setTextVisible(False)
         bar.setObjectName("loadingBar")
         layout.addWidget(bar)
+
+
+EXPORT_COLUMNS = (
+    ("name", "Name"),
+    ("path", "Full Path"),
+    ("type", "Type"),
+    ("location", "Location / Parent Path"),
+    ("last_modified", "Last Modified"),
+    ("age", "Age"),
+    ("size_bytes", "Size (bytes)"),
+    ("size_formatted", "Size (formatted)"),
+    ("extension", "Extension"),
+    ("status", "Status"),
+)
+DEFAULT_EXPORT_COLUMNS = (
+    "name",
+    "type",
+    "last_modified",
+    "age",
+    "size_formatted",
+)
+
+
+def _export_status(is_folder, modified_time, is_empty, age_cutoff):
+    if is_folder and is_empty:
+        return "Empty"
+    if not modified_time:
+        return "Active"
+    if age_cutoff is None:
+        return "Inactive"
+    return "Inactive" if modified_time <= age_cutoff else "Active"
+
+
+def _export_listing_row(row, columns, age_cutoff=None):
+    path, name, is_folder, size, modified_time, parent_path, extension, is_empty = row
+    size = int(size or 0)
+    modified_time = float(modified_time or 0)
+    values = {
+        "name": name or os.path.basename(path),
+        "path": path,
+        "type": "Folder" if is_folder else "File",
+        "location": parent_path or "",
+        "last_modified": (
+            datetime.fromtimestamp(modified_time).strftime("%b %d, %Y")
+            if modified_time else ""
+        ),
+        "age": format_age(modified_time),
+        "size_bytes": size,
+        "size_formatted": format_size(size),
+        "extension": "" if is_folder else (extension or ""),
+        "status": _export_status(bool(is_folder), modified_time, bool(is_empty), age_cutoff),
+    }
+    return [values[column] for column in columns]
+
+
+class ExportDialog(QDialog):
+    SCOPE_OPTIONS = (
+        ("current_page", "Current page only"),
+        ("all_matching", "All items matching current filters"),
+        ("entire_scan", "Entire scan"),
+        ("selected", "Selected / checked items only"),
+        ("bulk_scope", "Current bulk delete scope"),
+    )
+    TYPE_OPTIONS = (
+        ("listing", "Files and folders"),
+        ("file_types", "File type breakdown"),
+        ("folder_summary", "Folder summary"),
+        ("delete_audit", "Delete audit log"),
+        ("scan_history", "Scan history"),
+    )
+
+    def __init__(self, has_selection=False, has_bulk_scope=False, settings=None, parent=None):
+        super().__init__(parent)
+        self.settings = settings or QSettings("IBMS", "Watchdog")
+        self.setWindowTitle("Export CSV")
+        self.setModal(True)
+        self.setObjectName("modalDialog")
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
+
+        title = QLabel("Export data")
+        title.setObjectName("modalTitle")
+        layout.addWidget(title)
+
+        detail = QLabel("Choose the report, scope, and columns to include.")
+        detail.setObjectName("modalDetail")
+        layout.addWidget(detail)
+
+        type_row = QHBoxLayout()
+        type_label = QLabel("Export type")
+        type_label.setObjectName("sectionLabel")
+        self.type_combo = QComboBox()
+        for key, label in self.TYPE_OPTIONS:
+            self.type_combo.addItem(label, key)
+        type_row.addWidget(type_label)
+        type_row.addWidget(self.type_combo, 1)
+        layout.addLayout(type_row)
+
+        self.scope_frame = QFrame()
+        self.scope_frame.setObjectName("modalSection")
+        scope_layout = QVBoxLayout(self.scope_frame)
+        scope_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        scope_layout.setSpacing(SPACE_SM)
+        scope_title = QLabel("Scope")
+        scope_title.setObjectName("sectionLabel")
+        scope_layout.addWidget(scope_title)
+        self.scope_group = QButtonGroup(self)
+        self.scope_buttons = {}
+        for index, (key, label) in enumerate(self.SCOPE_OPTIONS):
+            button = QRadioButton(label)
+            button.setChecked(index == 0)
+            self.scope_group.addButton(button)
+            self.scope_buttons[key] = button
+            scope_layout.addWidget(button)
+        self.scope_buttons["selected"].setEnabled(has_selection)
+        self.scope_buttons["bulk_scope"].setEnabled(has_bulk_scope)
+        layout.addWidget(self.scope_frame)
+
+        self.columns_frame = QFrame()
+        self.columns_frame.setObjectName("modalSection")
+        columns_layout = QGridLayout(self.columns_frame)
+        columns_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        columns_layout.setHorizontalSpacing(SPACE_LG)
+        columns_layout.setVerticalSpacing(SPACE_SM)
+        columns_title = QLabel("Columns")
+        columns_title.setObjectName("sectionLabel")
+        columns_layout.addWidget(columns_title, 0, 0, 1, 2)
+        stored = self.settings.value("export_columns", list(DEFAULT_EXPORT_COLUMNS))
+        if isinstance(stored, str):
+            stored = [part for part in stored.split(",") if part]
+        stored = set(stored or DEFAULT_EXPORT_COLUMNS)
+        self.column_checks = {}
+        for index, (key, label) in enumerate(EXPORT_COLUMNS):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(key in stored)
+            self.column_checks[key] = checkbox
+            columns_layout.addWidget(checkbox, 1 + index // 2, index % 2)
+        layout.addWidget(self.columns_frame)
+
+        self.include_summary = QCheckBox("Include export summary header")
+        self.include_summary.setChecked(False)
+        layout.addWidget(self.include_summary)
+
+        self.validation_label = QLabel("")
+        self.validation_label.setObjectName("authMessage")
+        self.validation_label.setVisible(False)
+        layout.addWidget(self.validation_label)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("modalCancel")
+        cancel.clicked.connect(self.reject)
+        self.continue_button = QPushButton("Choose file...")
+        self.continue_button.setObjectName("primaryBtn")
+        self.continue_button.clicked.connect(self._accept_if_valid)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.continue_button)
+        layout.addLayout(buttons)
+
+        self.type_combo.currentIndexChanged.connect(self._update_type_state)
+        for checkbox in self.column_checks.values():
+            checkbox.toggled.connect(self._update_validation)
+        self._update_type_state()
+
+    def export_type(self):
+        return self.type_combo.currentData()
+
+    def export_scope(self):
+        for key, button in self.scope_buttons.items():
+            if button.isChecked():
+                return key
+        return "current_page"
+
+    def selected_columns(self):
+        return [
+            key for key, _label in EXPORT_COLUMNS
+            if self.column_checks[key].isChecked()
+        ]
+
+    def _update_type_state(self):
+        is_listing = self.export_type() == "listing"
+        self.scope_frame.setVisible(is_listing)
+        self.columns_frame.setVisible(is_listing)
+        self._update_validation()
+        self.adjustSize()
+
+    def _update_validation(self):
+        valid = self.export_type() != "listing" or bool(self.selected_columns())
+        self.continue_button.setEnabled(valid)
+        self.validation_label.setText("" if valid else "Select at least one column.")
+        self.validation_label.setVisible(not valid)
+
+    def _accept_if_valid(self):
+        if self.export_type() == "listing" and not self.selected_columns():
+            self._update_validation()
+            return
+        self.settings.setValue("export_columns", self.selected_columns())
+        self.accept()
+
+
+class ExportProgressDialog(QDialog):
+    cancel_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._allow_close = False
+        self.setWindowTitle("Exporting")
+        self.setModal(True)
+        self.setFixedSize(520, 190)
+        self.setObjectName("modalDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setSpacing(SPACE_MD)
+        title = QLabel("Creating CSV report")
+        title.setObjectName("modalTitle")
+        layout.addWidget(title)
+        self.detail_label = QLabel("Preparing export...")
+        self.detail_label.setObjectName("modalDetail")
+        layout.addWidget(self.detail_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setObjectName("loadingBar")
+        layout.addWidget(self.progress)
+        row = QHBoxLayout()
+        row.addStretch()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("modalCancel")
+        self.cancel_button.clicked.connect(self._cancel)
+        row.addWidget(self.cancel_button)
+        layout.addLayout(row)
+
+    def _cancel(self):
+        if not self.cancel_button.isEnabled():
+            return
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("Stopping...")
+        self.cancel_requested.emit()
+
+    def update_progress(self, done, total, detail):
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(done, total))
+            self.detail_label.setText(f"Exported {done:,} of {total:,} rows")
+        else:
+            self.progress.setRange(0, 0)
+            self.detail_label.setText(detail or f"Exported {done:,} rows")
+
+    def closeEvent(self, event):
+        if self._allow_close:
+            event.accept()
+            return
+        self._cancel()
+        event.ignore()
+
+
+class ExportThread(QThread):
+    progress = pyqtSignal(int, int, str)
+    export_finished = pyqtSignal(int, int)
+    export_failed = pyqtSignal(str)
+    export_cancelled = pyqtSignal()
+
+    LISTING_SELECT = (
+        "SELECT path, name, is_folder, size, modified_time, parent_path, extension, "
+        "CASE WHEN is_folder = 1 AND NOT EXISTS ("
+        "SELECT 1 FROM file_index child WHERE child.parent_path = file_index.path COLLATE NOCASE"
+        ") THEN 1 ELSE 0 END AS is_empty FROM file_index"
+    )
+
+    class _Cancelled(Exception):
+        pass
+
+    def __init__(self, target_path, config, parent=None):
+        super().__init__(parent)
+        self.target_path = os.path.normpath(target_path)
+        self.config = dict(config)
+        self.is_cancelled = False
+        self.temp_path = self.target_path + ".part"
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def _check_cancelled(self):
+        if self.is_cancelled:
+            raise self._Cancelled()
+
+    def run(self):
+        from src.file_index_tool import FileIndexTool
+
+        tool = None
+        row_count = 0
+        try:
+            os.makedirs(os.path.dirname(self.target_path) or ".", exist_ok=True)
+            tool = FileIndexTool()
+            with open(self.temp_path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.writer(handle)
+                if self.config.get("include_summary"):
+                    for key, value in self.config.get("metadata", {}).items():
+                        writer.writerow([f"# {key}", value])
+                    writer.writerow([])
+                row_count = self._write_export(tool, writer)
+            self._check_cancelled()
+            os.replace(self.temp_path, self.target_path)
+            self.export_finished.emit(row_count, os.path.getsize(self.target_path))
+        except self._Cancelled:
+            self._remove_partial()
+            self.export_cancelled.emit()
+        except Exception as exc:
+            self._remove_partial()
+            self.export_failed.emit(str(exc))
+        finally:
+            if tool is not None:
+                tool.close()
+
+    def _remove_partial(self):
+        try:
+            if os.path.exists(self.temp_path):
+                os.remove(self.temp_path)
+        except OSError:
+            pass
+
+    def _write_export(self, tool, writer):
+        export_type = self.config["export_type"]
+        if export_type == "listing":
+            return self._write_listing(tool, writer)
+        if export_type == "file_types":
+            return self._write_file_types(tool, writer)
+        if export_type == "folder_summary":
+            return self._write_folder_summary(tool, writer)
+        if export_type == "delete_audit":
+            return self._write_delete_audit(writer)
+        if export_type == "scan_history":
+            return self._write_scan_history(writer)
+        raise ValueError("Unsupported export type.")
+
+    def _write_listing(self, tool, writer):
+        columns = self.config["columns"]
+        labels = dict(EXPORT_COLUMNS)
+        writer.writerow([labels[column] for column in columns])
+        scope = self.config["scope"]
+        if scope == "current_page":
+            rows = self.config.get("current_page_rows", [])
+            total = len(rows)
+            for index, row in enumerate(rows, 1):
+                self._check_cancelled()
+                writer.writerow(_export_listing_row(row, columns, self.config.get("age_cutoff")))
+                if index % 100 == 0 or index == total:
+                    self.progress.emit(index, total, "Writing current page")
+            return total
+
+        if scope == "selected":
+            return self._write_selected_listing(tool, writer, columns)
+
+        cursor = tool.conn.cursor()
+        where_sql, params = self._listing_where()
+        cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
+        total = int(cursor.fetchone()[0] or 0)
+        prune_bulk_roots = (
+            scope == "bulk_scope"
+            and self.config.get("folder_delete_mode") == "all"
+        )
+        order_sql = " ORDER BY length(path), lower(path)" if prune_bulk_roots else " ORDER BY lower(path)"
+        query = self.LISTING_SELECT + where_sql + order_sql
+        cursor.execute(query, params)
+        written = 0
+        processed = 0
+        retained_paths = PathKeyIndex()
+        while True:
+            self._check_cancelled()
+            rows = cursor.fetchmany(1000)
+            if not rows:
+                break
+            for row in rows:
+                self._check_cancelled()
+                processed += 1
+                row_key = _path_key(row[0])
+                if prune_bulk_roots and retained_paths.has_ancestor(row_key, include_self=False):
+                    continue
+                writer.writerow(_export_listing_row(row, columns, self.config.get("age_cutoff")))
+                if prune_bulk_roots:
+                    retained_paths.add(row_key)
+                written += 1
+            self.progress.emit(processed, total, "Writing file and folder rows")
+        return written
+
+    def _write_selected_listing(self, tool, writer, columns):
+        paths = list(self.config.get("selected_paths", []))
+        total = len(paths)
+        written = 0
+        cursor = tool.conn.cursor()
+        for start in range(0, total, 900):
+            self._check_cancelled()
+            batch = paths[start:start + 900]
+            placeholders = ",".join("?" * len(batch))
+            cursor.execute(
+                self.LISTING_SELECT
+                + f" WHERE path COLLATE NOCASE IN ({placeholders}) ORDER BY lower(path)",
+                batch,
+            )
+            for row in cursor.fetchall():
+                self._check_cancelled()
+                writer.writerow(
+                    _export_listing_row(row, columns, self.config.get("age_cutoff"))
+                )
+                written += 1
+            self.progress.emit(written, total, "Writing selected items")
+        return written
+
+    def _listing_where(self):
+        scope = self.config["scope"]
+        if scope == "all_matching":
+            return self.config.get("where_sql", ""), list(self.config.get("params", []))
+        if scope == "entire_scan":
+            root = self.config.get("scan_root")
+            return (" WHERE root = ? COLLATE NOCASE", [root]) if root else ("", [])
+        if scope == "bulk_scope":
+            where_sql = self.config.get("bulk_where_sql", "")
+            params = list(self.config.get("bulk_params", []))
+            if self.config.get("folder_delete_mode") == "empty_only":
+                folder_clause = (
+                    "(is_folder = 0 OR (is_folder = 1 AND NOT EXISTS "
+                    "(SELECT 1 FROM file_index child "
+                    "WHERE child.parent_path = file_index.path COLLATE NOCASE)))"
+                )
+                where_sql = (
+                    where_sql + " AND " + folder_clause
+                    if where_sql else " WHERE " + folder_clause
+                )
+            return where_sql, params
+        raise ValueError("Unsupported export scope.")
+
+    def _write_file_types(self, tool, writer):
+        writer.writerow(["Extension", "Total Size (bytes)", "Total Size", "File Count"])
+        rows = tool.extension_breakdown()
+        for index, (extension, total_size, file_count) in enumerate(rows, 1):
+            self._check_cancelled()
+            writer.writerow([extension, total_size, format_size(total_size), file_count])
+            self.progress.emit(index, len(rows), "Writing file type breakdown")
+        return len(rows)
+
+    def _write_folder_summary(self, tool, writer):
+        writer.writerow(["Path", "Total Size (bytes)", "Total Size", "File Count", "Folder Count"])
+        cursor = tool.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM folder_summary")
+        total = int(cursor.fetchone()[0] or 0)
+        cursor.execute(
+            "SELECT path, total_size, file_count, folder_count "
+            "FROM folder_summary ORDER BY lower(path)"
+        )
+        written = 0
+        while True:
+            self._check_cancelled()
+            rows = cursor.fetchmany(1000)
+            if not rows:
+                break
+            for path, total_size, file_count, folder_count in rows:
+                writer.writerow([
+                    path,
+                    int(total_size or 0),
+                    format_size(int(total_size or 0)),
+                    int(file_count or 0),
+                    int(folder_count or 0),
+                ])
+                written += 1
+            self.progress.emit(written, total, "Writing folder summaries")
+        return written
+
+    def _write_delete_audit(self, writer):
+        from src.auth import DELETE_AUDIT_LOG_PATH
+
+        headers = [
+            "Timestamp", "User", "Action", "Items", "Size (bytes)",
+            "Errors", "Attempted User", "Reason",
+        ]
+        writer.writerow(headers)
+        if not os.path.exists(DELETE_AUDIT_LOG_PATH):
+            return 0
+        written = 0
+        with open(DELETE_AUDIT_LOG_PATH, "r", encoding="utf-8") as handle:
+            for line in handle:
+                self._check_cancelled()
+                parts = [part.strip() for part in line.strip().split("  ") if part.strip()]
+                if not parts:
+                    continue
+                fields = {"timestamp": parts[0]}
+                for part in parts[1:]:
+                    key, separator, value = part.partition("=")
+                    if separator:
+                        fields[key] = value
+                writer.writerow([
+                    fields.get("timestamp", ""),
+                    fields.get("user", ""),
+                    fields.get("action", ""),
+                    fields.get("items", ""),
+                    fields.get("size", ""),
+                    fields.get("errors", ""),
+                    fields.get("attempt", ""),
+                    fields.get("reason", ""),
+                ])
+                written += 1
+                if written % 250 == 0:
+                    self.progress.emit(written, 0, "Writing delete audit log")
+        self.progress.emit(written, written, "Writing delete audit log")
+        return written
+
+    def _write_scan_history(self, writer):
+        from src.scan_history import load_scan_history
+
+        writer.writerow([
+            "Root", "Item Count", "Total Size (bytes)", "Total Size",
+            "Last Scan Duration (seconds)", "Last Scanned At",
+        ])
+        history = load_scan_history()
+        entries = [entry for entry in history.values() if isinstance(entry, dict)]
+        entries.sort(key=lambda entry: str(entry.get("root", "")).casefold())
+        for index, entry in enumerate(entries, 1):
+            self._check_cancelled()
+            timestamp = float(entry.get("last_scanned_at", 0) or 0)
+            size = int(entry.get("total_size", 0) or 0)
+            writer.writerow([
+                entry.get("root", ""),
+                int(entry.get("item_count", 0) or 0),
+                size,
+                format_size(size),
+                float(entry.get("last_scan_duration_secs", 0) or 0),
+                datetime.fromtimestamp(timestamp).isoformat(timespec="seconds") if timestamp else "",
+            ])
+            self.progress.emit(index, len(entries), "Writing scan history")
+        return len(entries)
 
 
 class DeletePreviewThread(QThread):
@@ -3829,6 +4363,9 @@ class MainWindow(QMainWindow):
         self.file_type_thread = None
         self.file_type_request_id = 0
         self.file_types_dialog = None
+        self.export_thread = None
+        self.export_progress = None
+        self.export_target_path = None
         self.active_extension_filter = None
         self.settings = QSettings("IBMS", "Watchdog")
         self.current_theme_name = resolve_theme_name(self.settings.value("theme", "light"))
@@ -4066,7 +4603,7 @@ class MainWindow(QMainWindow):
 
         self.btn_export = QPushButton("Export CSV")
         self.btn_export.setObjectName("primaryBtn")
-        self.btn_export.setToolTip("Export the current view to CSV")
+        self.btn_export.setToolTip("Export files, summaries, audit data, or scan history to CSV")
         self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_export.setFixedHeight(38)
         self.btn_export.clicked.connect(self._export_csv)
@@ -4122,27 +4659,6 @@ class MainWindow(QMainWindow):
         right_v = QVBoxLayout(self.right_content)
         right_v.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
         right_v.setSpacing(SPACE_LG)
-
-        self.folder_scope_bar = QWidget()
-        scope_layout = QHBoxLayout(self.folder_scope_bar)
-        scope_layout.setContentsMargins(0, 0, 0, 0)
-        scope_layout.setSpacing(SPACE_SM)
-        self.folder_scope_label = QLabel("Viewing: All folders")
-        self.folder_scope_label.setObjectName("pageInfo")
-        self.folder_scope_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.btn_clear_folder_scope = QPushButton("Back to root")
-        self.btn_clear_folder_scope.setObjectName("ghostBtn")
-        self.btn_clear_folder_scope.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear_folder_scope.setToolTip("Clear folder scope")
-        self.btn_clear_folder_scope.clicked.connect(self._clear_folder_browser_scope)
-        scope_layout.addWidget(self.folder_scope_label, 1)
-        scope_layout.addWidget(self.btn_clear_folder_scope)
-        self.folder_scope_bar.setVisible(False)
-        self.btn_clear_folder_scope.setVisible(False)
-        right_v.addWidget(self.folder_scope_bar)
 
         # Controls row (above tree): expand / select all
         self.controls_bar = QWidget()
@@ -4699,38 +5215,6 @@ class MainWindow(QMainWindow):
         self.folder_browser.setVisible(not is_visible)
         self.btn_folder_browser.setChecked(not is_visible)
 
-    def _folder_scope_display_text(self):
-        scope = self.folder_browser_scope
-        root = (
-            getattr(self.folder_browser, 'root_path', None)
-            or getattr(self, 'current_scan_root', None)
-        )
-        if not root or not scope:
-            return "Viewing: All folders"
-        try:
-            relative = os.path.relpath(scope, root)
-        except ValueError:
-            relative = scope
-        root_name = os.path.basename(os.path.normpath(root).rstrip("\\/")) or root
-        display_path = root_name if relative == "." else os.path.join(root_name, relative)
-        return f"Viewing: {display_path}"
-
-    def _update_folder_scope_bar(self):
-        has_scan_root = bool(
-            getattr(self, 'current_scan_root', None)
-            and getattr(self.folder_browser, 'root_path', None)
-        )
-        self.folder_scope_bar.setVisible(has_scan_root)
-        text = self._folder_scope_display_text()
-        self.folder_scope_label.setText(text)
-        self.folder_scope_label.setToolTip(
-            self.folder_browser_scope
-            or self.folder_browser.root_path
-            or self.current_scan_root
-            or ""
-        )
-        self.btn_clear_folder_scope.setVisible(bool(self.folder_browser_scope))
-
     def _set_folder_browser_scope(self, path, reload=True):
         root = getattr(self, 'current_scan_root', None)
         normalized = os.path.normpath(path) if path else None
@@ -4739,16 +5223,11 @@ class MainWindow(QMainWindow):
         if normalized == self.folder_browser_scope:
             return
         self.folder_browser_scope = normalized
-        self._update_folder_scope_bar()
         if reload:
             self._on_filter_changed()
 
     def _on_folder_browser_scope_changed(self, path):
         self._set_folder_browser_scope(path)
-
-    def _clear_folder_browser_scope(self):
-        self.folder_browser.select_root()
-        self._set_folder_browser_scope(None)
 
     def _load_folder_browser_children(self, folder_path):
         if not folder_path or not getattr(self, 'current_scan_root', None):
@@ -4805,7 +5284,6 @@ class MainWindow(QMainWindow):
         self.folder_browser_threads.clear()
         self.folder_browser_scope = None
         self.folder_browser.set_root(root_path)
-        self._update_folder_scope_bar()
 
     def _refresh_folder_browser_from_cache(self, force=False):
         cache = getattr(self, 'folder_cache', None)
@@ -7998,31 +8476,196 @@ class MainWindow(QMainWindow):
     # Export CSV
     # -------------------------------------------------------------------------
 
+    def _current_page_export_rows(self):
+        rows = []
+        seen = set()
+
+        def collect(parent):
+            for row in range(self.proxy_model.rowCount(parent)):
+                index = self.proxy_model.index(row, 0, parent)
+                data = self.proxy_model.data(index, Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("path"):
+                    path = data["path"]
+                    key = _path_key(path)
+                    if key not in seen:
+                        seen.add(key)
+                        is_folder = bool(data.get("is_dir", False))
+                        status = data.get("status", "")
+                        rows.append((
+                            path,
+                            data.get("name") or os.path.basename(path),
+                            int(is_folder),
+                            int(data.get("size", 0) or 0),
+                            float(data.get("last_modified", 0) or 0),
+                            data.get("location") or os.path.dirname(path),
+                            "" if is_folder else os.path.splitext(path)[1].lower(),
+                            int(status == "Empty"),
+                        ))
+                if self.proxy_model.hasChildren(index):
+                    collect(index)
+
+        collect(QModelIndex())
+        return rows
+
+    def _export_metadata(self, export_type, scope):
+        exclusions = self.fp.get_scan_exclusions().to_dict()
+        age_months = getattr(self.fp, "applied_age_value", 0)
+        display_mode = "Show all"
+        if self.fp.rb_inactive.isChecked():
+            display_mode = "Inactive"
+        elif self.fp.rb_empty.isChecked():
+            display_mode = "Empty"
+        elif self.fp.rb_videos.isChecked():
+            display_mode = "Videos"
+        return {
+            "Exported at": datetime.now().isoformat(timespec="seconds"),
+            "Scan root": getattr(self, "current_scan_root", "") or "",
+            "Export type": export_type,
+            "Scope": scope,
+            "Display mode": display_mode,
+            "View mode": self.fp.get_view_mode(),
+            "Age threshold": "Off" if not age_months else f"{age_months} months",
+            "Search": self.applied_name_filter or "(none)",
+            "Extension filter": self.active_extension_filter or "(none)",
+            "Folder scope": self.folder_browser_scope or "(root)",
+            "Excluded folders": ", ".join(exclusions["folder_names"]) or "(none)",
+            "Excluded extensions": ", ".join(exclusions["extensions"]) or "(none)",
+            "Minimum file size": exclusions["min_file_size_bytes"],
+        }
+
+    def _default_export_filename(self, export_type, scope):
+        labels = {
+            "listing": scope,
+            "file_types": "file_types",
+            "folder_summary": "folder_summary",
+            "delete_audit": "delete_audit",
+            "scan_history": "scan_history",
+        }
+        suffix = labels.get(export_type, "report")
+        return f"watchdog_export_{suffix}_{datetime.now():%Y-%m-%d}.csv"
+
+    def _close_export_progress(self):
+        if self.export_progress:
+            self.export_progress._allow_close = True
+            self.export_progress.hide()
+            self.export_progress.close()
+            self.export_progress = None
+        self.btn_export.setEnabled(True)
+
+    def _on_export_finished(self, row_count, file_size):
+        target_path = self.export_target_path
+        self._close_export_progress()
+        self.export_target_path = None
+        self.lbl_status.setText(
+            f"Export complete. {row_count:,} rows written ({format_size(file_size)})."
+        )
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Information)
+        message.setWindowTitle("Export complete")
+        message.setText(f"Exported {row_count:,} rows ({format_size(file_size)}).")
+        message.setInformativeText(target_path or "")
+        reveal_button = message.addButton("Show in Explorer", QMessageBox.ButtonRole.ActionRole)
+        message.addButton(QMessageBox.StandardButton.Ok)
+        message.exec()
+        if message.clickedButton() is reveal_button and target_path:
+            self._open(target_path, is_dir=False)
+
+    def _on_export_failed(self, error):
+        self._close_export_progress()
+        self.export_target_path = None
+        self.lbl_status.setText("Export failed.")
+        QMessageBox.critical(self, "Export failed", error)
+
+    def _on_export_cancelled(self):
+        self._close_export_progress()
+        self.export_target_path = None
+        self.lbl_status.setText("Export cancelled.")
+
+    def _on_export_thread_stopped(self):
+        thread = self.sender()
+        if self.export_thread is thread:
+            self.export_thread = None
+        if thread is not None:
+            thread.deleteLater()
+
     def _export_csv(self):
-        if not self.proxy_model or not self.proxy_model.sourceModel():
+        if self.export_thread and self.export_thread.isRunning():
+            return
+        has_results = bool(self.proxy_model and self.proxy_model.sourceModel())
+        has_scan = bool(getattr(self, "current_scan_root", None))
+        if not has_results and not has_scan:
             QMessageBox.information(self, "Export", "Nothing to export - run a scan first.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Report", "", "CSV Files (*.csv)")
+
+        selected_paths = self._selected_roots_for_delete() if has_results else []
+        dialog = ExportDialog(
+            has_selection=bool(selected_paths),
+            has_bulk_scope=bool(self.bulk_delete_scope),
+            settings=self.settings,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        export_type = dialog.export_type()
+        scope = dialog.export_scope()
+        last_directory = self.settings.value(
+            "last_export_directory",
+            os.path.expanduser("~"),
+        )
+        default_name = self._default_export_filename(export_type, scope)
+        initial_path = os.path.join(str(last_directory), default_name)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save CSV Report",
+            initial_path,
+            "CSV Files (*.csv)",
+        )
         if not path:
             return
-        # Columns to exclude from export: 5 = Status
-        _SKIP_COLS = {5}
-        try:
-            with open(path, 'w', newline='', encoding='utf-8') as f:
-                w = csv.writer(f)
-                w.writerow([self.proxy_model.headerData(i, Qt.Orientation.Horizontal)
-                            for i in range(self.proxy_model.columnCount())
-                            if i not in _SKIP_COLS])
-                def write_rows(parent):
-                    for r in range(self.proxy_model.rowCount(parent)):
-                        row_data = [self.proxy_model.data(self.proxy_model.index(r, c, parent))
-                                    for c in range(self.proxy_model.columnCount())
-                                    if c not in _SKIP_COLS]
-                        w.writerow(row_data)
-                        child = self.proxy_model.index(r, 0, parent)
-                        if self.proxy_model.hasChildren(child):
-                            write_rows(child)
-                write_rows(QModelIndex())
-            QMessageBox.information(self, "Exported", "CSV report saved.")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        self.settings.setValue("last_export_directory", os.path.dirname(path))
+
+        where_sql, params = self._build_bulk_where()
+        options = self._page_load_options()
+        config = {
+            "export_type": export_type,
+            "scope": scope,
+            "columns": dialog.selected_columns(),
+            "include_summary": dialog.include_summary.isChecked(),
+            "metadata": self._export_metadata(export_type, scope),
+            "scan_root": getattr(self, "current_scan_root", None),
+            "age_cutoff": options.get("age_cutoff"),
+            "where_sql": where_sql,
+            "params": params,
+            "current_page_rows": (
+                self._current_page_export_rows()
+                if export_type == "listing" and scope == "current_page"
+                else []
+            ),
+            "selected_paths": selected_paths if scope == "selected" else [],
+        }
+        if scope == "bulk_scope" and self.bulk_delete_scope:
+            config.update({
+                "bulk_where_sql": self.bulk_delete_scope.get("where_sql", ""),
+                "bulk_params": list(self.bulk_delete_scope.get("params", [])),
+                "folder_delete_mode": self.bulk_delete_scope.get(
+                    "folder_delete_mode",
+                    "empty_only",
+                ),
+            })
+
+        self.export_target_path = path
+        self.export_progress = ExportProgressDialog(self)
+        self.export_thread = ExportThread(path, config, parent=self)
+        self.export_thread.progress.connect(self.export_progress.update_progress)
+        self.export_thread.export_finished.connect(self._on_export_finished)
+        self.export_thread.export_failed.connect(self._on_export_failed)
+        self.export_thread.export_cancelled.connect(self._on_export_cancelled)
+        self.export_thread.finished.connect(self._on_export_thread_stopped)
+        self.export_progress.cancel_requested.connect(self.export_thread.cancel)
+        self.btn_export.setEnabled(False)
+        self.lbl_status.setText("Exporting CSV report...")
+        self.export_thread.start()
+        self.export_progress.show()

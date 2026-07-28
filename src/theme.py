@@ -156,6 +156,17 @@ def apply_theme(app, theme_name="light"):
             border: 1px solid {border};
             border-radius: 8px;
         }}
+        QFrame#modalSection {{
+            background-color: {bg};
+            border: 1px solid {border};
+            border-radius: 6px;
+        }}
+        QFrame#modalSection QLabel,
+        QFrame#modalSection QCheckBox,
+        QFrame#modalSection QRadioButton {{
+            background-color: transparent;
+            border: none;
+        }}
         QLabel#modalTitle {{
             color: {text};
             font-size: {header_size}px;
