@@ -103,6 +103,10 @@ class FolderCacheRemovalTests(unittest.TestCase):
         self.assertEqual(self.cache.descendant_count(self.folder), 3)
         self.assertEqual(self.cache.descendant_count(self.subfolder), 1)
 
+    def test_folder_child_detection_ignores_files(self):
+        self.assertTrue(self.cache.has_folder_children(self.folder))
+        self.assertFalse(self.cache.has_folder_children(self.subfolder))
+
 
 class DeleteCompletionCacheTests(unittest.TestCase):
     def test_shared_delete_completion_invalidates_cache_and_refreshes_totals(self):

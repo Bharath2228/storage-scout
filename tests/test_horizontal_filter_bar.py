@@ -152,6 +152,40 @@ class HorizontalFilterBarTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_files_only_view_hides_expand_all(self):
+        window = MainWindow()
+        try:
+            window.fp.rb_inactive.setChecked(True)
+            window.fp.rb_view_files.setChecked(True)
+            window._update_expand_control_visibility()
+
+            self.assertTrue(window.btn_expand.isHidden())
+        finally:
+            window.close()
+
+    def test_selection_button_labels_do_not_move_the_controls(self):
+        window = MainWindow()
+        try:
+            window.resize(1500, 820)
+            window.show()
+            window.controls_bar.setVisible(True)
+            window.btn_current_page_selection.setVisible(True)
+            window.btn_select_all.setVisible(True)
+            window.btn_clear_selection.setVisible(False)
+            self.app.processEvents()
+            current_page_x = window.btn_current_page_selection.x()
+            clear_x = window.btn_clear_selection.x()
+
+            window.btn_select_all.setVisible(False)
+            window.btn_clear_selection.setVisible(True)
+            window.btn_current_page_selection.setText("Unselect Current Page")
+            self.app.processEvents()
+
+            self.assertEqual(window.btn_current_page_selection.x(), current_page_x)
+            self.assertEqual(window.btn_clear_selection.x(), clear_x)
+        finally:
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

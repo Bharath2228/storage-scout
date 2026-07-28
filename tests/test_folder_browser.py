@@ -18,6 +18,7 @@ from src.main_window import (
     LazyChildrenLoadThread,
     MainWindow,
     PageLoadThread,
+    WatchdogTreeModel,
 )
 
 
@@ -266,6 +267,35 @@ class FolderScopeQueryTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_empty_folder_result_has_no_expand_arrow(self):
+        connection, root, scope = self._database()
+        empty_folder = os.path.join(scope, "Empty")
+        connection.execute(
+            "INSERT INTO file_index VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (empty_folder, "Empty", 1, 0, 1, scope, "", root),
+        )
+        options = self._options(root, scope, "Tree")
+        options.update({"status_filter": None, "age_cutoff": None})
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+            result = PageLoadThread(1, options)._load()
+
+        model = WatchdogTreeModel(result["root_node"])
+        empty_index = next(
+            model.index(row, 0)
+            for row in range(model.rowCount())
+            if model.data(model.index(row, 0)) == "Empty"
+        )
+        self.assertFalse(model.hasChildren(empty_index))
+        connection.close()
+
     def test_shared_lazy_loader_can_return_folders_only(self):
         connection, root, scope = self._database()
         subfolder = os.path.join(scope, "Nested")
@@ -392,7 +422,7 @@ class FolderScopeQueryTests(unittest.TestCase):
                 thread.run()
 
         self.assertEqual([child["path"] for child in emitted], [folder])
-        self.assertFalse(emitted[0]["_children_loaded"])
+        self.assertTrue(emitted[0]["_children_loaded"])
         connection.close()
 
     def test_page_options_keep_lazy_tree_mode_for_folder_scope(self):

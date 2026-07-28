@@ -181,6 +181,13 @@ class FolderCache:
         with self._lock:
             return len(self.children.get(self._key(path), []))
 
+    def has_folder_children(self, path):
+        with self._lock:
+            return any(
+                self.items.get(child_key, {}).get('is_dir', False)
+                for child_key in self.children.get(self._key(path), [])
+            )
+
     def item_count(self):
         with self._lock:
             return len(self.items)

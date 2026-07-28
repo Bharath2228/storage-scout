@@ -1917,6 +1917,7 @@ class PageLoadThread(QThread):
             count_query += where_sql
 
         tool = FileIndexTool()
+        folders_with_children = set()
         try:
             cursor = tool.conn.cursor()
             cursor.execute(count_query, params)
@@ -1961,6 +1962,21 @@ class PageLoadThread(QThread):
                         batch,
                     )
                     rows.extend(cursor.fetchall())
+
+            folder_paths = [row[0] for row in rows if row[2]]
+            for index in range(0, len(folder_paths), 900):
+                batch = folder_paths[index:index + 900]
+                placeholders = ",".join("?" * len(batch))
+                cursor.execute(
+                    f"SELECT DISTINCT parent_path FROM file_index "
+                    f"WHERE parent_path COLLATE NOCASE IN ({placeholders})",
+                    batch,
+                )
+                folders_with_children.update(
+                    _path_key(parent_path)
+                    for (parent_path,) in cursor.fetchall()
+                    if parent_path
+                )
         finally:
             tool.close()
 
@@ -1991,7 +2007,10 @@ class PageLoadThread(QThread):
                 'last_modified': modified_time,
                 'status': status,
                 'children': [],
-                '_children_loaded': bool(filtered_expanded_tree),
+                '_children_loaded': (
+                    bool(filtered_expanded_tree)
+                    or not (is_folder and path_key in folders_with_children)
+                ),
                 '_page_order': original_fetched_order.get(path_key),
                 '_parent_path': actual_parent,
                 '_is_context_fetched': is_context,
@@ -2291,11 +2310,21 @@ class PageLoadThread(QThread):
                         0 if is_folder else stat_result.st_size,
                         stat_result.st_mtime,
                         root_path,
-                        1 if is_folder else 0,
+                        1 if is_folder and self._filesystem_path_has_children(entry.path) else 0,
                     ))
         except OSError:
             return []
         return self._sort_show_all_rows(rows)
+
+    def _filesystem_path_has_children(self, folder_path, folders_only=False):
+        try:
+            with os.scandir(folder_path) as entries:
+                for entry in entries:
+                    if not folders_only or entry.is_dir(follow_symlinks=True):
+                        return True
+        except OSError:
+            return False
+        return False
 
     def _load_direct_children_from_root_index(self, cursor, root_path):
         cursor.execute(
@@ -2443,6 +2472,16 @@ class LazyChildrenLoadThread(QThread):
             variants.extend((drive.rstrip("\\/"), drive.rstrip("\\/") + "\\"))
         return list(dict.fromkeys(variants))
 
+    def _filesystem_folder_has_children(self, folder_path):
+        try:
+            with os.scandir(folder_path) as entries:
+                for entry in entries:
+                    if not self.folders_only or entry.is_dir(follow_symlinks=True):
+                        return True
+        except OSError:
+            return False
+        return False
+
     def _status_for_child(self, is_folder, modified_time, has_child):
         if not self.apply_filter_options:
             return 'Active'
@@ -2500,6 +2539,7 @@ class LazyChildrenLoadThread(QThread):
         from src.file_index_tool import FileIndexTool
 
         tool = FileIndexTool()
+        folders_with_children = set()
         try:
             cursor = tool.conn.cursor()
             folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
@@ -2522,24 +2562,27 @@ class LazyChildrenLoadThread(QThread):
         finally:
             tool.close()
 
-        if not rows and self.folders_only and self.filesystem_fallback:
+        if not rows and self.filesystem_fallback:
             try:
                 with os.scandir(self.folder_path) as entries:
                     rows = []
                     for entry in entries:
                         try:
-                            if not entry.is_dir(follow_symlinks=True):
+                            is_folder = entry.is_dir(follow_symlinks=True)
+                            if self.folders_only and not is_folder:
                                 continue
                             try:
-                                modified_time = entry.stat(follow_symlinks=True).st_mtime
+                                stat_result = entry.stat(follow_symlinks=True)
+                                modified_time = stat_result.st_mtime
                             except OSError:
+                                stat_result = None
                                 modified_time = 0
                             rows.append(
                                 (
                                     entry.path,
                                     entry.name,
-                                    1,
-                                    0,
+                                    int(is_folder),
+                                    0 if is_folder or stat_result is None else stat_result.st_size,
                                     modified_time,
                                     self.folder_path,
                                 )
@@ -2550,6 +2593,7 @@ class LazyChildrenLoadThread(QThread):
                 folders_with_children = {
                     os.path.normcase(os.path.normpath(row[0]))
                     for row in rows
+                    if row[2] and self._filesystem_folder_has_children(row[0])
                 }
             except OSError as exc:
                 self.children_failed.emit(self.request_id, self.folder_path, str(exc))
@@ -2823,6 +2867,44 @@ class TotalsThread(QThread):
             return sum((row[2] or 0) for row in rows)
         return self._sum_paths_total_size(cursor, [row[0] for row in rows])
 
+    def _scoped_folder_total_size(self, cursor, folder_path):
+        if not folder_path:
+            return None
+
+        normalized = os.path.normpath(folder_path).rstrip("\\/")
+        self._raise_if_cancelled()
+        cursor.execute(
+            "SELECT total_size, file_count FROM folder_summary "
+            "WHERE path = ? COLLATE NOCASE",
+            (normalized,),
+        )
+        summary = cursor.fetchone()
+        if summary and (summary[1] or summary[0]):
+            return summary[0] or 0
+
+        descendant_sql, descendant_params = descendant_scope_sql(normalized)
+        cursor.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM file_index "
+            f"WHERE is_folder = 0 AND ({descendant_sql})",
+            descendant_params,
+        )
+        indexed_count, indexed_total = cursor.fetchone()
+        if indexed_count:
+            return indexed_total or 0
+
+        total = 0
+        try:
+            for current_folder, _folders, files in os.walk(normalized):
+                self._raise_if_cancelled()
+                for name in files:
+                    try:
+                        total += os.path.getsize(os.path.join(current_folder, name))
+                    except OSError:
+                        continue
+        except OSError:
+            return 0
+        return total
+
     def _compute(self):
         from src.file_index_tool import FileIndexTool
 
@@ -2866,6 +2948,10 @@ class TotalsThread(QThread):
                 folder_total, folder_file_count = self._browse_folder_total_size(cursor, self.options['root_path'])
 
             filtered_total = self._filtered_results_total_size(cursor)
+            scoped_folder_total = self._scoped_folder_total_size(
+                cursor,
+                self.options.get('folder_scope'),
+            )
 
         except TotalsThread._Cancelled:
             return None
@@ -2880,6 +2966,7 @@ class TotalsThread(QThread):
             'folder_file_count': folder_file_count,
             'filtered_total': filtered_total,
             'filtered_size_label': self.options.get('filtered_size_label'),
+            'scoped_folder_total': scoped_folder_total,
         }
 
 
@@ -4831,6 +4918,10 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.btn_expand)
         self.btn_select_all = QPushButton("Select All")
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select_all.setFixedWidth(150)
+        select_all_policy = self.btn_select_all.sizePolicy()
+        select_all_policy.setRetainSizeWhenHidden(True)
+        self.btn_select_all.setSizePolicy(select_all_policy)
         self.btn_select_all.clicked.connect(self._select_all)
         controls_layout.addWidget(self.btn_select_all)
 
@@ -4838,12 +4929,17 @@ class MainWindow(QMainWindow):
         self.btn_current_page_selection.setObjectName("currentPageSelectionBtn")
         self.btn_current_page_selection.setToolTip("Select every item shown on this page")
         self.btn_current_page_selection.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_current_page_selection.setFixedWidth(180)
         self.btn_current_page_selection.setVisible(False)
         self.btn_current_page_selection.clicked.connect(self._toggle_current_page_selection)
         controls_layout.addWidget(self.btn_current_page_selection)
 
         self.btn_clear_selection = QPushButton("Unselect All")
         self.btn_clear_selection.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_selection.setFixedWidth(150)
+        clear_selection_policy = self.btn_clear_selection.sizePolicy()
+        clear_selection_policy.setRetainSizeWhenHidden(True)
+        self.btn_clear_selection.setSizePolicy(clear_selection_policy)
         self.btn_clear_selection.clicked.connect(self._unselect_all)
         self.btn_clear_selection.setVisible(False)
         controls_layout.addWidget(self.btn_clear_selection)
@@ -5113,6 +5209,8 @@ class MainWindow(QMainWindow):
         self.chip_inactive_folders = self._chip("Inactive 0 folders", "chipInactive")
         self.chip_inactive_files = self._chip("0 files", "chipInactive")
         self.chip_browse_size = self._chip("Total Size --", "chipSpace")
+        self.chip_folder_size = self._chip("Folder Size --", "chipSpace")
+        self.chip_folder_size.setVisible(False)
         self.chip_filtered_size = self._chip("Filtered Size --", "chipSpace")
         self.chip_filtered_size.setVisible(False)
         self.chip_page_size = self._chip("Page --", "chipSpace")
@@ -5122,6 +5220,7 @@ class MainWindow(QMainWindow):
         sbl.addWidget(self.chip_inactive_folders)
         sbl.addWidget(self.chip_inactive_files)
         sbl.addWidget(self.chip_browse_size)
+        sbl.addWidget(self.chip_folder_size)
         sbl.addWidget(self.chip_filtered_size)
         sbl.addWidget(self.chip_page_size)
         sbl.addWidget(self.chip_selected_size)
@@ -5201,6 +5300,7 @@ class MainWindow(QMainWindow):
             running_total = getattr(self.folder_cache, "running_total_size", 0) or 0
         self._set_chip_text(self.chip_browse_size, f"Scanning… {self._format_chip_size(running_total)} so far")
 
+        self.chip_folder_size.setVisible(False)
         self.chip_filtered_size.setVisible(False)
 
     def _set_selected_summary_chip(self, size_text=None, folder_count=None, file_count=None):
@@ -5278,6 +5378,11 @@ class MainWindow(QMainWindow):
                 self._set_scanning_total_chip()
             else:
                 self._set_total_summary_chip("--")
+                if self.folder_browser_scope:
+                    self._set_chip_text(self.chip_folder_size, "Folder Size calculating...")
+                    self.chip_folder_size.setVisible(True)
+                else:
+                    self.chip_folder_size.setVisible(False)
                 if self.active_extension_filter is not None:
                     extension = self.active_extension_filter or "(no extension)"
                     self._set_chip_text(
@@ -5435,6 +5540,10 @@ class MainWindow(QMainWindow):
                     for child in cache.children_for(folder_path, 0, False)
                     if child.get('is_dir', False)
                 ]
+                for child in children:
+                    child['_children_loaded'] = not cache.has_folder_children(
+                        child.get('path')
+                    )
             if children:
                 self.folder_browser.apply_children(folder_path, children)
                 return
@@ -5510,6 +5619,10 @@ class MainWindow(QMainWindow):
                 for child in cache.children_for(node.path, 0, False)
                 if child.get('is_dir', False)
             ]
+            for child in children:
+                child['_children_loaded'] = not cache.has_folder_children(
+                    child.get('path')
+                )
             if children:
                 self.folder_browser.merge_children(node.path, children)
             elif self.is_scanning and not node.loaded:
@@ -5581,7 +5694,10 @@ class MainWindow(QMainWindow):
     def _update_expand_control_visibility(self):
         if not hasattr(self, 'btn_expand') or not hasattr(self, 'fp'):
             return
-        self.btn_expand.setVisible(not self.fp.rb_all.isChecked())
+        self.btn_expand.setVisible(
+            not self.fp.rb_all.isChecked()
+            and self.fp.get_view_mode() != "Files"
+        )
 
     def _update_status_column_visibility(self):
         if not hasattr(self, 'tree') or not hasattr(self, 'fp'):
@@ -7935,6 +8051,7 @@ class MainWindow(QMainWindow):
             'age_cutoff': age_cutoff,
             'is_scanning': self.is_scanning,
             'root_path': root_path,
+            'folder_scope': self.folder_browser_scope,
             'cached_folder_total': cached_folder_total,
             'current_page_file_paths': self._current_page_file_paths(),
             'selected_paths': self._selected_roots_for_delete(),
@@ -8149,6 +8266,15 @@ class MainWindow(QMainWindow):
         if self.is_scanning:
             self._set_scanning_total_chip()
             return
+        scoped_folder_total = result.get('scoped_folder_total')
+        if self.folder_browser_scope and scoped_folder_total is not None:
+            self._set_chip_text(
+                self.chip_folder_size,
+                f"Folder Size {self._format_chip_size(scoped_folder_total)}",
+            )
+            self.chip_folder_size.setVisible(True)
+        else:
+            self.chip_folder_size.setVisible(False)
         filtered_total = result.get('filtered_total')
         filtered_size_label = result.get('filtered_size_label')
         if filtered_size_label and filtered_total is not None:

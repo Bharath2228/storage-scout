@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -30,6 +31,17 @@ class FilteredTotalsTests(unittest.TestCase):
                 parent_path TEXT,
                 extension TEXT,
                 root TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE folder_summary (
+                path TEXT,
+                total_size INTEGER,
+                file_count INTEGER,
+                folder_count INTEGER,
+                child_count INTEGER
             )
             """
         )
@@ -110,6 +122,23 @@ class FilteredTotalsTests(unittest.TestCase):
             self.assertFalse(window.chip_filtered_size.isHidden())
         finally:
             window.close()
+
+    def test_scoped_folder_total_falls_back_to_filesystem_for_nas_content(self):
+        with tempfile.TemporaryDirectory() as scope:
+            os.makedirs(os.path.join(scope, "nested"))
+            with open(os.path.join(scope, "one.bin"), "wb") as handle:
+                handle.write(b"1234")
+            with open(os.path.join(scope, "nested", "two.bin"), "wb") as handle:
+                handle.write(b"123456")
+
+            result = self._compute(
+                folder_scope=scope,
+                filtered_where_sql=None,
+                filtered_where_params=(),
+                filtered_size_label=None,
+            )
+
+        self.assertEqual(result["scoped_folder_total"], 10)
 
 
 if __name__ == "__main__":
