@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import sys
+import tempfile
 import unittest
 from types import MethodType, SimpleNamespace
 from unittest import mock
@@ -110,7 +111,7 @@ class FolderBrowserModelTests(unittest.TestCase):
         self.assertEqual([child["path"] for child in loaded_children], [folder])
         browser.defer_load.assert_not_called()
 
-    def test_empty_live_scan_cache_keeps_folder_node_retryable(self):
+    def test_empty_live_scan_cache_starts_folder_browser_fallback(self):
         root = os.path.normpath(r"C:\scan")
         browser = SimpleNamespace(
             apply_children=mock.Mock(),
@@ -121,12 +122,28 @@ class FolderBrowserModelTests(unittest.TestCase):
             folder_cache=FolderCache(),
             is_scanning=True,
             folder_browser=browser,
+            folder_browser_request_id=0,
+            folder_browser_threads={},
+            _on_folder_browser_children_ready=mock.Mock(),
+            _on_folder_browser_children_failed=mock.Mock(),
         )
 
-        MainWindow._load_folder_browser_children(window, root)
+        fake_thread = SimpleNamespace(
+            children_ready=SimpleNamespace(connect=mock.Mock()),
+            children_failed=SimpleNamespace(connect=mock.Mock()),
+            finished=SimpleNamespace(connect=mock.Mock()),
+            start=mock.Mock(),
+        )
+        with mock.patch(
+            "src.main_window.LazyChildrenLoadThread",
+            return_value=fake_thread,
+        ) as thread_class:
+            MainWindow._load_folder_browser_children(window, root)
 
         browser.apply_children.assert_not_called()
         browser.defer_load.assert_called_once_with(root)
+        self.assertTrue(thread_class.call_args.kwargs["filesystem_fallback"])
+        fake_thread.start.assert_called_once_with()
 
 
 class FolderScopeQueryTests(unittest.TestCase):
@@ -304,6 +321,53 @@ class FolderScopeQueryTests(unittest.TestCase):
             thread.run()
 
         self.assertEqual([child["path"] for child in emitted], [child_path])
+        connection.close()
+
+    def test_folder_loader_can_enumerate_directories_outside_the_index(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            """
+            CREATE TABLE file_index (
+                path TEXT,
+                name TEXT,
+                is_folder INTEGER,
+                size INTEGER,
+                modified_time REAL,
+                parent_path TEXT,
+                extension TEXT,
+                root TEXT
+            )
+            """
+        )
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, "Folder A")
+            os.mkdir(folder)
+            with open(os.path.join(root, "ignored.txt"), "w", encoding="utf-8"):
+                pass
+
+            emitted = []
+            thread = LazyChildrenLoadThread(
+                1,
+                root,
+                folders_only=True,
+                filesystem_fallback=True,
+            )
+            thread.children_ready.connect(
+                lambda request_id, path, children: emitted.extend(children)
+            )
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                thread.run()
+
+        self.assertEqual([child["path"] for child in emitted], [folder])
+        self.assertFalse(emitted[0]["_children_loaded"])
         connection.close()
 
     def test_page_options_disable_unscoped_lazy_tree_mode(self):

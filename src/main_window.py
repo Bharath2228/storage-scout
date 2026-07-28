@@ -2315,6 +2315,7 @@ class LazyChildrenLoadThread(QThread):
         options=None,
         cache=None,
         folders_only=False,
+        filesystem_fallback=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -2326,6 +2327,7 @@ class LazyChildrenLoadThread(QThread):
         self.apply_filter_options = options is not None
         self.cache = cache
         self.folders_only = folders_only
+        self.filesystem_fallback = filesystem_fallback
 
     def _child_paths_with_children(self, cursor, child_paths):
         folders_with_children = set()
@@ -2437,6 +2439,39 @@ class LazyChildrenLoadThread(QThread):
             return
         finally:
             tool.close()
+
+        if not rows and self.folders_only and self.filesystem_fallback:
+            try:
+                with os.scandir(self.folder_path) as entries:
+                    rows = []
+                    for entry in entries:
+                        try:
+                            if not entry.is_dir(follow_symlinks=True):
+                                continue
+                            try:
+                                modified_time = entry.stat(follow_symlinks=True).st_mtime
+                            except OSError:
+                                modified_time = 0
+                            rows.append(
+                                (
+                                    entry.path,
+                                    entry.name,
+                                    1,
+                                    0,
+                                    modified_time,
+                                    self.folder_path,
+                                )
+                            )
+                        except OSError:
+                            continue
+                rows.sort(key=lambda row: ((row[1] or "").lower(), (row[0] or "").lower()))
+                folders_with_children = {
+                    os.path.normcase(os.path.normpath(row[0]))
+                    for row in rows
+                }
+            except OSError as exc:
+                self.children_failed.emit(self.request_id, self.folder_path, str(exc))
+                return
 
         children = []
         for path, name, is_folder, size, modified_time, parent_path in rows:
@@ -5256,10 +5291,9 @@ class MainWindow(QMainWindow):
                 self.folder_browser.apply_children(folder_path, children)
                 return
             if self.is_scanning:
-                # The live cache may not contain this folder yet. Leave the node
-                # fetchable so a later progress refresh can populate it.
+                # Keep the node retryable while the background loader falls back
+                # to enumerating folders directly from the selected location.
                 self.folder_browser.defer_load(folder_path)
-                return
         self.folder_browser_request_id += 1
         request_id = self.folder_browser_request_id
         thread = LazyChildrenLoadThread(
@@ -5270,6 +5304,7 @@ class MainWindow(QMainWindow):
             options=None,
             cache=cache,
             folders_only=True,
+            filesystem_fallback=True,
             parent=self,
         )
         self.folder_browser_threads[request_id] = thread
