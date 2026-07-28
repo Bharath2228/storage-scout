@@ -2201,6 +2201,11 @@ class PageLoadThread(QThread):
             if not rows and total_matches:
                 rows = self._load_indexed_rows_for_root(cursor, stored_root_path)
                 load_source = "root_index_all"
+            if not rows and is_scoped:
+                rows = self._load_direct_children_from_filesystem(stored_root_path)
+                if rows:
+                    total_matches = len(rows)
+                    load_source = "filesystem"
         finally:
             tool.close()
 
@@ -2268,6 +2273,29 @@ class PageLoadThread(QThread):
                 remainder = child_key[len(prefix):]
                 return "\\" not in remainder and "/" not in remainder
         return False
+
+    def _load_direct_children_from_filesystem(self, root_path):
+        rows = []
+        try:
+            with os.scandir(root_path) as entries:
+                for entry in entries:
+                    try:
+                        is_folder = entry.is_dir(follow_symlinks=True)
+                        stat_result = entry.stat(follow_symlinks=True)
+                    except OSError:
+                        continue
+                    rows.append((
+                        entry.path,
+                        entry.name,
+                        int(is_folder),
+                        0 if is_folder else stat_result.st_size,
+                        stat_result.st_mtime,
+                        root_path,
+                        1 if is_folder else 0,
+                    ))
+        except OSError:
+            return []
+        return self._sort_show_all_rows(rows)
 
     def _load_direct_children_from_root_index(self, cursor, root_path):
         cursor.execute(
@@ -8322,6 +8350,7 @@ class MainWindow(QMainWindow):
             sort_desc=self.sort_order == Qt.SortOrder.DescendingOrder,
             options=None if self.current_lazy_show_all_tree else getattr(self.tree_model, 'options', {}),
             cache=self.folder_cache,
+            filesystem_fallback=self.current_lazy_show_all_tree,
             parent=self,
         )
         self.lazy_child_threads[request_id] = {

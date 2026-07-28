@@ -450,6 +450,43 @@ class FolderScopeQueryTests(unittest.TestCase):
         )
         self.assertEqual(result["total_matches"], 2)
 
+    def test_scoped_lazy_tree_falls_back_to_accessible_filesystem_folder(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            nested = os.path.join(scope, "Nested")
+            os.makedirs(nested)
+            file_path = os.path.join(scope, "report.csv")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("data")
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            options = self._options(temp_root, scope, "Tree")
+            options.update({
+                "status_filter": None,
+                "age_cutoff": None,
+                "paginated": False,
+                "folder_cache": FolderCache(),
+                "lazy_show_all_tree": True,
+            })
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                result = PageLoadThread(1, options)._load()
+
+        self.assertEqual(result["debug_info"].split()[0], "show_all_source=filesystem")
+        self.assertEqual(
+            {child["name"] for child in result["root_node"]["children"]},
+            {"Nested", "report.csv"},
+        )
+        self.assertEqual(result["total_matches"], 2)
+        connection.close()
+
     def test_bulk_selection_where_clause_keeps_folder_scope(self):
         scope = os.path.normpath(r"C:\scan\A")
         checked = SimpleNamespace(isChecked=lambda: True)
