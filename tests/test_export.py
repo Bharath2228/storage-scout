@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -36,6 +37,9 @@ class _MemoryTool:
             )
             """
         )
+
+    def close(self):
+        self.conn.close()
 
 
 class ExportTests(unittest.TestCase):
@@ -141,6 +145,40 @@ class ExportTests(unittest.TestCase):
         thread.cancel()
         thread._remove_partial()
         self.assertFalse(os.path.exists(thread.temp_path))
+
+    def test_export_file_uses_excel_friendly_semicolon_columns(self):
+        target = os.path.join(self.temp_dir.name, "excel.csv")
+        tool = _MemoryTool()
+        thread = ExportThread(
+            target,
+            {
+                "export_type": "listing",
+                "scope": "current_page",
+                "columns": ["name", "path"],
+                "current_page_rows": [
+                    (
+                        r"C:\root\report.csv",
+                        "report.csv",
+                        0,
+                        10,
+                        1_700_000_000,
+                        r"C:\root",
+                        ".csv",
+                        0,
+                    )
+                ],
+                "age_cutoff": None,
+                "include_summary": False,
+            },
+        )
+
+        with mock.patch("src.file_index_tool.FileIndexTool", return_value=tool):
+            thread.run()
+
+        with open(target, "r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle, delimiter=";"))
+        self.assertEqual(rows[0], ["Name", "Full Path"])
+        self.assertEqual(rows[1], ["report.csv", r"C:\root\report.csv"])
 
 
 if __name__ == "__main__":

@@ -114,7 +114,7 @@ class CompletionNotificationTests(unittest.TestCase):
             MainWindow._show_system_notification(failing_window, "Title", "Message")
         )
 
-    def test_scan_stats_do_not_show_remaining_time(self):
+    def test_scan_stats_show_eta_on_the_same_line(self):
         window = SimpleNamespace(
             _format_scan_duration=MethodType(MainWindow._format_scan_duration, object()),
         )
@@ -130,9 +130,11 @@ class CompletionNotificationTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(text, "1,200 items scanned - 44 items/sec - 00:12 elapsed")
-        self.assertNotIn("remaining", text.lower())
-        self.assertNotIn("eta", text.lower())
+        self.assertEqual(
+            text,
+            "1,200 items scanned - 44 items/sec - 00:12 elapsed - ETA 00:12",
+        )
+        self.assertNotIn("\n", text)
 
     def test_unavailable_system_tray_is_skipped(self):
         window = SimpleNamespace(tray_icon=object())

@@ -370,7 +370,7 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertFalse(emitted[0]["_children_loaded"])
         connection.close()
 
-    def test_page_options_disable_unscoped_lazy_tree_mode(self):
+    def test_page_options_keep_lazy_tree_mode_for_folder_scope(self):
         scope = os.path.normpath(r"C:\scan\A")
         checked = SimpleNamespace(isChecked=lambda: True)
         unchecked = SimpleNamespace(isChecked=lambda: False)
@@ -396,7 +396,34 @@ class FolderScopeQueryTests(unittest.TestCase):
         options = MainWindow._page_load_options(window)
 
         self.assertEqual(options["folder_scope"], scope)
-        self.assertFalse(options["lazy_show_all_tree"])
+        self.assertTrue(options["lazy_show_all_tree"])
+
+    def test_scoped_lazy_tree_uses_selected_folder_cache_children(self):
+        root = os.path.normpath(r"\\server\share\scan")
+        scope = os.path.join(root, "Projects")
+        nested = os.path.join(scope, "Nested")
+        file_path = os.path.join(scope, "report.csv")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Projects", True, 0, 1, root)
+        cache.add_item(nested, "Nested", True, 0, 1, scope)
+        cache.add_item(file_path, "report.csv", False, 42, 1, scope)
+
+        options = self._options(root, scope, "Tree")
+        options.update({
+            "status_filter": None,
+            "age_cutoff": None,
+            "paginated": False,
+            "folder_cache": cache,
+            "lazy_show_all_tree": True,
+        })
+        result = PageLoadThread(1, options)._load()
+
+        self.assertEqual(
+            {child["path"] for child in result["root_node"]["children"]},
+            {nested, file_path},
+        )
+        self.assertEqual(result["total_matches"], 2)
 
     def test_bulk_selection_where_clause_keeps_folder_scope(self):
         scope = os.path.normpath(r"C:\scan\A")
@@ -425,6 +452,28 @@ class FolderScopeQueryTests(unittest.TestCase):
 
 
 class FolderScopeInteractionTests(unittest.TestCase):
+    def test_live_cache_readiness_uses_selected_folder_scope(self):
+        root = os.path.normpath(r"\\server\share\scan")
+        scope = os.path.join(root, "Projects")
+        cache = FolderCache()
+        cache.add_item(scope, "Projects", True, 0, 1, None)
+        cache.add_item(
+            os.path.join(scope, "report.csv"),
+            "report.csv",
+            False,
+            42,
+            1,
+            scope,
+        )
+        options = {
+            "lazy_show_all_tree": True,
+            "folder_cache": cache,
+            "scan_root": root,
+            "folder_scope": scope,
+        }
+
+        self.assertTrue(MainWindow._can_live_load_from_cache(SimpleNamespace(), options))
+
     def test_selecting_scan_root_clears_scope_and_reloads_filters(self):
         root = os.path.normpath(r"C:\scan")
         window = SimpleNamespace(
@@ -437,7 +486,7 @@ class FolderScopeInteractionTests(unittest.TestCase):
         MainWindow._set_folder_browser_scope(window, root)
 
         self.assertIsNone(window.folder_browser_scope)
-        window._on_filter_changed.assert_called_once_with()
+        window._on_filter_changed.assert_called_once_with(clear_extension=False)
 
     def test_delete_of_scoped_folder_returns_to_root_and_refreshes_parent(self):
         root = os.path.normpath(r"C:\scan")

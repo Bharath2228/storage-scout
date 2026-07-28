@@ -55,26 +55,56 @@ class AgeFilterApplyTests(unittest.TestCase):
 
         self.assertFalse(self.panel.btn_apply_age.isEnabled())
 
-    def test_show_all_preserves_pending_value_without_applying_it(self):
+    def test_show_all_keeps_age_filter_controls_available(self):
         self.panel.applied_age_value = 6
         self.panel.age_input.setValue(8)
         window = SimpleNamespace(
             fp=self.panel,
-            saved_age_threshold_value=0,
-            age_controls_forced_disabled=False,
         )
 
         self.panel.rb_all.setChecked(True)
         MainWindow._update_age_controls_enabled(window)
-        self.assertEqual(self.panel.age_input.value(), 0)
-        self.assertFalse(self.panel.btn_apply_age.isEnabled())
-
-        self.panel.rb_inactive.setChecked(True)
-        MainWindow._update_age_controls_enabled(window)
-
         self.assertEqual(self.panel.age_input.value(), 8)
         self.assertEqual(self.panel.applied_age_value, 6)
+        self.assertTrue(self.panel.age_input.isEnabled())
+        self.assertTrue(self.panel.slider.isEnabled())
         self.assertTrue(self.panel.btn_apply_age.isEnabled())
+
+    def test_show_all_page_query_uses_applied_age(self):
+        self.panel.rb_all.setChecked(True)
+        self.panel.applied_age_value = 6
+        window = SimpleNamespace(
+            fp=self.panel,
+            applied_name_filter="",
+            active_extension_filter=None,
+            folder_browser_scope=None,
+            current_page=0,
+            sort_column=0,
+            sort_order=0,
+            current_scan_root=r"C:\scan",
+            folder_cache=None,
+            txt_path=SimpleNamespace(text=lambda: r"C:\scan"),
+        )
+
+        options = MainWindow._page_load_options(window)
+
+        self.assertIsNotNone(options["age_cutoff"])
+        self.assertFalse(options["lazy_show_all_tree"])
+
+    def test_exclusions_rescan_saves_closes_and_restarts(self):
+        window = SimpleNamespace(
+            fp=SimpleNamespace(
+                _normalize_and_save_scan_exclusions=mock.Mock(),
+                close_popovers=mock.Mock(),
+            ),
+            start_scan=mock.Mock(),
+        )
+
+        MainWindow._rescan_from_exclusions(window)
+
+        window.fp._normalize_and_save_scan_exclusions.assert_called_once_with()
+        window.fp.close_popovers.assert_called_once_with()
+        window.start_scan.assert_called_once_with()
 
     def test_default_preset_clears_pending_and_applied_age(self):
         self.panel.applied_age_value = 6

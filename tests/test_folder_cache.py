@@ -98,6 +98,11 @@ class FolderCacheRemovalTests(unittest.TestCase):
         self.assertEqual(self.cache.folder_sizes[root_key], 30)
         self.assertEqual(self.cache.running_total_size, 30)
 
+    def test_descendant_count_is_scoped_to_requested_folder(self):
+        self.assertEqual(self.cache.descendant_count(self.root), 5)
+        self.assertEqual(self.cache.descendant_count(self.folder), 3)
+        self.assertEqual(self.cache.descendant_count(self.subfolder), 1)
+
 
 class DeleteCompletionCacheTests(unittest.TestCase):
     def test_shared_delete_completion_invalidates_cache_and_refreshes_totals(self):

@@ -185,6 +185,21 @@ class FolderCache:
         with self._lock:
             return len(self.items)
 
+    def descendant_count(self, path):
+        key = self._key(path)
+        with self._lock:
+            count = 0
+            pending = list(self.children.get(key, []))
+            visited = set()
+            while pending:
+                child_key = pending.pop()
+                if child_key in visited:
+                    continue
+                visited.add(child_key)
+                count += 1
+                pending.extend(self.children.get(child_key, []))
+            return count
+
     def children_for(self, path, sort_column=0, sort_desc=False):
         with self._lock:
             child_keys = list(self.children.get(self._key(path), []))

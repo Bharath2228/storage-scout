@@ -35,6 +35,7 @@ LIGHT_PALETTE = {
     "accent_hover": "#1d4ed8",
     "accent_pressed": "#1e40af",
     "accent_tint": "#eff6ff",
+    "on_accent": "#ffffff",
     "status_success": "#059669",
     "status_success_bg": "#ecfdf5",
     "status_success_border": "#d1fae5",
@@ -49,15 +50,16 @@ LIGHT_PALETTE = {
 DARK_PALETTE = {
     "name": "dark",
     "bg": "#0b1220",
-    "surface": "#111827",
-    "surface_hover": "#1f2937",
-    "border": "#334155",
-    "text": "#e5e7eb",
-    "text_muted": "#94a3b8",
+    "surface": "#131d2e",
+    "surface_hover": "#243247",
+    "border": "#475569",
+    "text": "#f1f5f9",
+    "text_muted": "#cbd5e1",
     "accent": "#60a5fa",
     "accent_hover": "#3b82f6",
     "accent_pressed": "#2563eb",
-    "accent_tint": "#172554",
+    "accent_tint": "#1e3a5f",
+    "on_accent": "#07111f",
     "status_success": "#34d399",
     "status_success_bg": "#0d3b2a",
     "status_success_border": "#166534",
@@ -99,7 +101,13 @@ def apply_theme(app, theme_name="light"):
     accent_hover = palette["accent_hover"]
     accent_pressed = palette["accent_pressed"]
     accent_tint = palette["accent_tint"]
+    on_accent = palette["on_accent"]
     combo_arrow = "down_arrow_dark.svg" if palette["name"] == "dark" else "down_arrow.svg"
+    spin_up_arrow = "up_arrow_dark.svg" if palette["name"] == "dark" else "up_arrow.svg"
+    tree_right_arrow = "tree_chevron_right_dark.svg" if palette["name"] == "dark" else "tree_chevron_right.svg"
+    tree_down_arrow = "tree_chevron_down_dark.svg" if palette["name"] == "dark" else "tree_chevron_down.svg"
+    tree_right_hover = "tree_chevron_right_dark_hover.svg" if palette["name"] == "dark" else "tree_chevron_right_hover.svg"
+    tree_down_hover = "tree_chevron_down_dark_hover.svg" if palette["name"] == "dark" else "tree_chevron_down_hover.svg"
     status_success = palette["status_success"]
     status_success_bg = palette["status_success_bg"]
     status_success_border = palette["status_success_border"]
@@ -134,6 +142,26 @@ def apply_theme(app, theme_name="light"):
         
         QMessageBox, QDialog {{
             background-color: {surface};
+        }}
+        QToolTip {{
+            background-color: {surface_hover};
+            color: {text};
+            border: 1px solid {border};
+            padding: {SPACE_XS}px {SPACE_SM}px;
+        }}
+        QMenu {{
+            background-color: {surface};
+            color: {text};
+            border: 1px solid {border};
+            padding: {SPACE_XS}px;
+        }}
+        QMenu::item {{
+            padding: {SPACE_SM}px {SPACE_LG}px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background-color: {accent_tint};
+            color: {text};
         }}
         QMessageBox QLabel, QDialog QLabel {{
             color: {text};
@@ -408,7 +436,7 @@ def apply_theme(app, theme_name="light"):
         QRadioButton[segment="true"]:checked {{
             background-color: {accent};
             border-color: {accent};
-            color: white;
+            color: {on_accent};
         }}
         QRadioButton[segment="true"]::indicator {{
             width: 0;
@@ -423,6 +451,15 @@ def apply_theme(app, theme_name="light"):
             background-color: {bg};
             border-top: 1px solid {border};
             color: {text_muted};
+        }}
+        QSplitter#mainSplitter::handle {{
+            background-color: {border};
+            width: 1px;
+            margin: 0 2px;
+        }}
+        QSplitter#mainSplitter::handle:hover,
+        QSplitter#mainSplitter::handle:pressed {{
+            background-color: {accent};
         }}
 
         QFrame#ageControl {{
@@ -471,7 +508,7 @@ def apply_theme(app, theme_name="light"):
             background-color: {bg};
         }}
         QTreeView::item:hover {{ background-color: {surface_hover}; color: {text}; }}
-        QTreeView::item:selected {{ background-color: {accent}; color: #fff; }}
+        QTreeView::item:selected {{ background-color: {accent}; color: {on_accent}; }}
         QTreeView::item:selected:hover {{ background-color: {accent_pressed}; color: #fff; }}
         
         QTreeView::indicator {{
@@ -497,22 +534,22 @@ def apply_theme(app, theme_name="light"):
         QTreeView::branch:has-children:closed,
         QTreeView::branch:closed:has-children:has-siblings,
         QTreeView::branch:closed:has-children:!has-siblings {{
-            image: url("{base_dir}/assets/tree_chevron_right.svg");
+            image: url("{base_dir}/assets/{tree_right_arrow}");
         }}
         QTreeView::branch:has-children:open,
         QTreeView::branch:open:has-children:has-siblings,
         QTreeView::branch:open:has-children:!has-siblings {{
-            image: url("{base_dir}/assets/tree_chevron_down.svg");
+            image: url("{base_dir}/assets/{tree_down_arrow}");
         }}
         QTreeView::branch:has-children:hover:closed,
         QTreeView::branch:hover:closed:has-children:has-siblings,
         QTreeView::branch:hover:closed:has-children:!has-siblings {{
-            image: url("{base_dir}/assets/tree_chevron_right_hover.svg");
+            image: url("{base_dir}/assets/{tree_right_hover}");
         }}
         QTreeView::branch:has-children:hover:open,
         QTreeView::branch:hover:open:has-children:has-siblings,
         QTreeView::branch:hover:open:has-children:!has-siblings {{
-            image: url("{base_dir}/assets/tree_chevron_down_hover.svg");
+            image: url("{base_dir}/assets/{tree_down_hover}");
         }}
 
 
@@ -585,6 +622,7 @@ def apply_theme(app, theme_name="light"):
         }}
         QHeaderView::section {{
             background-color: {surface};
+            color: {text};
             padding: {SPACE_MD}px {SPACE_LG}px;
             border: none;
             border-bottom: 1px solid {border};
@@ -736,7 +774,7 @@ def apply_theme(app, theme_name="light"):
         }}
         QSpinBox::up-arrow {{
             width: 10px; height: 6px;
-            image: url("{base_dir}/assets/up_arrow.svg");
+            image: url("{base_dir}/assets/{spin_up_arrow}");
         }}
         QSpinBox::down-arrow {{
             width: 10px; height: 6px;
@@ -769,7 +807,7 @@ def apply_theme(app, theme_name="light"):
         }}
         QPushButton#primaryBtn {{
             background-color: {accent};
-            color: white;
+            color: {on_accent};
             border: 1px solid {accent};
             border-radius: 6px;
             padding: {SPACE_MD}px {SPACE_LG}px;
@@ -861,7 +899,7 @@ def apply_theme(app, theme_name="light"):
         QPushButton#filterBtn:checked {{
             background-color: {accent};
             border: 1px solid {accent};
-            color: white;
+            color: {on_accent};
         }}
         QPushButton#filterBtn:pressed {{
             background-color: {accent_pressed};
@@ -1045,7 +1083,7 @@ def apply_theme(app, theme_name="light"):
 
         QLabel#agePill {{
             background-color: {accent};
-            color: white;
+            color: {on_accent};
             border-radius: 10px;
             padding: {SPACE_XS}px {SPACE_MD}px;
             font-size: {muted_size}px;

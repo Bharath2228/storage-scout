@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QHBoxLayout, QPushButton
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QSplitter
 
 from src.main_window import FilterPanel, FilterPopover, MainWindow
 
@@ -32,6 +32,7 @@ class HorizontalFilterBarTests(unittest.TestCase):
         self.assertEqual(self.panel.txt_search.height(), 36)
         self.assertEqual(self.panel.rb_all.height(), 36)
         self.assertEqual(self.panel.btn_age_toggle.height(), 36)
+        self.assertEqual(self.panel.btn_rescan_exclusions.text(), "Re-scan")
         self.assertFalse(hasattr(self.panel, "btn_close"))
         self.assertIsInstance(
             self.panel.rb_all.parentWidget().layout().itemAt(0).layout(),
@@ -112,6 +113,7 @@ class HorizontalFilterBarTests(unittest.TestCase):
                 {
                     "Browse",
                     "Re-scan",
+                    "Folders",
                     "Filters",
                     "Types",
                     "Export CSV",
@@ -120,6 +122,7 @@ class HorizontalFilterBarTests(unittest.TestCase):
             )
             self.assertNotIn("Ribbon", button_texts)
             self.assertNotIn("Classic toolbar", button_texts)
+            self.assertFalse(window.scan_stats.wordWrap())
 
             topbar_bottom = window.topbar.y() + window.topbar.height()
             self.assertEqual(window.fp.y(), topbar_bottom)
@@ -128,6 +131,24 @@ class HorizontalFilterBarTests(unittest.TestCase):
                 window.folder_browser.rect().topLeft(),
             ).y()
             self.assertEqual(folder_top, window.fp.y() + window.fp.height())
+        finally:
+            window.close()
+
+    def test_folder_panel_uses_a_horizontal_resizable_splitter(self):
+        window = MainWindow()
+        try:
+            window.resize(1500, 820)
+            window.show()
+            self.app.processEvents()
+
+            self.assertIsInstance(window.main_splitter, QSplitter)
+            self.assertEqual(window.main_splitter.orientation(), Qt.Orientation.Horizontal)
+            initial_width = window.folder_browser.width()
+            window.main_splitter.setSizes([360, 900])
+            self.app.processEvents()
+
+            self.assertGreater(window.folder_browser.width(), initial_width)
+            self.assertGreaterEqual(window.folder_browser.width(), 340)
         finally:
             window.close()
 

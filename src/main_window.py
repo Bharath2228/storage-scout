@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
     QTableWidget, QTableWidgetItem, QComboBox, QAbstractScrollArea,
-    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect, QCheckBox
+    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect, QCheckBox, QSplitter
 )
 from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings, QAbstractItemModel
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
@@ -859,7 +859,7 @@ class ExportThread(QThread):
             os.makedirs(os.path.dirname(self.target_path) or ".", exist_ok=True)
             tool = FileIndexTool()
             with open(self.temp_path, "w", newline="", encoding="utf-8-sig") as handle:
-                writer = csv.writer(handle)
+                writer = csv.writer(handle, delimiter=";")
                 if self.config.get("include_summary"):
                     for key, value in self.config.get("metadata", {}).items():
                         writer.writerow([f"# {key}", value])
@@ -2054,8 +2054,9 @@ class PageLoadThread(QThread):
     def _load_lazy_show_all_tree(self):
         from src.file_index_tool import FileIndexTool
 
-        root_path = self.options.get('scan_root') or ""
+        root_path = self.options.get('folder_scope') or self.options.get('scan_root') or ""
         root_path = os.path.normpath(root_path) if root_path else root_path
+        is_scoped = bool(self.options.get('folder_scope'))
         cache = self.options.get('folder_cache')
         cached_children = None
         if cache and cache.child_count(root_path) > 0:
@@ -2065,7 +2066,11 @@ class PageLoadThread(QThread):
                 self.options['sort_desc'],
             )
         if cached_children:
-            total_matches = max(cache.item_count() - 1, 0)
+            total_matches = (
+                cache.descendant_count(root_path)
+                if is_scoped
+                else max(cache.item_count() - 1, 0)
+            )
             root_node = {
                 'name': 'root',
                 'is_dir': True,
@@ -2090,8 +2095,16 @@ class PageLoadThread(QThread):
         tool = FileIndexTool()
         try:
             cursor = tool.conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM file_index")
-            total_rows = cursor.fetchone()[0] or 0
+            if is_scoped:
+                descendant_sql, descendant_params = descendant_like_sql(root_path)
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM file_index WHERE {descendant_sql}",
+                    descendant_params,
+                )
+                total_rows = cursor.fetchone()[0] or 0
+            else:
+                cursor.execute("SELECT COUNT(*) FROM file_index")
+                total_rows = cursor.fetchone()[0] or 0
 
             cursor.execute(
                 """
@@ -2110,6 +2123,8 @@ class PageLoadThread(QThread):
             stored_root_row = cursor.fetchone()
             if stored_root_row:
                 stored_root_path = stored_root_row[0]
+            elif is_scoped:
+                stored_root_path = root_path
             else:
                 cursor.execute(
                     """
@@ -2127,7 +2142,11 @@ class PageLoadThread(QThread):
                 "SELECT 1 FROM file_index WHERE path = ? COLLATE NOCASE LIMIT 1",
                 (stored_root_path,),
             )
-            total_matches = max(total_rows - (1 if cursor.fetchone() else 0), 0)
+            total_matches = (
+                total_rows
+                if is_scoped
+                else max(total_rows - (1 if cursor.fetchone() else 0), 0)
+            )
 
             cursor.execute(
                 "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
@@ -2175,7 +2194,8 @@ class PageLoadThread(QThread):
                 'display_location': parent_path,
             })
 
-        self._hide_scan_root_context(root_node)
+        if not is_scoped:
+            self._hide_scan_root_context(root_node)
 
         return {
             'root_node': root_node,
@@ -2724,6 +2744,23 @@ class TotalsThread(QThread):
         file_count, total = cursor.fetchone()
         return total or 0, file_count or 0
 
+    def _filtered_results_total_size(self, cursor):
+        where_sql = self.options.get('filtered_where_sql')
+        if not where_sql:
+            return None
+
+        self._raise_if_cancelled()
+        cursor.execute(
+            f"SELECT path, is_folder, size FROM file_index{where_sql}",
+            self.options.get('filtered_where_params', ()),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return 0
+        if all(not row[1] for row in rows):
+            return sum((row[2] or 0) for row in rows)
+        return self._sum_paths_total_size(cursor, [row[0] for row in rows])
+
     def _compute(self):
         from src.file_index_tool import FileIndexTool
 
@@ -2766,6 +2803,8 @@ class TotalsThread(QThread):
                 self._raise_if_cancelled()
                 folder_total, folder_file_count = self._browse_folder_total_size(cursor, self.options['root_path'])
 
+            filtered_total = self._filtered_results_total_size(cursor)
+
         except TotalsThread._Cancelled:
             return None
         finally:
@@ -2777,6 +2816,8 @@ class TotalsThread(QThread):
             'inactive_files': inactive_files,
             'folder_total': folder_total,
             'folder_file_count': folder_file_count,
+            'filtered_total': filtered_total,
+            'filtered_size_label': self.options.get('filtered_size_label'),
         }
 
 
@@ -2991,7 +3032,7 @@ class SizeBarDelegate(QStyledItemDelegate):
         text_color = (
             opt.palette.color(opt.palette.ColorRole.HighlightedText)
             if opt.state & QStyle.StateFlag.State_Selected
-            else opt.palette.color(opt.palette.ColorRole.Text)
+            else QColor(current_palette()["text"])
         )
         painter.setPen(text_color)
         painter.drawText(
@@ -3412,8 +3453,7 @@ class FolderBrowserPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setMinimumWidth(0)
-        self.setMaximumWidth(240)
+        self.setMinimumWidth(160)
         self.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Expanding,
@@ -3817,6 +3857,13 @@ class FilterPanel(QFrame):
         self.btn_reset_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
         exclusions_layout.addWidget(self.btn_reset_exclusions, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        self.btn_rescan_exclusions = QPushButton("Re-scan")
+        self.btn_rescan_exclusions.setObjectName("primaryBtn")
+        self.btn_rescan_exclusions.setToolTip("Save these exclusions and scan the selected folder again")
+        self.btn_rescan_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_rescan_exclusions.setFixedHeight(34)
+        exclusions_layout.addWidget(self.btn_rescan_exclusions)
+
         exclusions_outer_layout.addWidget(self.exclusions_box)
         body.addWidget(exclusions_section)
 
@@ -4063,10 +4110,13 @@ class FilterPanel(QFrame):
 
         self.lbl_exclusions_hint.setMaximumWidth(16777215)
         exclusions_layout.addWidget(self.lbl_exclusions_hint)
-        exclusions_layout.addWidget(
-            self.btn_reset_exclusions,
-            alignment=Qt.AlignmentFlag.AlignLeft,
-        )
+        exclusions_actions = QHBoxLayout()
+        exclusions_actions.setContentsMargins(0, 0, 0, 0)
+        exclusions_actions.setSpacing(SPACE_SM)
+        exclusions_actions.addWidget(self.btn_reset_exclusions)
+        exclusions_actions.addStretch()
+        exclusions_actions.addWidget(self.btn_rescan_exclusions)
+        exclusions_layout.addLayout(exclusions_actions)
 
     def _make_accordion_header(self, text):
         return AccordionHeader(text, self)
@@ -4185,11 +4235,15 @@ class FilterPanel(QFrame):
         palette = current_palette()
         if value == self.AGE_FILTER_DISABLED:
             self.lbl_pill.setText("Off")
-            self.lbl_pill.setStyleSheet(f"background-color: {palette['text_muted']}; color: white;")
+            self.lbl_pill.setStyleSheet(
+                f"background-color: {palette['text_muted']}; color: {palette['bg']};"
+            )
             self.lbl_val.setText("Age filtering is disabled")
         else:
             self.lbl_pill.setText(f"{value}m")
-            self.lbl_pill.setStyleSheet(f"background-color: {palette['accent']}; color: white;")
+            self.lbl_pill.setStyleSheet(
+                f"background-color: {palette['accent']}; color: {palette['on_accent']};"
+            )
             
             years = value // 12
             months = value % 12
@@ -4399,8 +4453,6 @@ class MainWindow(QMainWindow):
         self.cached_selected_total = None
         self.is_scanning = False
         self.folder_cache = None
-        self.saved_age_threshold_value = 0
-        self.age_controls_forced_disabled = False
         self.loading_dialog = None
         self.selection_loading_dialog = None
         self.selection_loading_min_visible_until = 0.0
@@ -4592,17 +4644,18 @@ class MainWindow(QMainWindow):
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
 
-        self.btn_folder_browser = QPushButton()
-        self.btn_folder_browser.setObjectName("ghostBtn")
+        self.btn_folder_browser = QPushButton("Folders")
+        self.btn_folder_browser.setObjectName("filterBtn")
         self.btn_folder_browser.setCheckable(True)
         self.btn_folder_browser.setChecked(True)
-        self.btn_folder_browser.setToolTip("Toggle folder browser")
+        self.btn_folder_browser.setToolTip("Show or hide folder navigation")
         self.btn_folder_browser.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_folder_browser.setIcon(
             QIcon(os.path.join(os.path.dirname(__file__), "assets", "folder_blue.svg"))
         )
         self.btn_folder_browser.setIconSize(QSize(18, 18))
-        self.btn_folder_browser.setFixedSize(38, 38)
+        self.btn_folder_browser.setFixedHeight(38)
+        self.btn_folder_browser.setMinimumWidth(92)
         self.btn_folder_browser.clicked.connect(self._toggle_folder_browser)
         tb.addWidget(self.btn_folder_browser)
 
@@ -4667,17 +4720,18 @@ class MainWindow(QMainWindow):
 
         vbox.addWidget(self.topbar)
 
-        # Main Content Area (Sidebar + Content)
-        main_area = QHBoxLayout()
-        main_area.setContentsMargins(0, 0, 0, 0)
-        main_area.setSpacing(0)
+        # Main Content Area (resizable folder browser + content)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("mainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(6)
 
         # Left sidebar (folder browser only)
         self.folder_browser = FolderBrowserPanel()
         self.folder_browser.closeRequested.connect(self._toggle_folder_browser)
         self.folder_browser.scopeChanged.connect(self._on_folder_browser_scope_changed)
         self.folder_browser.loadRequested.connect(self._load_folder_browser_children)
-        main_area.addWidget(self.folder_browser)
+        self.main_splitter.addWidget(self.folder_browser)
 
         self.fp = FilterPanel()
         self.fp.btn_reset.clicked.connect(self._reset_filters)
@@ -4688,6 +4742,7 @@ class MainWindow(QMainWindow):
         self.fp.searchCleared.connect(self._clear_search_filter)
         self.fp.btn_apply_age.clicked.connect(self._on_age_filter_apply_clicked)
         self.fp.exclusionChanged.connect(self._on_scan_exclusions_changed)
+        self.fp.btn_rescan_exclusions.clicked.connect(self._rescan_from_exclusions)
         
         # View mode connections
         self.fp.rb_view_tree.toggled.connect(self._on_filter_changed)
@@ -4716,6 +4771,14 @@ class MainWindow(QMainWindow):
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_select_all.clicked.connect(self._select_all)
         controls_layout.addWidget(self.btn_select_all)
+
+        self.btn_current_page_selection = QPushButton("Select Current Page")
+        self.btn_current_page_selection.setObjectName("currentPageSelectionBtn")
+        self.btn_current_page_selection.setToolTip("Select every item shown on this page")
+        self.btn_current_page_selection.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_current_page_selection.setVisible(False)
+        self.btn_current_page_selection.clicked.connect(self._toggle_current_page_selection)
+        controls_layout.addWidget(self.btn_current_page_selection)
 
         self.btn_clear_selection = QPushButton("Unselect All")
         self.btn_clear_selection.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4833,9 +4896,9 @@ class MainWindow(QMainWindow):
         self.scan_stats = QLabel("Preparing scan...")
         self.scan_stats.setObjectName("scanStats")
         self.scan_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scan_stats.setWordWrap(True)
-        self.scan_stats.setMaximumWidth(700)
-        self.scan_stats.setMinimumHeight(30)
+        self.scan_stats.setWordWrap(False)
+        self.scan_stats.setMaximumWidth(900)
+        self.scan_stats.setMinimumHeight(24)
 
         self.scan_path = QLabel()
         self.scan_path.setObjectName("scanPathValue")
@@ -4964,9 +5027,12 @@ class MainWindow(QMainWindow):
         self.tree_container.installEventFilter(self)
 
         right_v.addWidget(self.tree_container, 1)
-        main_area.addWidget(self.right_content, 1)
+        self.main_splitter.addWidget(self.right_content)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([240, 1000])
 
-        vbox.addLayout(main_area, 1)
+        vbox.addWidget(self.main_splitter, 1)
 
         # Status bar
         sb = QWidget()
@@ -4985,6 +5051,8 @@ class MainWindow(QMainWindow):
         self.chip_inactive_folders = self._chip("Inactive 0 folders", "chipInactive")
         self.chip_inactive_files = self._chip("0 files", "chipInactive")
         self.chip_browse_size = self._chip("Total Size --", "chipSpace")
+        self.chip_filtered_size = self._chip("Filtered Size --", "chipSpace")
+        self.chip_filtered_size.setVisible(False)
         self.chip_page_size = self._chip("Page --", "chipSpace")
         self.chip_selected_size = self._chip("0 B selected · 0 folders, 0 files", "chipSpace")
 
@@ -4992,6 +5060,7 @@ class MainWindow(QMainWindow):
         sbl.addWidget(self.chip_inactive_folders)
         sbl.addWidget(self.chip_inactive_files)
         sbl.addWidget(self.chip_browse_size)
+        sbl.addWidget(self.chip_filtered_size)
         sbl.addWidget(self.chip_page_size)
         sbl.addWidget(self.chip_selected_size)
         self._update_status_metrics_visibility()
@@ -5070,6 +5139,8 @@ class MainWindow(QMainWindow):
             running_total = getattr(self.folder_cache, "running_total_size", 0) or 0
         self._set_chip_text(self.chip_browse_size, f"Scanning… {self._format_chip_size(running_total)} so far")
 
+        self.chip_filtered_size.setVisible(False)
+
     def _set_selected_summary_chip(self, size_text=None, folder_count=None, file_count=None):
         if self.is_scanning:
             self.chip_selected_size.setVisible(False)
@@ -5117,9 +5188,12 @@ class MainWindow(QMainWindow):
         elapsed = 0.0 if not detail else detail.get("elapsed_secs", 0.0)
         rate = 0.0 if not detail else detail.get("rate", 0.0)
         scanned = 0 if not detail else detail.get("scanned", 0) or 0
+        eta = None if not detail else detail.get("eta_secs")
 
         rate_text = "rate calculating..." if rate <= 0 else f"{rate:,.0f} items/sec"
         parts = [f"{scanned:,} items scanned", rate_text, f"{self._format_scan_duration(elapsed)} elapsed"]
+        if eta is not None:
+            parts.append(f"ETA {self._format_scan_duration(eta)}")
         return " - ".join(parts)
 
     def _set_scan_stats(self, detail=None):
@@ -5142,6 +5216,18 @@ class MainWindow(QMainWindow):
                 self._set_scanning_total_chip()
             else:
                 self._set_total_summary_chip("--")
+                if self.active_extension_filter is not None:
+                    extension = self.active_extension_filter or "(no extension)"
+                    self._set_chip_text(
+                        self.chip_filtered_size,
+                        f"Type {extension} Size calculating...",
+                    )
+                    self.chip_filtered_size.setVisible(True)
+                elif self.applied_name_filter:
+                    self._set_chip_text(self.chip_filtered_size, "Search Size calculating...")
+                    self.chip_filtered_size.setVisible(True)
+                else:
+                    self.chip_filtered_size.setVisible(False)
         if page:
             self._set_chip_text(self.chip_page_size, "Page calculating...")
         if selected:
@@ -5270,7 +5356,7 @@ class MainWindow(QMainWindow):
             return
         self.folder_browser_scope = normalized
         if reload:
-            self._on_filter_changed()
+            self._on_filter_changed(clear_extension=False)
 
     def _on_folder_browser_scope_changed(self, path):
         self._set_folder_browser_scope(path)
@@ -5384,7 +5470,7 @@ class MainWindow(QMainWindow):
         # 1. Update proxy model so it can format the Status column correctly
         self._cancel_running_bulk_select_thread()
         self._update_age_controls_enabled()
-        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+        age_secs = self.fp.get_older_than_secs()
         if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked():
             status_filter = None
         elif self.fp.rb_empty.isChecked():
@@ -5415,8 +5501,6 @@ class MainWindow(QMainWindow):
             self._load_page()
 
     def _apply_default_browse_preset(self, apply_now=True):
-        self.saved_age_threshold_value = self.fp.AGE_FILTER_DISABLED
-        self.age_controls_forced_disabled = False
         blockers = [
             QSignalBlocker(self.fp.bg),
             QSignalBlocker(self.fp.slider),
@@ -5463,6 +5547,7 @@ class MainWindow(QMainWindow):
 
     def _set_page_controls_visible(self, visible):
         for widget in (
+            getattr(self, 'btn_current_page_selection', None),
             getattr(self, 'btn_prev_page', None),
             getattr(self, 'lbl_page_info', None),
             getattr(self, 'btn_next_page', None),
@@ -5490,53 +5575,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'fp'):
             return
 
-        show_all = self.fp.rb_all.isChecked()
-        disabled_value = self.fp.AGE_FILTER_DISABLED
-        current_value = self.fp.age_input.value()
-
-        if show_all:
-            if not getattr(self, 'age_controls_forced_disabled', False):
-                self.saved_age_threshold_value = current_value
-            if current_value != disabled_value or self.fp.slider.value() != disabled_value:
-                blockers = [
-                    QSignalBlocker(self.fp.slider),
-                    QSignalBlocker(self.fp.age_input),
-                ]
-                try:
-                    self.fp.slider.setValue(disabled_value)
-                    self.fp.age_input.setValue(disabled_value)
-                finally:
-                    del blockers
-                self.fp._update_age_label(disabled_value)
-            self.age_controls_forced_disabled = True
-        else:
-            restore_value = getattr(self, 'saved_age_threshold_value', disabled_value)
-            if (
-                getattr(self, 'age_controls_forced_disabled', False)
-                and current_value == disabled_value
-                and restore_value != disabled_value
-            ):
-                blockers = [
-                    QSignalBlocker(self.fp.slider),
-                    QSignalBlocker(self.fp.age_input),
-                ]
-                try:
-                    self.fp.slider.setValue(min(restore_value, self.fp.MAX_STALE_MONTHS))
-                    self.fp.age_input.setValue(restore_value)
-                finally:
-                    del blockers
-                self.fp._update_age_label(restore_value)
-            self.age_controls_forced_disabled = False
-
-        enabled = not show_all
-        self.fp.slider.setEnabled(enabled)
-        self.fp.age_input.setEnabled(enabled)
-        self.fp.lbl_pill.setEnabled(enabled)
-        self.fp.lbl_val.setEnabled(enabled)
-        cursor = Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
-        self.fp.slider.setCursor(cursor)
-        self.fp.age_input.setCursor(cursor)
-        self.fp.btn_apply_age.setCursor(cursor)
+        self.fp.slider.setEnabled(True)
+        self.fp.age_input.setEnabled(True)
+        self.fp.lbl_pill.setEnabled(True)
+        self.fp.lbl_val.setEnabled(True)
+        self.fp.slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fp.age_input.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fp.btn_apply_age.setCursor(Qt.CursorShape.PointingHandCursor)
         self.fp._update_age_apply_state()
 
     def _reset_filters(self):
@@ -5552,6 +5597,11 @@ class MainWindow(QMainWindow):
     def _on_scan_exclusions_changed(self):
         if self._has_completed_scan_context():
             self.fp.show_exclusions_rescan_hint(True)
+
+    def _rescan_from_exclusions(self):
+        self.fp._normalize_and_save_scan_exclusions()
+        self.fp.close_popovers()
+        self.start_scan()
 
     def _on_scan_exclusions_summary(self, excluded_count):
         self.last_scan_excluded_count = excluded_count or 0
@@ -5809,6 +5859,37 @@ class MainWindow(QMainWindow):
             selecting=selecting,
         )
 
+    def _toggle_current_page_selection(self):
+        if not self.tree_model:
+            return
+
+        mode = self._display_mode()
+        status = mode if mode in ("Inactive", "Empty") else None
+        videos_only = mode == "Videos"
+        indices = self._collect_bulk_target_indices(
+            status=status,
+            videos_only=videos_only,
+        )
+        if not indices:
+            self._refresh_selection_buttons()
+            return
+
+        if self._are_all_indices_checked(indices):
+            self._clear_current_page_checks()
+            return
+
+        self._preserve_results_focus = True
+        self._begin_chunked_bulk_selection(
+            indices,
+            Qt.CheckState.Checked,
+            current_page_count=len(indices),
+            label="current page",
+            offer_all_pages=False,
+            status=status,
+            videos_only=videos_only,
+            requested_scope="current",
+        )
+
     def _clear_all_checks(self):
         self.bulk_delete_scope = None
         self.selected_paths.clear()
@@ -5913,9 +5994,10 @@ class MainWindow(QMainWindow):
         self._set_delete_armed(False)
         self.btn_delete.setEnabled(False)
 
-    def _on_filter_changed(self):
+    def _on_filter_changed(self, *_args, clear_extension=True):
         # User manually changed a filter control - clear selections and apply
-        self.active_extension_filter = None
+        if clear_extension:
+            self.active_extension_filter = None
         self._discard_current_page_selection()
         self._apply_filters()
 
@@ -6114,7 +6196,7 @@ class MainWindow(QMainWindow):
     def _build_bulk_where(self, status=None, videos_only=False):
         where_clauses = []
         params = []
-        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+        age_secs = self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
         view_mode = self.fp.get_view_mode()
 
@@ -6461,6 +6543,24 @@ class MainWindow(QMainWindow):
         )
         self.btn_select_inactive.setVisible(mode == 'Inactive')
         self.btn_select_empty.setVisible(mode == 'Empty')
+        if hasattr(self, "btn_current_page_selection"):
+            page_targets = (
+                inactive_targets
+                if mode == "Inactive"
+                else empty_targets
+                if mode == "Empty"
+                else all_targets
+            )
+            page_checked = self._are_all_indices_checked(page_targets)
+            self.btn_current_page_selection.setText(
+                "Unselect Current Page" if page_checked else "Select Current Page"
+            )
+            self.btn_current_page_selection.setToolTip(
+                "Unselect every item shown on this page"
+                if page_checked
+                else "Select every item shown on this page"
+            )
+            self.btn_current_page_selection.setEnabled(bool(page_targets))
 
     def _collect_selection_button_targets(self, mode):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
@@ -7058,7 +7158,7 @@ class MainWindow(QMainWindow):
 
     def _can_live_load_from_cache(self, options):
         cache = options.get('folder_cache')
-        root_path = options.get('scan_root')
+        root_path = options.get('folder_scope') or options.get('scan_root')
         return bool(
             options.get('lazy_show_all_tree')
             and cache
@@ -7087,7 +7187,7 @@ class MainWindow(QMainWindow):
             else: status_filter = 'Inactive'
 
             view_mode = self.fp.get_view_mode()
-            age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+            age_secs = self.fp.get_older_than_secs()
             age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
 
             if status_filter == 'Inactive':
@@ -7289,7 +7389,7 @@ class MainWindow(QMainWindow):
         else:
             status_filter = 'Inactive'
 
-        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+        age_secs = self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
 
         limit = 2000
@@ -7300,7 +7400,6 @@ class MainWindow(QMainWindow):
             and age_cutoff is None
             and not name_filter
             and extension_filter is None
-            and folder_scope is None
         )
         filtered_expanded_tree = (
             view_mode == 'Tree'
@@ -7753,11 +7852,22 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Selection Error", error)
 
     def _build_totals_refresh_options(self):
-        age_secs = None if self.fp.rb_all.isChecked() else self.fp.get_older_than_secs()
+        age_secs = self.fp.get_older_than_secs()
         age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
         root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
         cached_folder_total = self.cached_folder_total if root_key and root_key == self.cached_folder_total_root else None
+
+        filtered_where_sql = None
+        filtered_where_params = ()
+        filtered_size_label = None
+        if self.applied_name_filter or self.active_extension_filter is not None:
+            filtered_where_sql, filtered_where_params = self._build_bulk_where()
+            if self.active_extension_filter is not None:
+                extension = self.active_extension_filter or "(no extension)"
+                filtered_size_label = f"Type {extension} Size"
+            else:
+                filtered_size_label = "Search Size"
 
         return {
             'age_cutoff': age_cutoff,
@@ -7766,6 +7876,9 @@ class MainWindow(QMainWindow):
             'cached_folder_total': cached_folder_total,
             'current_page_file_paths': self._current_page_file_paths(),
             'selected_paths': self._selected_roots_for_delete(),
+            'filtered_where_sql': filtered_where_sql,
+            'filtered_where_params': filtered_where_params,
+            'filtered_size_label': filtered_size_label,
         }
 
     def _start_totals_thread(self, request_id, options):
@@ -7818,6 +7931,7 @@ class MainWindow(QMainWindow):
         for button in (
             self.btn_expand,
             self.btn_select_all,
+            self.btn_current_page_selection,
             self.btn_clear_selection,
             self.btn_select_inactive,
             self.btn_select_empty,
@@ -7973,6 +8087,16 @@ class MainWindow(QMainWindow):
         if self.is_scanning:
             self._set_scanning_total_chip()
             return
+        filtered_total = result.get('filtered_total')
+        filtered_size_label = result.get('filtered_size_label')
+        if filtered_size_label and filtered_total is not None:
+            self._set_chip_text(
+                self.chip_filtered_size,
+                f"{filtered_size_label} {self._format_chip_size(filtered_total)}",
+            )
+            self.chip_filtered_size.setVisible(True)
+        else:
+            self.chip_filtered_size.setVisible(False)
         if result['folder_total'] is None:
             self._set_total_summary_chip("--")
         elif folder_total_is_unknown_zero:
