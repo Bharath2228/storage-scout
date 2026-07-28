@@ -12,7 +12,13 @@ class FolderCache:
         self.running_total_size = 0
 
     def _key(self, path):
-        return os.path.normcase(os.path.normpath(path)) if path else ""
+        if not path:
+            return ""
+        normalized = os.path.normcase(os.path.normpath(path))
+        drive, tail = os.path.splitdrive(normalized)
+        if drive.startswith("\\\\") and tail in ("", "\\", "/"):
+            return drive.rstrip("\\/")
+        return normalized
 
     def clear(self):
         with self._lock:

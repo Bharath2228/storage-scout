@@ -85,6 +85,31 @@ class FolderBrowserModelTests(unittest.TestCase):
         self.assertEqual([child["path"] for child in loaded_children], [folder])
         browser.defer_load.assert_not_called()
 
+    def test_live_scan_cache_matches_unc_root_with_or_without_trailing_separator(self):
+        browser_root = r"\\server\share"
+        scanned_root = browser_root + "\\"
+        folder = scanned_root + "Folder A"
+        cache = FolderCache()
+        cache.add_item(scanned_root, "share", True, 0, 1, None)
+        cache.add_item(folder, "Folder A", True, 0, 1, scanned_root)
+        browser = SimpleNamespace(
+            apply_children=mock.Mock(),
+            defer_load=mock.Mock(),
+        )
+        window = SimpleNamespace(
+            current_scan_root=browser_root,
+            folder_cache=cache,
+            is_scanning=True,
+            folder_browser=browser,
+        )
+
+        MainWindow._load_folder_browser_children(window, browser_root)
+
+        browser.apply_children.assert_called_once()
+        loaded_children = browser.apply_children.call_args.args[1]
+        self.assertEqual([child["path"] for child in loaded_children], [folder])
+        browser.defer_load.assert_not_called()
+
     def test_empty_live_scan_cache_keeps_folder_node_retryable(self):
         root = os.path.normpath(r"C:\scan")
         browser = SimpleNamespace(
