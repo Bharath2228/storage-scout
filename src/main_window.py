@@ -2351,6 +2351,14 @@ class LazyChildrenLoadThread(QThread):
             )
         return folders_with_children
 
+    def _parent_path_variants(self):
+        normalized = os.path.normpath(self.folder_path)
+        variants = [self.folder_path, normalized]
+        drive, tail = os.path.splitdrive(normalized)
+        if drive.startswith("\\\\") and tail in ("", "\\", "/"):
+            variants.extend((drive.rstrip("\\/"), drive.rstrip("\\/") + "\\"))
+        return list(dict.fromkeys(variants))
+
     def _status_for_child(self, is_folder, modified_time, has_child):
         if not self.apply_filter_options:
             return 'Active'
@@ -2401,8 +2409,9 @@ class LazyChildrenLoadThread(QThread):
                         child['status'] = status
                         filtered.append(child)
                 children = filtered
-            self.children_ready.emit(self.request_id, self.folder_path, children)
-            return
+            if children:
+                self.children_ready.emit(self.request_id, self.folder_path, children)
+                return
 
         from src.file_index_tool import FileIndexTool
 
@@ -2410,13 +2419,15 @@ class LazyChildrenLoadThread(QThread):
         try:
             cursor = tool.conn.cursor()
             folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
+            parent_variants = self._parent_path_variants()
+            placeholders = ",".join("?" * len(parent_variants))
             cursor.execute(
                 "SELECT path, name, is_folder, size, modified_time, parent_path "
                 "FROM file_index "
-                "WHERE parent_path = ? COLLATE NOCASE "
+                f"WHERE parent_path COLLATE NOCASE IN ({placeholders}) "
                 f"{folders_only_sql} "
                 f"ORDER BY {build_sort_order_clause('Tree', self.sort_column, self.sort_desc)}",
-                (self.folder_path,),
+                parent_variants,
             )
             rows = cursor.fetchall()
             child_folder_paths = [path for path, _name, is_folder, _size, _modified_time, _parent_path in rows if is_folder]
@@ -5320,6 +5331,12 @@ class MainWindow(QMainWindow):
                 self.folder_browser.merge_children(node.path, children)
             elif self.is_scanning and not node.loaded:
                 self.folder_browser.defer_load(node.path)
+            elif (
+                not self.is_scanning
+                and index.isValid()
+                and self.folder_browser.tree.isExpanded(index)
+            ):
+                model.fetchMore(index)
 
     def _toggle_filters(self):
         is_visible = self.fp.isVisible()

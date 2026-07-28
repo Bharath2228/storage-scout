@@ -256,6 +256,56 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertFalse(folder_a["_children_loaded"])
         connection.close()
 
+    def test_folder_loader_falls_back_to_sql_for_incomplete_unc_cache(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            """
+            CREATE TABLE file_index (
+                path TEXT,
+                name TEXT,
+                is_folder INTEGER,
+                size INTEGER,
+                modified_time REAL,
+                parent_path TEXT,
+                extension TEXT,
+                root TEXT
+            )
+            """
+        )
+        requested_root = r"\\server\share"
+        stored_root = requested_root + "\\"
+        child_path = stored_root + "Folder A"
+        connection.execute(
+            "INSERT INTO file_index VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (child_path, "Folder A", 1, 0, 1, stored_root, "", stored_root),
+        )
+        cache = FolderCache()
+        cache.add_item(stored_root, "share", True, 0, 1, None)
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        emitted = []
+        thread = LazyChildrenLoadThread(
+            1,
+            requested_root,
+            cache=cache,
+            folders_only=True,
+        )
+        thread.children_ready.connect(
+            lambda request_id, path, children: emitted.extend(children)
+        )
+
+        with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+            thread.run()
+
+        self.assertEqual([child["path"] for child in emitted], [child_path])
+        connection.close()
+
     def test_page_options_disable_unscoped_lazy_tree_mode(self):
         scope = os.path.normpath(r"C:\scan\A")
         checked = SimpleNamespace(isChecked=lambda: True)
