@@ -266,11 +266,13 @@ class FolderScopeQueryTests(unittest.TestCase):
             with open(os.path.join(excluded_only, "ignored.tmp"), "wb") as handle:
                 handle.write(b"hidden")
 
+            cache = FolderCache()
             tool = file_index_tool.FileIndexTool(
                 os.path.join(temp_dir, "index.db")
             )
             tool.scan(
                 root,
+                cache=cache,
                 exclusions=ScanExclusions(
                     folder_names=[],
                     extensions=[".tmp"],
@@ -316,6 +318,46 @@ class FolderScopeQueryTests(unittest.TestCase):
                 os.path.basename(root),
                 {child["name"] for child in all_result["root_node"]["children"]},
             )
+            self.assertEqual(
+                {child["name"] for child in all_result["root_node"]["children"]},
+                {"Truly Empty"},
+            )
+            self.assertNotIn(
+                cache._key(excluded_only),
+                cache.items,
+            )
+            tool.close()
+
+    def test_nested_extension_only_folder_chain_is_pruned(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = os.path.join(temp_dir, "scan")
+            parent = os.path.join(root, "Parent")
+            child = os.path.join(parent, "Child")
+            os.makedirs(child)
+            with open(os.path.join(child, "archive.iso"), "wb") as handle:
+                handle.write(b"excluded")
+
+            cache = FolderCache()
+            tool = file_index_tool.FileIndexTool(
+                os.path.join(temp_dir, "index.db")
+            )
+            tool.scan(
+                root,
+                cache=cache,
+                exclusions=ScanExclusions(
+                    folder_names=[],
+                    extensions=[".iso"],
+                ),
+            )
+
+            cursor = tool.conn.cursor()
+            cursor.execute("SELECT path FROM file_index")
+            indexed_paths = {_path for (_path,) in cursor.fetchall()}
+            self.assertIn(os.path.normpath(root), indexed_paths)
+            self.assertNotIn(os.path.normpath(parent), indexed_paths)
+            self.assertNotIn(os.path.normpath(child), indexed_paths)
+            self.assertNotIn(cache._key(parent), cache.items)
+            self.assertNotIn(cache._key(child), cache.items)
             tool.close()
 
     def test_nas_scope_follows_parent_links_when_child_path_uses_an_alias(self):
@@ -836,6 +878,60 @@ class FolderScopeQueryTests(unittest.TestCase):
             ["keep.txt"],
         )
         self.assertEqual([child["name"] for child in emitted], ["keep.txt"])
+        connection.close()
+
+    def test_filesystem_fallback_hides_extension_only_folder_but_keeps_true_empty(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            excluded_only = os.path.join(scope, "Excluded Only")
+            truly_empty = os.path.join(scope, "Truly Empty")
+            os.makedirs(excluded_only)
+            os.makedirs(truly_empty)
+            with open(os.path.join(excluded_only, "archive.iso"), "wb") as handle:
+                handle.write(b"excluded")
+
+            exclusions = ScanExclusions(
+                folder_names=[],
+                extensions=[".iso"],
+            )
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            options = self._options(temp_root, scope, "Folders")
+            options.update({
+                "status_filter": None,
+                "age_cutoff": None,
+                "scan_exclusions": exclusions,
+            })
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                result = PageLoadThread(1, options)._load()
+
+            emitted = []
+            thread = LazyChildrenLoadThread(
+                1,
+                scope,
+                folders_only=True,
+                filesystem_fallback=True,
+                scan_exclusions=exclusions,
+            )
+            thread.children_ready.connect(
+                lambda request_id, path, children: emitted.extend(children)
+            )
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                thread.run()
+
+        self.assertEqual(
+            [child["name"] for child in result["root_node"]["children"]],
+            ["Truly Empty"],
+        )
+        self.assertEqual([child["name"] for child in emitted], ["Truly Empty"])
         connection.close()
 
     def test_lazy_filesystem_child_loader_expands_nested_nas_folder(self):

@@ -89,6 +89,61 @@ def folder_is_physically_empty(cursor, path):
         return False
 
 
+def filesystem_folder_has_visible_entries(
+    folder_path,
+    exclusions,
+    cancel_check=None,
+    visited=None,
+):
+    if cancel_check:
+        cancel_check()
+    visited = visited if visited is not None else set()
+    folder_key = _path_key(folder_path)
+    if folder_key in visited:
+        return False
+    visited.add(folder_key)
+
+    try:
+        with os.scandir(folder_path) as entries:
+            folder_entries = list(entries)
+    except OSError:
+        return False
+    if not folder_entries:
+        return True
+
+    for entry in folder_entries:
+        if cancel_check:
+            cancel_check()
+        try:
+            is_folder = entry.is_dir(follow_symlinks=True)
+            size = 0 if is_folder else entry.stat(follow_symlinks=True).st_size
+        except OSError:
+            continue
+        if exclusions is not None:
+            if is_folder and exclusions.matches_excluded_folder(entry.name):
+                continue
+            if not is_folder and (
+                exclusions.matches_excluded_extension(
+                    os.path.splitext(entry.name)[1].lower()
+                )
+                or (
+                    exclusions.min_file_size_bytes > 0
+                    and size < exclusions.min_file_size_bytes
+                )
+            ):
+                continue
+        if not is_folder:
+            return True
+        if filesystem_folder_has_visible_entries(
+            entry.path,
+            exclusions,
+            cancel_check=cancel_check,
+            visited=visited,
+        ):
+            return True
+    return False
+
+
 class PathKeyIndex:
     """Indexed normalized paths with depth-based ancestor and bisected descendant lookup."""
 
@@ -2262,6 +2317,15 @@ class PageLoadThread(QThread):
                     if is_folder:
                         pending.append(entry.path)
 
+            all_rows = self._prune_exclusion_only_folders(
+                all_rows,
+                physical_child_keys,
+            )
+            visible_child_keys = {
+                _path_key(row[5])
+                for row in all_rows.values()
+                if row[5]
+            }
             folder_sizes = {
                 key: 0
                 for key, row in all_rows.items()
@@ -2352,6 +2416,42 @@ class PageLoadThread(QThread):
             visible_child_keys,
             total_matches,
         )
+
+    def _prune_exclusion_only_folders(self, all_rows, physical_child_keys):
+        children_by_parent = {}
+        for key, row in all_rows.items():
+            children_by_parent.setdefault(_path_key(row[5]), []).append((key, row))
+
+        visible_folder_keys = set()
+        hidden_folder_keys = set()
+        folder_rows = [
+            (key, row)
+            for key, row in all_rows.items()
+            if row[2]
+        ]
+        folder_rows.sort(
+            key=lambda item: item[0].count(os.sep),
+            reverse=True,
+        )
+        for key, _row in folder_rows:
+            children = children_by_parent.get(key, [])
+            is_physically_empty = key not in physical_child_keys
+            has_visible_file = any(not child_row[2] for _child_key, child_row in children)
+            has_visible_folder = any(
+                child_key in visible_folder_keys
+                for child_key, child_row in children
+                if child_row[2]
+            )
+            if is_physically_empty or has_visible_file or has_visible_folder:
+                visible_folder_keys.add(key)
+            else:
+                hidden_folder_keys.add(key)
+
+        return {
+            key: row
+            for key, row in all_rows.items()
+            if key not in hidden_folder_keys
+        }
 
     def _filesystem_row_matches(self, row, has_children):
         _path, name, is_folder, _size, modified_time, _parent_path = row
@@ -2668,6 +2768,12 @@ class PageLoadThread(QThread):
                         entry.name,
                         True,
                         0,
+                    ):
+                        continue
+                    if is_folder and not filesystem_folder_has_visible_entries(
+                        entry.path,
+                        self.options.get('scan_exclusions'),
+                        cancel_check=self._raise_if_cancelled,
                     ):
                         continue
                     size = (
@@ -3042,6 +3148,14 @@ class LazyChildrenLoadThread(QThread):
                                 entry.name,
                                 True,
                                 0,
+                            ):
+                                continue
+                            if (
+                                is_folder
+                                and not filesystem_folder_has_visible_entries(
+                                    entry.path,
+                                    self.scan_exclusions,
+                                )
                             ):
                                 continue
                             size = (

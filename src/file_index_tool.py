@@ -359,19 +359,84 @@ class FileIndexTool:
             os.path.normcase(os.path.normpath(item["path"])): item
             for item in summaries
         }
+        child_folders = {}
+        for item in summaries:
+            parent = item.get("parent")
+            if parent:
+                child_folders.setdefault(
+                    os.path.normcase(os.path.normpath(parent)),
+                    [],
+                ).append(item)
+
+        hidden_paths = []
+        for item in summaries:
+            key = os.path.normcase(os.path.normpath(item["path"]))
+            children = child_folders.get(key, [])
+            direct_file_count = max(
+                0,
+                (item.get("child_count", 0) or 0) - len(children),
+            )
+            has_visible_child_folder = any(
+                child.get("_visible_after_exclusions", False)
+                for child in children
+            )
+            is_scan_root = not item.get("parent")
+            is_physically_empty = (item.get("physical_child_count", -1) == 0)
+            is_visible = (
+                is_scan_root
+                or is_physically_empty
+                or direct_file_count > 0
+                or has_visible_child_folder
+            )
+            item["_visible_after_exclusions"] = is_visible
+            item["child_count"] = direct_file_count + sum(
+                1 for child in children
+                if child.get("_visible_after_exclusions", False)
+            )
+            if not is_visible:
+                hidden_paths.append(item["path"])
+
+        summaries = [
+            item for item in summaries
+            if item.get("_visible_after_exclusions", False)
+        ]
+        visible_keys = {
+            os.path.normcase(os.path.normpath(item["path"]))
+            for item in summaries
+        }
 
         for item in summaries:
             parent = item.get("parent")
             if not parent:
                 continue
             parent_item = by_key.get(os.path.normcase(os.path.normpath(parent)))
-            if parent_item:
+            if (
+                parent_item
+                and os.path.normcase(os.path.normpath(parent_item["path"]))
+                in visible_keys
+            ):
                 parent_item["total_size"] += item["total_size"]
                 parent_item["file_count"] += item["file_count"]
                 parent_item["folder_count"] += item["folder_count"]
 
         cache = getattr(self, "_active_cache", None)
         if cache:
+            hidden_keys = {
+                os.path.normcase(os.path.normpath(path))
+                for path in hidden_paths
+            }
+            for path in hidden_paths:
+                hidden_item = by_key.get(
+                    os.path.normcase(os.path.normpath(path)),
+                    {},
+                )
+                parent = hidden_item.get("parent")
+                if (
+                    parent
+                    and os.path.normcase(os.path.normpath(parent)) in hidden_keys
+                ):
+                    continue
+                cache.remove_path(path)
             for item in summaries:
                 cache.set_folder_summary(
                     item["path"],
@@ -381,6 +446,20 @@ class FileIndexTool:
                     item["child_count"],
                     item["physical_child_count"],
                 )
+
+        for start in range(0, len(hidden_paths), 900):
+            batch = hidden_paths[start:start + 900]
+            placeholders = ",".join("?" * len(batch))
+            self.conn.execute(
+                f"DELETE FROM file_index "
+                f"WHERE path COLLATE NOCASE IN ({placeholders})",
+                batch,
+            )
+            self.conn.execute(
+                f"DELETE FROM folder_summary "
+                f"WHERE path COLLATE NOCASE IN ({placeholders})",
+                batch,
+            )
 
         rows = [
             (
