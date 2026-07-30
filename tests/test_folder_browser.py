@@ -517,6 +517,141 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertEqual(result["total_matches"], 2)
         connection.close()
 
+    def test_scoped_filesystem_fallback_supports_other_filters_and_views(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            os.makedirs(scope)
+            empty_folder = os.path.join(scope, "Empty")
+            os.mkdir(empty_folder)
+            old_file = os.path.join(scope, "old-report.txt")
+            new_file = os.path.join(scope, "new-report.txt")
+            video_file = os.path.join(scope, "clip.mp4")
+            for path in (old_file, new_file, video_file):
+                with open(path, "wb") as handle:
+                    handle.write(b"x")
+            os.utime(old_file, (10, 10))
+            os.utime(video_file, (10, 10))
+            os.utime(new_file, (100, 100))
+            os.utime(empty_folder, (10, 10))
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            cases = [
+                (
+                    {"view_mode": "Tree", "status_filter": "Inactive", "age_cutoff": 50},
+                    {"old-report.txt", "clip.mp4"},
+                ),
+                (
+                    {"view_mode": "Folders", "status_filter": "Empty", "age_cutoff": 50},
+                    {"Empty"},
+                ),
+                (
+                    {
+                        "view_mode": "Files",
+                        "status_filter": None,
+                        "age_cutoff": None,
+                        "videos_only": True,
+                    },
+                    {"clip.mp4"},
+                ),
+                (
+                    {
+                        "view_mode": "Files",
+                        "status_filter": None,
+                        "age_cutoff": None,
+                        "name_filter": "report",
+                    },
+                    {"old-report.txt", "new-report.txt"},
+                ),
+            ]
+
+            for overrides, expected_names in cases:
+                with self.subTest(overrides=overrides):
+                    options = self._options(temp_root, scope, overrides["view_mode"])
+                    options.update(overrides)
+                    with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                        result = PageLoadThread(1, options)._load()
+                    self.assertEqual(
+                        {child["name"] for child in result["root_node"]["children"]},
+                        expected_names,
+                    )
+                    self.assertEqual(result["debug_info"], "filtered_source=filesystem")
+
+        connection.close()
+
+    def test_filtered_scoped_tree_keeps_nested_filesystem_branches_expandable(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            parent_folder = os.path.join(scope, "Parent")
+            child_folder = os.path.join(parent_folder, "Child")
+            os.makedirs(child_folder)
+            nested_file = os.path.join(child_folder, "old.txt")
+            with open(nested_file, "wb") as handle:
+                handle.write(b"x")
+            os.utime(nested_file, (10, 10))
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            options = self._options(temp_root, scope, "Tree")
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                result = PageLoadThread(1, options)._load()
+
+        model = WatchdogTreeModel(result["root_node"])
+        parent_index = model.index(0, 0)
+        child_index = model.index(0, 0, parent_index)
+        file_index = model.index(0, 0, child_index)
+        self.assertEqual(model.data(parent_index), "Parent")
+        self.assertTrue(model.hasChildren(parent_index))
+        self.assertEqual(model.data(child_index), "Child")
+        self.assertTrue(model.hasChildren(child_index))
+        self.assertEqual(model.data(file_index), "old.txt")
+        self.assertTrue(result["filesystem_scope_fallback"])
+        connection.close()
+
+    def test_lazy_filesystem_child_loader_expands_nested_nas_folder(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            parent_folder = os.path.join(temp_root, "Parent")
+            child_folder = os.path.join(parent_folder, "Child")
+            os.makedirs(child_folder)
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            emitted = []
+            thread = LazyChildrenLoadThread(
+                1,
+                parent_folder,
+                filesystem_fallback=True,
+            )
+            thread.children_ready.connect(
+                lambda request_id, path, children: emitted.extend(children)
+            )
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                thread.run()
+
+        self.assertEqual([child["name"] for child in emitted], ["Child"])
+        connection.close()
+
     def test_bulk_selection_where_clause_keeps_folder_scope(self):
         scope = os.path.normpath(r"C:\scan\A")
         checked = SimpleNamespace(isChecked=lambda: True)

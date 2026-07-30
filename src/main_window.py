@@ -1918,6 +1918,7 @@ class PageLoadThread(QThread):
 
         tool = FileIndexTool()
         folders_with_children = set()
+        filesystem_scope_fallback = False
         try:
             cursor = tool.conn.cursor()
             cursor.execute(count_query, params)
@@ -1933,50 +1934,63 @@ class PageLoadThread(QThread):
                 query += f" LIMIT {limit} OFFSET {offset}"
             cursor.execute(query, params)
             rows = cursor.fetchall()
-            original_fetched_order = {
-                os.path.normcase(os.path.normpath(row[0])): index
-                for index, row in enumerate(rows)
-            }
+            if not rows and total_matches == 0 and folder_scope:
+                filesystem_result = self._load_filtered_filesystem_scope(folder_scope)
+                if filesystem_result is not None:
+                    (
+                        rows,
+                        original_fetched_order,
+                        original_fetched_path_keys,
+                        folders_with_children,
+                        total_matches,
+                    ) = filesystem_result
+                    filesystem_scope_fallback = True
 
-            fetched_paths = {row[0] for row in rows}
-            missing_parents = set()
-            for row in rows:
-                parent_path = row[5]
-                while parent_path and parent_path not in fetched_paths and parent_path not in missing_parents:
-                    missing_parents.add(parent_path)
-                    parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
+            if not filesystem_scope_fallback:
+                original_fetched_order = {
+                    _path_key(row[0]): index
+                    for index, row in enumerate(rows)
+                }
 
-            original_fetched_paths = {row[0] for row in rows}
-            original_fetched_path_keys = {
-                os.path.normcase(os.path.normpath(path))
-                for path in original_fetched_paths
-            }
+                fetched_paths = {row[0] for row in rows}
+                missing_parents = set()
+                for row in rows:
+                    parent_path = row[5]
+                    while parent_path and parent_path not in fetched_paths and parent_path not in missing_parents:
+                        missing_parents.add(parent_path)
+                        parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
 
-            if missing_parents and view_mode == 'Tree':
-                parents_list = list(missing_parents)
-                for index in range(0, len(parents_list), 900):
-                    batch = parents_list[index:index + 900]
-                    placeholders = ','.join('?' * len(batch))
+                original_fetched_paths = {row[0] for row in rows}
+                original_fetched_path_keys = {
+                    _path_key(path)
+                    for path in original_fetched_paths
+                }
+
+                if missing_parents and view_mode == 'Tree':
+                    parents_list = list(missing_parents)
+                    for index in range(0, len(parents_list), 900):
+                        batch = parents_list[index:index + 900]
+                        placeholders = ','.join('?' * len(batch))
+                        cursor.execute(
+                            f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path COLLATE NOCASE IN ({placeholders})",
+                            batch,
+                        )
+                        rows.extend(cursor.fetchall())
+
+                folder_paths = [row[0] for row in rows if row[2]]
+                for index in range(0, len(folder_paths), 900):
+                    batch = folder_paths[index:index + 900]
+                    placeholders = ",".join("?" * len(batch))
                     cursor.execute(
-                        f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path COLLATE NOCASE IN ({placeholders})",
+                        f"SELECT DISTINCT parent_path FROM file_index "
+                        f"WHERE parent_path COLLATE NOCASE IN ({placeholders})",
                         batch,
                     )
-                    rows.extend(cursor.fetchall())
-
-            folder_paths = [row[0] for row in rows if row[2]]
-            for index in range(0, len(folder_paths), 900):
-                batch = folder_paths[index:index + 900]
-                placeholders = ",".join("?" * len(batch))
-                cursor.execute(
-                    f"SELECT DISTINCT parent_path FROM file_index "
-                    f"WHERE parent_path COLLATE NOCASE IN ({placeholders})",
-                    batch,
-                )
-                folders_with_children.update(
-                    _path_key(parent_path)
-                    for (parent_path,) in cursor.fetchall()
-                    if parent_path
-                )
+                    folders_with_children.update(
+                        _path_key(parent_path)
+                        for (parent_path,) in cursor.fetchall()
+                        if parent_path
+                    )
         finally:
             tool.close()
 
@@ -2008,7 +2022,7 @@ class PageLoadThread(QThread):
                 'status': status,
                 'children': [],
                 '_children_loaded': (
-                    bool(filtered_expanded_tree)
+                    (bool(filtered_expanded_tree) and not filesystem_scope_fallback)
                     or not (is_folder and path_key in folders_with_children)
                 ),
                 '_page_order': original_fetched_order.get(path_key),
@@ -2026,6 +2040,11 @@ class PageLoadThread(QThread):
                 parent_node['children'].append(node)
             else:
                 root_node['children'].append(node)
+
+        if filesystem_scope_fallback and view_mode == 'Tree':
+            for node in nodes_by_path.values():
+                if node.get('children'):
+                    node['_children_loaded'] = True
 
         if name_filter and view_mode == 'Tree':
             for node in nodes_by_path.values():
@@ -2073,7 +2092,140 @@ class PageLoadThread(QThread):
             'filtered_expanded_tree': filtered_expanded_tree,
             'name_filter': name_filter,
             'extension_filter': extension_filter,
+            'debug_info': "filtered_source=filesystem" if filesystem_scope_fallback else None,
+            'filesystem_scope_fallback': filesystem_scope_fallback,
         }
+
+    def _load_filtered_filesystem_scope(self, folder_scope):
+        all_rows = {}
+        child_keys = set()
+        pending = [os.path.normpath(folder_scope)]
+        visited = set()
+
+        while pending:
+            folder_path = pending.pop()
+            folder_key = _path_key(folder_path)
+            if folder_key in visited:
+                continue
+            visited.add(folder_key)
+            try:
+                with os.scandir(folder_path) as entries:
+                    folder_entries = list(entries)
+            except OSError:
+                continue
+
+            if folder_entries:
+                child_keys.add(folder_key)
+            for entry in folder_entries:
+                try:
+                    is_folder = entry.is_dir(follow_symlinks=True)
+                    stat_result = entry.stat(follow_symlinks=True)
+                except OSError:
+                    continue
+                row = (
+                    entry.path,
+                    entry.name,
+                    int(is_folder),
+                    0 if is_folder else stat_result.st_size,
+                    stat_result.st_mtime,
+                    folder_path,
+                )
+                all_rows[_path_key(entry.path)] = row
+                if is_folder:
+                    pending.append(entry.path)
+
+        matched_rows = [
+            row for row in all_rows.values()
+            if self._filesystem_row_matches(row, _path_key(row[0]) in child_keys)
+        ]
+        matched_rows.sort(
+            key=lambda row: (
+                tree_sort_value(
+                    {
+                        'path': row[0],
+                        'name': row[1],
+                        'is_dir': bool(row[2]),
+                        'size': row[3] or 0,
+                        'last_modified': row[4],
+                        'status': 'Active',
+                    },
+                    self.options['sort_column'],
+                ),
+                (row[1] or '').lower(),
+                (row[0] or '').lower(),
+            ),
+            reverse=self.options['sort_desc'],
+        )
+        total_matches = len(matched_rows)
+        if self.options.get('paginated', True):
+            offset = self.options['offset']
+            matched_rows = matched_rows[offset:offset + self.options['limit']]
+
+        original_order = {
+            _path_key(row[0]): index
+            for index, row in enumerate(matched_rows)
+        }
+        original_keys = set(original_order)
+        rows_by_key = {_path_key(row[0]): row for row in matched_rows}
+        if self.options['view_mode'] == 'Tree':
+            scope_key = _path_key(folder_scope)
+            for row in matched_rows:
+                parent_path = row[5]
+                while parent_path and _path_key(parent_path) != scope_key:
+                    parent_key = _path_key(parent_path)
+                    parent_row = all_rows.get(parent_key)
+                    if parent_row is None:
+                        break
+                    rows_by_key.setdefault(parent_key, parent_row)
+                    parent_path = parent_row[5]
+
+        return (
+            list(rows_by_key.values()),
+            original_order,
+            original_keys,
+            child_keys,
+            total_matches,
+        )
+
+    def _filesystem_row_matches(self, row, has_children):
+        _path, name, is_folder, _size, modified_time, _parent_path = row
+        is_folder = bool(is_folder)
+        view_mode = self.options['view_mode']
+        status_filter = self.options['status_filter']
+        age_cutoff = self.options['age_cutoff']
+        videos_only = self.options['videos_only']
+        name_filter = (self.options.get('name_filter') or '').strip().casefold()
+        extension_filter = self.options.get('extension_filter')
+        extension = os.path.splitext(name)[1].lower() if not is_folder else ""
+
+        if view_mode == 'Files' and is_folder:
+            return False
+        if view_mode == 'Folders' and not is_folder:
+            return False
+        if name_filter and name_filter not in name.casefold():
+            return False
+        if extension_filter is not None and (is_folder or extension != extension_filter.lower()):
+            return False
+        if videos_only and (is_folder or extension not in VIDEO_EXTENSIONS):
+            return False
+
+        if status_filter == 'Empty':
+            if (
+                not is_folder
+                or has_children
+                or name.lower() in ('.git', '__pycache__', 'venv', '.venv', 'node_modules')
+            ):
+                return False
+            return age_cutoff is None or modified_time <= age_cutoff
+        if status_filter == 'Inactive':
+            if view_mode == 'Tree' and is_folder:
+                return False
+            return age_cutoff is None or modified_time <= age_cutoff
+        if status_filter == 'Active':
+            return age_cutoff is not None and modified_time > age_cutoff
+        if age_cutoff is not None:
+            return modified_time <= age_cutoff
+        return True
 
     def _hide_scan_root_context(self, root_node):
         scan_root = self.options.get('scan_root')
@@ -4651,6 +4803,7 @@ class MainWindow(QMainWindow):
         self.page_only_selection_page = None
         self.current_total_matches = 0
         self.current_lazy_show_all_tree = False
+        self.current_filesystem_scope_fallback = False
         self.refresh_tree_state_key = None
         self.refresh_collapsed_tree_paths = set()
         self.last_scan_excluded_count = 0
@@ -7143,6 +7296,7 @@ class MainWindow(QMainWindow):
         self.source_index_by_path = {}
         self.lazy_child_request_id += 1
         self.current_lazy_show_all_tree = False
+        self.current_filesystem_scope_fallback = False
         self.refresh_tree_state_key = None
         self.refresh_collapsed_tree_paths = set()
         self.folder_cache = None
@@ -8171,6 +8325,9 @@ class MainWindow(QMainWindow):
         view_mode = result['view_mode']
         lazy_show_all_tree = result.get('lazy_show_all_tree', False)
         self.current_lazy_show_all_tree = lazy_show_all_tree
+        self.current_filesystem_scope_fallback = bool(
+            result.get('filesystem_scope_fallback', False)
+        )
 
         if rows_count == 0 and self.current_page > 0:
             self.current_page -= 1
@@ -8476,7 +8633,10 @@ class MainWindow(QMainWindow):
             sort_desc=self.sort_order == Qt.SortOrder.DescendingOrder,
             options=None if self.current_lazy_show_all_tree else getattr(self.tree_model, 'options', {}),
             cache=self.folder_cache,
-            filesystem_fallback=self.current_lazy_show_all_tree,
+            filesystem_fallback=(
+                self.current_lazy_show_all_tree
+                or self.current_filesystem_scope_fallback
+            ),
             parent=self,
         )
         self.lazy_child_threads[request_id] = {
