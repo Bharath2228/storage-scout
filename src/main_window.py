@@ -2050,102 +2050,121 @@ class PageLoadThread(QThread):
             query += where_sql
             count_query += where_sql
 
-        tool = FileIndexTool()
-        self._connection = tool.conn
         folders_with_children = set()
         filesystem_scope_fallback = False
-        try:
-            cursor = tool.conn.cursor()
-            self._raise_if_cancelled()
-            cursor.execute(count_query, params)
-            total_matches = cursor.fetchone()[0]
+        folder_cache = self.options.get('folder_cache')
+        cached_scope_result = None
+        if (
+            folder_scope
+            and folder_cache is not None
+            and hasattr(folder_cache, 'summary_descendant_count')
+            and folder_cache.summary_descendant_count(folder_scope) is not None
+        ):
+            cached_scope_result = self._load_filtered_filesystem_scope(folder_scope)
 
-            order_by_sql = build_sort_order_clause(
-                view_mode,
-                self.options['sort_column'],
-                self.options['sort_desc'],
-            )
-            query += f" ORDER BY {order_by_sql}"
-            if paginated:
-                query += f" LIMIT {limit} OFFSET {offset}"
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            self._raise_if_cancelled()
-            if scan_root:
-                scan_root_key = _path_key(scan_root)
-                filtered_rows = [
-                    row for row in rows
-                    if _path_key(row[0]) != scan_root_key
-                ]
-                total_matches = max(
-                    0,
-                    total_matches - (len(rows) - len(filtered_rows)),
+        if cached_scope_result is not None:
+            (
+                rows,
+                original_fetched_order,
+                original_fetched_path_keys,
+                folders_with_children,
+                total_matches,
+            ) = cached_scope_result
+            filesystem_scope_fallback = True
+        else:
+            tool = FileIndexTool()
+            self._connection = tool.conn
+            try:
+                cursor = tool.conn.cursor()
+                self._raise_if_cancelled()
+                cursor.execute(count_query, params)
+                total_matches = cursor.fetchone()[0]
+
+                order_by_sql = build_sort_order_clause(
+                    view_mode,
+                    self.options['sort_column'],
+                    self.options['sort_desc'],
                 )
-                rows = filtered_rows
-            if not rows and total_matches == 0 and folder_scope:
-                filesystem_result = self._load_filtered_filesystem_scope(folder_scope)
-                if filesystem_result is not None:
-                    (
-                        rows,
-                        original_fetched_order,
-                        original_fetched_path_keys,
-                        folders_with_children,
-                        total_matches,
-                    ) = filesystem_result
-                    filesystem_scope_fallback = True
+                query += f" ORDER BY {order_by_sql}"
+                if paginated:
+                    query += f" LIMIT {limit} OFFSET {offset}"
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                self._raise_if_cancelled()
+                if scan_root:
+                    scan_root_key = _path_key(scan_root)
+                    filtered_rows = [
+                        row for row in rows
+                        if _path_key(row[0]) != scan_root_key
+                    ]
+                    total_matches = max(
+                        0,
+                        total_matches - (len(rows) - len(filtered_rows)),
+                    )
+                    rows = filtered_rows
+                if not rows and total_matches == 0 and folder_scope:
+                    filesystem_result = self._load_filtered_filesystem_scope(folder_scope)
+                    if filesystem_result is not None:
+                        (
+                            rows,
+                            original_fetched_order,
+                            original_fetched_path_keys,
+                            folders_with_children,
+                            total_matches,
+                        ) = filesystem_result
+                        filesystem_scope_fallback = True
 
-            if not filesystem_scope_fallback:
-                original_fetched_order = {
-                    _path_key(row[0]): index
-                    for index, row in enumerate(rows)
-                }
+                if not filesystem_scope_fallback:
+                    original_fetched_order = {
+                        _path_key(row[0]): index
+                        for index, row in enumerate(rows)
+                    }
 
-                fetched_paths = {row[0] for row in rows}
-                missing_parents = set()
-                for row in rows:
-                    parent_path = row[5]
-                    while parent_path and parent_path not in fetched_paths and parent_path not in missing_parents:
-                        missing_parents.add(parent_path)
-                        parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
+                    fetched_paths = {row[0] for row in rows}
+                    missing_parents = set()
+                    for row in rows:
+                        parent_path = row[5]
+                        while parent_path and parent_path not in fetched_paths and parent_path not in missing_parents:
+                            missing_parents.add(parent_path)
+                            parent_path = os.path.dirname(parent_path) if '\\' in parent_path or '/' in parent_path else None
 
-                original_fetched_paths = {row[0] for row in rows}
-                original_fetched_path_keys = {
-                    _path_key(path)
-                    for path in original_fetched_paths
-                }
+                    original_fetched_paths = {row[0] for row in rows}
+                    original_fetched_path_keys = {
+                        _path_key(path)
+                        for path in original_fetched_paths
+                    }
 
-                if missing_parents and view_mode == 'Tree':
-                    parents_list = list(missing_parents)
-                    for index in range(0, len(parents_list), 900):
-                        batch = parents_list[index:index + 900]
-                        placeholders = ','.join('?' * len(batch))
+                    if missing_parents and view_mode == 'Tree':
+                        parents_list = list(missing_parents)
+                        for index in range(0, len(parents_list), 900):
+                            batch = parents_list[index:index + 900]
+                            placeholders = ','.join('?' * len(batch))
+                            cursor.execute(
+                                f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path COLLATE NOCASE IN ({placeholders})",
+                                batch,
+                            )
+                            rows.extend(cursor.fetchall())
+
+                    folder_paths = [row[0] for row in rows if row[2]]
+                    for index in range(0, len(folder_paths), 900):
+                        batch = folder_paths[index:index + 900]
+                        placeholders = ",".join("?" * len(batch))
                         cursor.execute(
-                            f"SELECT path, name, is_folder, size, modified_time, parent_path FROM file_index WHERE path COLLATE NOCASE IN ({placeholders})",
+                            f"SELECT DISTINCT parent_path FROM file_index "
+                            f"WHERE parent_path COLLATE NOCASE IN ({placeholders})",
                             batch,
                         )
-                        rows.extend(cursor.fetchall())
-
-                folder_paths = [row[0] for row in rows if row[2]]
-                for index in range(0, len(folder_paths), 900):
-                    batch = folder_paths[index:index + 900]
-                    placeholders = ",".join("?" * len(batch))
-                    cursor.execute(
-                        f"SELECT DISTINCT parent_path FROM file_index "
-                        f"WHERE parent_path COLLATE NOCASE IN ({placeholders})",
-                        batch,
-                    )
-                    folders_with_children.update(
-                        _path_key(parent_path)
-                        for (parent_path,) in cursor.fetchall()
-                        if parent_path
-                    )
-        finally:
-            self._connection = None
-            tool.close()
+                        folders_with_children.update(
+                            _path_key(parent_path)
+                            for (parent_path,) in cursor.fetchall()
+                            if parent_path
+                        )
+            finally:
+                self._connection = None
+                tool.close()
 
         root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
         nodes_by_path = {}
-        folder_cache = self.options.get('folder_cache')
 
         for path, name, is_folder, size, modified_time, parent_path in rows:
             is_stale = False
@@ -2256,17 +2275,20 @@ class PageLoadThread(QThread):
             sort_keys=True,
         )
         snapshot_key = (_path_key(folder_scope), exclusion_key)
-        cached_snapshot = (
-            cache.snapshot_subtree(folder_scope)
-            if cache is not None and hasattr(cache, 'snapshot_subtree')
-            else None
-        )
+        cached_snapshot = None
+        if cache is not None and hasattr(cache, 'filesystem_snapshot'):
+            cached_snapshot = cache.filesystem_snapshot(snapshot_key)
         if (
             cached_snapshot is None
             and cache is not None
-            and hasattr(cache, 'filesystem_snapshot')
+            and hasattr(cache, 'snapshot_subtree')
         ):
-            cached_snapshot = cache.filesystem_snapshot(snapshot_key)
+            cached_snapshot = cache.snapshot_subtree(folder_scope)
+            if (
+                cached_snapshot is not None
+                and hasattr(cache, 'store_filesystem_snapshot')
+            ):
+                cache.store_filesystem_snapshot(snapshot_key, cached_snapshot)
         if cached_snapshot is not None:
             all_rows, physical_child_keys, visible_child_keys = cached_snapshot
         else:
@@ -3139,6 +3161,48 @@ class LazyChildrenLoadThread(QThread):
                     total += size
         return total
 
+    def _folder_metadata_for_paths(self, folder_paths, allow_database=True):
+        metadata = {}
+        unresolved = []
+        for path in folder_paths:
+            cached_metadata = (
+                self.cache.folder_metadata(path)
+                if self.cache is not None
+                and hasattr(self.cache, 'folder_metadata')
+                else None
+            )
+            if cached_metadata is None:
+                unresolved.append(path)
+            else:
+                metadata[_path_key(path)] = cached_metadata
+
+        if not unresolved or not allow_database:
+            return metadata
+        from src.file_index_tool import FileIndexTool
+
+        tool = FileIndexTool()
+        try:
+            cursor = tool.conn.cursor()
+            for start in range(0, len(unresolved), 900):
+                batch = unresolved[start:start + 900]
+                placeholders = ",".join("?" * len(batch))
+                try:
+                    cursor.execute(
+                        "SELECT path, total_size, child_count FROM folder_summary "
+                        f"WHERE path IN ({placeholders})",
+                        batch,
+                    )
+                except Exception:
+                    return metadata
+                for path, total_size, child_count in cursor.fetchall():
+                    metadata[_path_key(path)] = (
+                        total_size or 0,
+                        child_count or 0,
+                    )
+        finally:
+            tool.close()
+        return metadata
+
     def _status_for_child(self, is_folder, modified_time, has_child):
         if not self.apply_filter_options:
             return 'Active'
@@ -3266,28 +3330,32 @@ class LazyChildrenLoadThread(QThread):
                                 continue
                             if (
                                 is_folder
+                                and self.cache is not None
+                                and hasattr(self.cache, 'is_exclusion_hidden')
+                                and self.cache.is_exclusion_hidden(entry.path)
+                            ):
+                                continue
+                            cache_scope_complete = (
+                                self.cache is not None
+                                and hasattr(self.cache, 'summary_descendant_count')
+                                and self.cache.summary_descendant_count(
+                                    self.folder_path
+                                ) is not None
+                            )
+                            if (
+                                is_folder
                                 and not self.force_filesystem
+                                and not cache_scope_complete
                                 and not filesystem_folder_has_visible_entries(
                                     entry.path,
                                     self.scan_exclusions,
                                 )
                             ):
                                 continue
-                            if (
-                                is_folder
-                                and self.cache is not None
-                                and hasattr(self.cache, 'is_exclusion_hidden')
-                                and self.cache.is_exclusion_hidden(entry.path)
-                            ):
-                                continue
                             size = (
-                                (
-                                    0
-                                    if self.folders_only
-                                    else self._filesystem_folder_size(entry.path)
-                                )
-                                if is_folder
-                                else (0 if stat_result is None else stat_result.st_size)
+                                0
+                                if is_folder or stat_result is None
+                                else stat_result.st_size
                             )
                             if not is_folder and self._filesystem_entry_is_excluded(
                                 entry.name,
@@ -3308,11 +3376,25 @@ class LazyChildrenLoadThread(QThread):
                         except OSError:
                             continue
                 rows.sort(key=lambda row: ((row[1] or "").lower(), (row[0] or "").lower()))
-                folders_with_children = {
-                    os.path.normcase(os.path.normpath(row[0]))
-                    for row in rows
-                    if row[2] and self._filesystem_folder_has_children(row[0])
-                }
+                folder_metadata = self._folder_metadata_for_paths(
+                    [row[0] for row in rows if row[2]],
+                    allow_database=not self.force_filesystem,
+                )
+                updated_rows = []
+                for path, name, is_folder, size, modified_time, parent_path in rows:
+                    if is_folder:
+                        metadata = folder_metadata.get(_path_key(path))
+                        if metadata is not None:
+                            cached_size, child_count = metadata
+                            size = 0 if self.folders_only else cached_size
+                            if child_count:
+                                folders_with_children.add(_path_key(path))
+                        elif self._filesystem_folder_has_children(path):
+                            folders_with_children.add(_path_key(path))
+                    updated_rows.append(
+                        (path, name, is_folder, size, modified_time, parent_path)
+                    )
+                rows = updated_rows
             except OSError as exc:
                 self.children_failed.emit(self.request_id, self.folder_path, str(exc))
                 return
@@ -5391,6 +5473,8 @@ class MainWindow(QMainWindow):
         self.cached_folder_total_root = None
         self.cached_selected_total = None
         self.is_scanning = False
+        self.has_completed_scan = False
+        self.hide_partial_scan_results = False
         self.folder_cache = None
         self.loading_dialog = None
         self.selection_loading_dialog = None
@@ -6140,12 +6224,9 @@ class MainWindow(QMainWindow):
         elapsed = 0.0 if not detail else detail.get("elapsed_secs", 0.0)
         rate = 0.0 if not detail else detail.get("rate", 0.0)
         scanned = 0 if not detail else detail.get("scanned", 0) or 0
-        eta = None if not detail else detail.get("eta_secs")
 
         rate_text = "rate calculating..." if rate <= 0 else f"{rate:,.0f} items/sec"
         parts = [f"{scanned:,} items scanned", rate_text, f"{self._format_scan_duration(elapsed)} elapsed"]
-        if eta is not None:
-            parts.append(f"ETA {self._format_scan_duration(eta)}")
         return " - ".join(parts)
 
     def _set_scan_stats(self, detail=None):
@@ -6321,6 +6402,12 @@ class MainWindow(QMainWindow):
     def _load_folder_browser_children(self, folder_path):
         if not folder_path or not getattr(self, 'current_scan_root', None):
             return
+        if (
+            getattr(self, 'is_scanning', False)
+            and getattr(self, 'hide_partial_scan_results', False)
+        ):
+            self.folder_browser.defer_load(folder_path)
+            return
         cache = getattr(self, 'folder_cache', None)
         if cache:
             children = []
@@ -6372,6 +6459,11 @@ class MainWindow(QMainWindow):
     def _on_folder_browser_children_ready(self, request_id, folder_path, children):
         if request_id not in self.folder_browser_threads:
             return
+        if (
+            getattr(self, 'is_scanning', False)
+            and getattr(self, 'hide_partial_scan_results', False)
+        ):
+            return
         self.folder_browser.apply_children(folder_path, children)
 
     def _on_folder_browser_children_failed(self, request_id, folder_path, error):
@@ -6386,6 +6478,11 @@ class MainWindow(QMainWindow):
         self.folder_browser.set_root(root_path)
 
     def _refresh_folder_browser_from_cache(self, force=False):
+        if (
+            getattr(self, 'is_scanning', False)
+            and getattr(self, 'hide_partial_scan_results', False)
+        ):
+            return
         cache = getattr(self, 'folder_cache', None)
         root_path = getattr(self, 'current_scan_root', None)
         if not cache or not root_path or not hasattr(self, 'folder_browser'):
@@ -8003,6 +8100,8 @@ class MainWindow(QMainWindow):
         self.current_page = 0
         self.current_total_matches = 0
         self.is_scanning  = False
+        self.has_completed_scan = False
+        self.hide_partial_scan_results = False
         self.cached_folder_total = None
         self.cached_folder_total_root = None
         self.totals_request_id += 1
@@ -8074,6 +8173,14 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"Path not found or not accessible: {path}")
             return
         
+        previous_scan_root = getattr(self, 'current_scan_root', None)
+        continuing_completed_scan = bool(
+            getattr(self, 'has_completed_scan', False)
+            and previous_scan_root
+            and _path_key(previous_scan_root) == _path_key(path)
+        )
+        self.hide_partial_scan_results = not continuing_completed_scan
+
         self.current_page = 0
         self.total_scanned = 0
         self.last_scan_excluded_count = 0
@@ -8118,8 +8225,10 @@ class MainWindow(QMainWindow):
         )
         self.folder_cache = self.scanner_thread.cache
         self.folder_browser_live_refresh_at = 0.0
-        self.folder_browser.setEnabled(True)
-        self._reset_folder_browser(self.current_scan_root)
+        self.folder_browser.setEnabled(not self.hide_partial_scan_results)
+        self._reset_folder_browser(
+            None if self.hide_partial_scan_results else self.current_scan_root
+        )
         self.scanner_thread.scan_started.connect(self._on_scan_started)
         self.scanner_thread.scan_finished.connect(self._on_scan_done)
         self.scanner_thread.scan_exclusions_summary.connect(self._on_scan_exclusions_summary)
@@ -8141,7 +8250,8 @@ class MainWindow(QMainWindow):
         self.last_scan_item_count = detail.get("scanned", 0) or 0
         self._set_scan_stats(detail)
         self.lbl_status.setText(f"Scanning - {self._scan_stats_text(detail)}")
-        self._refresh_folder_browser_from_cache()
+        if not getattr(self, 'hide_partial_scan_results', False):
+            self._refresh_folder_browser_from_cache()
 
     def _on_scan_started(self):
         if self.is_scanning:
@@ -8164,6 +8274,8 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _on_first_batch_ready(self):
+        if getattr(self, 'hide_partial_scan_results', False):
+            return
         self._refresh_folder_browser_from_cache(force=True)
         options = self._page_load_options()
         if options.get('defer_tree_load_until_scan_done') and not self._can_live_load_from_cache(options):
@@ -8173,6 +8285,8 @@ class MainWindow(QMainWindow):
 
     def _on_batch_ready(self):
         """Called during scanning when a new batch of items is indexed."""
+        if getattr(self, 'hide_partial_scan_results', False):
+            return
         self._refresh_folder_browser_from_cache(force=True)
         # Counting matches can be expensive on large scans, so throttle it.
         if self.content_stack.currentIndex() == 3:
@@ -8274,6 +8388,11 @@ class MainWindow(QMainWindow):
 
     def _on_scan_done(self):
         finished_thread = self.scanner_thread
+        was_hiding_partial_results = getattr(
+            self,
+            'hide_partial_scan_results',
+            False,
+        )
         if finished_thread:
             self.last_scan_elapsed_secs = getattr(finished_thread, "scan_elapsed_secs", 0.0) or 0.0
             self.last_scan_item_count = (
@@ -8285,14 +8404,23 @@ class MainWindow(QMainWindow):
         self.btn_rescan.setText("Re-scan")
         self.btn_rescan.setStyleSheet("") # reset style
         self.is_scanning = False
+        scan_cancelled = bool(finished_thread and finished_thread.is_cancelled)
+        self.hide_partial_scan_results = False
+        if not scan_cancelled:
+            self.has_completed_scan = True
         if hasattr(self, 'folder_browser'):
             self.folder_browser.setEnabled(True)
-            self._refresh_folder_browser_from_cache(force=True)
-            if self.current_scan_root:
-                self._load_folder_browser_children(self.current_scan_root)
+            if was_hiding_partial_results:
+                self._reset_folder_browser(
+                    None if scan_cancelled else self.current_scan_root
+                )
+            if not scan_cancelled:
+                self._refresh_folder_browser_from_cache(force=True)
+                if self.current_scan_root:
+                    self._load_folder_browser_children(self.current_scan_root)
         self._update_file_types_enabled()
         
-        if finished_thread and finished_thread.is_cancelled:
+        if scan_cancelled:
             self.lbl_status.setText("Scan stopped by user.")
         else:
             if self.scan_progress_was_determinate:
@@ -8311,6 +8439,14 @@ class MainWindow(QMainWindow):
                 cancelled=False,
             ):
                 self._show_system_notification("Scan complete", completion_message)
+        if scan_cancelled and was_hiding_partial_results:
+            self.tree_model = None
+            self.proxy_model.setSourceModel(None)
+            self.controls_bar.setVisible(False)
+            self.content_stack.setCurrentIndex(0)
+            self._set_total_summary_chip("--")
+            self._set_selected_summary_chip("0 B", 0, 0)
+            return
         if self.content_stack.currentIndex() in (0, 2, 3):
             self._load_page()
         elif self.content_stack.currentIndex() == 1:
@@ -9331,6 +9467,26 @@ class MainWindow(QMainWindow):
 
         self.lazy_child_request_id += 1
         request_id = self.lazy_child_request_id
+        if (
+            self.current_lazy_show_all_tree
+            and self.folder_cache is not None
+            and self.folder_cache.has_children_for(folder_path)
+        ):
+            self.lazy_child_threads[request_id] = {
+                'thread': None,
+                'index': QPersistentModelIndex(source_index),
+                'path': folder_path,
+                'model': self.tree_model,
+            }
+            children = self.folder_cache.children_for(
+                folder_path,
+                self.sort_column,
+                self.sort_order == Qt.SortOrder.DescendingOrder,
+            )
+            self._on_lazy_children_ready(request_id, folder_path, children)
+            self.lazy_child_threads.pop(request_id, None)
+            return
+
         thread = LazyChildrenLoadThread(
             request_id,
             folder_path,

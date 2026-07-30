@@ -64,6 +64,48 @@ class FolderBrowserModelTests(unittest.TestCase):
         self.assertEqual(model.data(folder_index), "Folder A")
         self.assertTrue(model.canFetchMore(folder_index))
 
+    def test_main_tree_expansion_applies_cached_children_without_thread(self):
+        root = os.path.normpath(r"Z:\scan")
+        folder = os.path.join(root, "Folder A")
+        file_path = os.path.join(folder, "cached.txt")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(folder, "Folder A", True, 0, 1, root)
+        cache.add_item(file_path, "cached.txt", False, 12, 1, folder)
+        model = WatchdogTreeModel({
+            "name": "root",
+            "path": root,
+            "is_dir": True,
+            "children": [{
+                "name": "Folder A",
+                "path": folder,
+                "is_dir": True,
+                "children": [],
+                "_children_loaded": False,
+            }],
+        })
+        source_index = model.index(0, 0)
+        window = SimpleNamespace(
+            tree_model=model,
+            current_lazy_show_all_tree=True,
+            folder_cache=cache,
+            lazy_child_request_id=0,
+            lazy_child_threads={},
+            sort_column=0,
+            sort_order=Qt.SortOrder.AscendingOrder,
+            _on_lazy_children_ready=mock.Mock(),
+        )
+
+        with mock.patch(
+            "src.main_window.LazyChildrenLoadThread",
+            side_effect=AssertionError("cached expansion must not start a thread"),
+        ):
+            MainWindow._start_lazy_child_load(window, source_index)
+
+        children = window._on_lazy_children_ready.call_args.args[2]
+        self.assertEqual([child["path"] for child in children], [file_path])
+        self.assertEqual(window.lazy_child_threads, {})
+
     def test_model_removes_deleted_folder_immediately(self):
         model = FolderBrowserTreeModel()
         root = os.path.normpath(r"C:\scan")
@@ -107,6 +149,46 @@ class FolderBrowserModelTests(unittest.TestCase):
         loaded_children = browser.apply_children.call_args.args[1]
         self.assertEqual([child["path"] for child in loaded_children], [folder])
         browser.defer_load.assert_not_called()
+
+    def test_initial_scan_keeps_folder_browser_empty_until_completion(self):
+        root = os.path.normpath(r"C:\scan")
+        folder = os.path.join(root, "Folder A")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(folder, "Folder A", True, 0, 1, root)
+        browser = SimpleNamespace(
+            apply_children=mock.Mock(),
+            defer_load=mock.Mock(),
+        )
+        window = SimpleNamespace(
+            current_scan_root=root,
+            folder_cache=cache,
+            is_scanning=True,
+            hide_partial_scan_results=True,
+            folder_browser=browser,
+        )
+
+        MainWindow._load_folder_browser_children(window, root)
+
+        browser.apply_children.assert_not_called()
+        browser.defer_load.assert_called_once_with(root)
+
+    def test_initial_scan_batch_events_do_not_load_partial_results(self):
+        window = SimpleNamespace(
+            hide_partial_scan_results=True,
+            _refresh_folder_browser_from_cache=mock.Mock(),
+            _page_load_options=mock.Mock(),
+            _load_page=mock.Mock(),
+            content_stack=mock.Mock(),
+            scan_refresh_timer=mock.Mock(),
+        )
+
+        MainWindow._on_first_batch_ready(window)
+        MainWindow._on_batch_ready(window)
+
+        window._refresh_folder_browser_from_cache.assert_not_called()
+        window._page_load_options.assert_not_called()
+        window._load_page.assert_not_called()
 
     def test_live_scan_cache_matches_unc_root_with_or_without_trailing_separator(self):
         browser_root = r"\\server\share"
@@ -933,22 +1015,25 @@ class FolderScopeQueryTests(unittest.TestCase):
         connection.execute("DELETE FROM file_index")
         root = os.path.normpath(r"Z:\scan")
         scope = os.path.join(root, "Scope")
-        file_path = os.path.join(scope, "old.txt")
+        nested = os.path.join(scope, "Nested")
+        file_path = os.path.join(nested, "old.txt")
         cache = FolderCache()
         cache.add_item(root, "scan", True, 0, 1, None)
         cache.add_item(scope, "Scope", True, 0, 1, root)
-        cache.add_item(file_path, "old.txt", False, 12, 10, scope)
-        cache.set_folder_summary(root, 12, 1, 2, 1, 1)
-        cache.set_folder_summary(scope, 12, 1, 1, 1, 1)
+        cache.add_item(nested, "Nested", True, 0, 1, scope)
+        cache.add_item(file_path, "old.txt", False, 12, 10, nested)
+        cache.set_folder_summary(root, 12, 1, 3, 1, 1)
+        cache.set_folder_summary(scope, 12, 1, 2, 1, 1)
+        cache.set_folder_summary(nested, 12, 1, 1, 1, 1)
 
         class FakeTool:
             def __init__(self):
-                self.conn = connection
+                raise AssertionError("completed scoped filters must not open SQLite")
 
             def close(self):
                 pass
 
-        options = self._options(root, scope, "Files")
+        options = self._options(root, scope, "Tree")
         options["folder_cache"] = cache
         with (
             mock.patch.object(file_index_tool, "FileIndexTool", FakeTool),
@@ -956,13 +1041,21 @@ class FolderScopeQueryTests(unittest.TestCase):
                 "src.main_window.os.scandir",
                 side_effect=AssertionError("filesystem should not be walked"),
             ),
+            mock.patch.object(
+                cache,
+                "snapshot_subtree",
+                wraps=cache.snapshot_subtree,
+            ) as snapshot_subtree,
         ):
             result = PageLoadThread(1, options)._load()
+            repeated_result = PageLoadThread(2, options)._load()
 
-        self.assertEqual(
-            [child["name"] for child in result["root_node"]["children"]],
-            ["old.txt"],
-        )
+        parent = result["root_node"]["children"][0]
+        self.assertEqual(parent["name"], "Nested")
+        self.assertEqual(parent["children"][0]["name"], "old.txt")
+        self.assertTrue(parent["_children_loaded"])
+        self.assertEqual(repeated_result["total_matches"], 1)
+        snapshot_subtree.assert_called_once_with(scope)
         connection.close()
 
     def test_filesystem_scope_and_lazy_children_honor_exclusions(self):
