@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -7,7 +8,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from src.main_window import DeletePreviewDialog, DeletePreviewThread
+from src.main_window import (
+    DeletePreviewDialog,
+    DeletePreviewThread,
+    summarize_paths_batch,
+)
 
 
 class DeletePreviewDialogTests(unittest.TestCase):
@@ -90,6 +95,23 @@ class DeletePreviewDialogTests(unittest.TestCase):
         self.dialog.reject()
 
         self.assertTrue(thread.is_cancelled)
+
+    def test_unindexed_filesystem_selection_uses_live_counts_and_size(self):
+        cursor = mock.Mock()
+        cursor.fetchall.return_value = []
+        with tempfile.TemporaryDirectory() as root:
+            nested = os.path.join(root, "nested")
+            os.makedirs(nested)
+            with open(os.path.join(root, "one.bin"), "wb") as handle:
+                handle.write(b"123")
+            with open(os.path.join(nested, "two.bin"), "wb") as handle:
+                handle.write(b"12345")
+
+            _paths, folders, files, size = summarize_paths_batch(cursor, [root])
+
+        self.assertEqual(folders, 2)
+        self.assertEqual(files, 2)
+        self.assertEqual(size, 8)
 
 
 if __name__ == "__main__":

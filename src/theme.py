@@ -510,6 +510,11 @@ def apply_theme(app, theme_name="light"):
         QTreeView::item:hover {{ background-color: {surface_hover}; color: {text}; }}
         QTreeView::item:selected {{ background-color: {accent}; color: {on_accent}; }}
         QTreeView::item:selected:hover {{ background-color: {accent_pressed}; color: #fff; }}
+        QTreeView#folderBrowserTree::item:selected,
+        QTreeView#folderBrowserTree::item:selected:hover {{
+            background-color: {accent_tint};
+            color: {text};
+        }}
         
         QTreeView::indicator {{
             width: 16px;

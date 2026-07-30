@@ -375,15 +375,38 @@ def summarize_paths_batch(cursor, paths, cancel_check=None):
     total_size = 0
     folder_paths = []
 
+    def summarize_filesystem_path(path):
+        check_cancelled()
+        if os.path.isfile(path):
+            try:
+                return 0, 1, os.path.getsize(path)
+            except OSError:
+                return 0, 1, 0
+        if not os.path.isdir(path):
+            return 0, 1, 0
+
+        folder_count = 1
+        file_count = 0
+        size = 0
+        for current, dir_names, file_names in os.walk(path):
+            check_cancelled()
+            folder_count += len(dir_names)
+            file_count += len(file_names)
+            for file_name in file_names:
+                try:
+                    size += os.path.getsize(os.path.join(current, file_name))
+                except OSError:
+                    continue
+        return folder_count, file_count, size
+
     for path in pruned_paths:
         check_cancelled()
         row = rows_by_key.get(os.path.normcase(os.path.normpath(path)))
         if not row:
-            if os.path.isdir(path):
-                folders += 1
-                folder_paths.append(path)
-            else:
-                files += 1
+            path_folders, path_files, path_size = summarize_filesystem_path(path)
+            folders += path_folders
+            files += path_files
+            total_size += path_size
             continue
 
         _, is_folder, size = row
@@ -1996,6 +2019,7 @@ class PageLoadThread(QThread):
 
         root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
         nodes_by_path = {}
+        folder_cache = self.options.get('folder_cache')
 
         for path, name, is_folder, size, modified_time, parent_path in rows:
             is_stale = False
@@ -2006,6 +2030,8 @@ class PageLoadThread(QThread):
 
             status = 'Inactive' if is_stale else 'Active'
             path_key = os.path.normcase(os.path.normpath(path))
+            if is_folder and folder_cache is not None:
+                size = getattr(folder_cache, 'folder_sizes', {}).get(path_key, size or 0)
             if status_filter == 'Empty' and is_folder and path_key in original_fetched_path_keys:
                 status = 'Empty'
 
@@ -2114,14 +2140,19 @@ class PageLoadThread(QThread):
             except OSError:
                 continue
 
-            if folder_entries:
-                child_keys.add(folder_key)
             for entry in folder_entries:
                 try:
                     is_folder = entry.is_dir(follow_symlinks=True)
                     stat_result = entry.stat(follow_symlinks=True)
                 except OSError:
                     continue
+                if self._filesystem_entry_is_excluded(
+                    entry.name,
+                    is_folder,
+                    0 if is_folder else stat_result.st_size,
+                ):
+                    continue
+                child_keys.add(folder_key)
                 row = (
                     entry.path,
                     entry.name,
@@ -2133,6 +2164,31 @@ class PageLoadThread(QThread):
                 all_rows[_path_key(entry.path)] = row
                 if is_folder:
                     pending.append(entry.path)
+
+        folder_sizes = {
+            key: 0
+            for key, row in all_rows.items()
+            if row[2]
+        }
+        for key, row in sorted(
+            all_rows.items(),
+            key=lambda item: item[0].count(os.sep),
+            reverse=True,
+        ):
+            path, name, is_folder, size, modified_time, parent_path = row
+            effective_size = folder_sizes.get(key, 0) if is_folder else (size or 0)
+            if is_folder:
+                all_rows[key] = (
+                    path,
+                    name,
+                    is_folder,
+                    effective_size,
+                    modified_time,
+                    parent_path,
+                )
+            parent_key = _path_key(parent_path)
+            if parent_key in folder_sizes:
+                folder_sizes[parent_key] += effective_size
 
         matched_rows = [
             row for row in all_rows.values()
@@ -2226,6 +2282,38 @@ class PageLoadThread(QThread):
         if age_cutoff is not None:
             return modified_time <= age_cutoff
         return True
+
+    def _filesystem_entry_is_excluded(self, name, is_folder, size):
+        exclusions = self.options.get('scan_exclusions')
+        if exclusions is None:
+            return False
+        if is_folder:
+            return exclusions.matches_excluded_folder(name)
+        extension = os.path.splitext(name)[1].lower()
+        return (
+            exclusions.matches_excluded_extension(extension)
+            or (
+                exclusions.min_file_size_bytes > 0
+                and (size or 0) < exclusions.min_file_size_bytes
+            )
+        )
+
+    def _filesystem_folder_size(self, folder_path):
+        total = 0
+        for current, dir_names, file_names in os.walk(folder_path):
+            dir_names[:] = [
+                name for name in dir_names
+                if not self._filesystem_entry_is_excluded(name, True, 0)
+            ]
+            for file_name in file_names:
+                file_path = os.path.join(current, file_name)
+                try:
+                    size = os.path.getsize(file_path)
+                except OSError:
+                    continue
+                if not self._filesystem_entry_is_excluded(file_name, False, size):
+                    total += size
+        return total
 
     def _hide_scan_root_context(self, root_node):
         scan_root = self.options.get('scan_root')
@@ -2455,11 +2543,28 @@ class PageLoadThread(QThread):
                         stat_result = entry.stat(follow_symlinks=True)
                     except OSError:
                         continue
+                    if is_folder and self._filesystem_entry_is_excluded(
+                        entry.name,
+                        True,
+                        0,
+                    ):
+                        continue
+                    size = (
+                        self._filesystem_folder_size(entry.path)
+                        if is_folder
+                        else stat_result.st_size
+                    )
+                    if not is_folder and self._filesystem_entry_is_excluded(
+                        entry.name,
+                        False,
+                        size,
+                    ):
+                        continue
                     rows.append((
                         entry.path,
                         entry.name,
                         int(is_folder),
-                        0 if is_folder else stat_result.st_size,
+                        size,
                         stat_result.st_mtime,
                         root_path,
                         1 if is_folder and self._filesystem_path_has_children(entry.path) else 0,
@@ -2472,7 +2577,14 @@ class PageLoadThread(QThread):
         try:
             with os.scandir(folder_path) as entries:
                 for entry in entries:
-                    if not folders_only or entry.is_dir(follow_symlinks=True):
+                    try:
+                        is_folder = entry.is_dir(follow_symlinks=True)
+                        size = 0 if is_folder else entry.stat(follow_symlinks=True).st_size
+                    except OSError:
+                        continue
+                    if self._filesystem_entry_is_excluded(entry.name, is_folder, size):
+                        continue
+                    if not folders_only or is_folder:
                         return True
         except OSError:
             return False
@@ -2579,6 +2691,7 @@ class LazyChildrenLoadThread(QThread):
         cache=None,
         folders_only=False,
         filesystem_fallback=False,
+        scan_exclusions=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -2591,6 +2704,7 @@ class LazyChildrenLoadThread(QThread):
         self.cache = cache
         self.folders_only = folders_only
         self.filesystem_fallback = filesystem_fallback
+        self.scan_exclusions = scan_exclusions
 
     def _child_paths_with_children(self, cursor, child_paths):
         folders_with_children = set()
@@ -2628,11 +2742,50 @@ class LazyChildrenLoadThread(QThread):
         try:
             with os.scandir(folder_path) as entries:
                 for entry in entries:
-                    if not self.folders_only or entry.is_dir(follow_symlinks=True):
+                    try:
+                        is_folder = entry.is_dir(follow_symlinks=True)
+                        size = 0 if is_folder else entry.stat(follow_symlinks=True).st_size
+                    except OSError:
+                        continue
+                    if self._filesystem_entry_is_excluded(entry.name, is_folder, size):
+                        continue
+                    if not self.folders_only or is_folder:
                         return True
         except OSError:
             return False
         return False
+
+    def _filesystem_entry_is_excluded(self, name, is_folder, size):
+        exclusions = self.scan_exclusions
+        if exclusions is None:
+            return False
+        if is_folder:
+            return exclusions.matches_excluded_folder(name)
+        extension = os.path.splitext(name)[1].lower()
+        return (
+            exclusions.matches_excluded_extension(extension)
+            or (
+                exclusions.min_file_size_bytes > 0
+                and (size or 0) < exclusions.min_file_size_bytes
+            )
+        )
+
+    def _filesystem_folder_size(self, folder_path):
+        total = 0
+        for current, dir_names, file_names in os.walk(folder_path):
+            dir_names[:] = [
+                name for name in dir_names
+                if not self._filesystem_entry_is_excluded(name, True, 0)
+            ]
+            for file_name in file_names:
+                file_path = os.path.join(current, file_name)
+                try:
+                    size = os.path.getsize(file_path)
+                except OSError:
+                    continue
+                if not self._filesystem_entry_is_excluded(file_name, False, size):
+                    total += size
+        return total
 
     def _status_for_child(self, is_folder, modified_time, has_child):
         if not self.apply_filter_options:
@@ -2729,12 +2882,29 @@ class LazyChildrenLoadThread(QThread):
                             except OSError:
                                 stat_result = None
                                 modified_time = 0
+                            if is_folder and self._filesystem_entry_is_excluded(
+                                entry.name,
+                                True,
+                                0,
+                            ):
+                                continue
+                            size = (
+                                self._filesystem_folder_size(entry.path)
+                                if is_folder
+                                else (0 if stat_result is None else stat_result.st_size)
+                            )
+                            if not is_folder and self._filesystem_entry_is_excluded(
+                                entry.name,
+                                False,
+                                size,
+                            ):
+                                continue
                             rows.append(
                                 (
                                     entry.path,
                                     entry.name,
                                     int(is_folder),
-                                    0 if is_folder or stat_result is None else stat_result.st_size,
+                                    size,
                                     modified_time,
                                     self.folder_path,
                                 )
@@ -3746,6 +3916,33 @@ class FolderBrowserTreeModel(QAbstractItemModel):
         self.endRemoveRows()
 
 
+class FolderBrowserTreeView(QTreeView):
+    def mouseMoveEvent(self, event):
+        cursor = (
+            Qt.CursorShape.PointingHandCursor
+            if self.indexAt(event.position().toPoint()).isValid()
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.viewport().setCursor(cursor)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        index = self.indexAt(event.position().toPoint())
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and index.isValid()
+            and event.position().x() < self.visualRect(index).left()
+        ):
+            self.setExpanded(index, not self.isExpanded(index))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class FolderBrowserPanel(QFrame):
     scopeChanged = pyqtSignal(str)
     closeRequested = pyqtSignal()
@@ -3775,7 +3972,9 @@ class FolderBrowserPanel(QFrame):
         header_layout.addWidget(title)
         layout.addWidget(header)
 
-        self.tree = QTreeView()
+        self.tree = FolderBrowserTreeView()
+        self.tree.setObjectName("folderBrowserTree")
+        self.tree.setMouseTracking(True)
         self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(False)
@@ -5075,7 +5274,7 @@ class MainWindow(QMainWindow):
         select_all_policy = self.btn_select_all.sizePolicy()
         select_all_policy.setRetainSizeWhenHidden(True)
         self.btn_select_all.setSizePolicy(select_all_policy)
-        self.btn_select_all.clicked.connect(self._select_all)
+        self.btn_select_all.clicked.connect(self._toggle_select_all)
         controls_layout.addWidget(self.btn_select_all)
 
         self.btn_current_page_selection = QPushButton("Select Current Page")
@@ -5095,7 +5294,6 @@ class MainWindow(QMainWindow):
         self.btn_clear_selection.setSizePolicy(clear_selection_policy)
         self.btn_clear_selection.clicked.connect(self._unselect_all)
         self.btn_clear_selection.setVisible(False)
-        controls_layout.addWidget(self.btn_clear_selection)
         
         self.btn_select_inactive = QPushButton("Select All Inactive")
         self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5715,6 +5913,11 @@ class MainWindow(QMainWindow):
             cache=cache,
             folders_only=True,
             filesystem_fallback=True,
+            scan_exclusions=getattr(
+                getattr(self, 'fp', None),
+                'get_scan_exclusions',
+                lambda: ScanExclusions(),
+            )(),
             parent=self,
         )
         self.folder_browser_threads[request_id] = thread
@@ -5847,10 +6050,33 @@ class MainWindow(QMainWindow):
     def _update_expand_control_visibility(self):
         if not hasattr(self, 'btn_expand') or not hasattr(self, 'fp'):
             return
-        self.btn_expand.setVisible(
-            not self.fp.rb_all.isChecked()
-            and self.fp.get_view_mode() != "Files"
-        )
+        view_mode = self.fp.get_view_mode()
+        if view_mode == "Files":
+            self.btn_expand.setVisible(False)
+            return
+        if self.fp.rb_all.isChecked() and view_mode in ("Tree", "Folders"):
+            expanded = self._has_expanded_tree_nodes()
+            blocker = QSignalBlocker(self.btn_expand)
+            self.btn_expand.setChecked(expanded)
+            self.btn_expand.setText("Collapse All")
+            self.btn_expand.setVisible(expanded)
+            self.btn_expand.setEnabled(expanded)
+            del blocker
+            return
+        self.btn_expand.setVisible(True)
+
+    def _has_expanded_tree_nodes(self):
+        if not hasattr(self, 'tree') or not self.proxy_model:
+            return False
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop()
+            for row in range(self.proxy_model.rowCount(parent)):
+                index = self.proxy_model.index(row, 0, parent)
+                if self.tree.isExpanded(index):
+                    return True
+                stack.append(index)
+        return False
 
     def _update_status_column_visibility(self):
         if not hasattr(self, 'tree') or not hasattr(self, 'fp'):
@@ -6014,6 +6240,13 @@ class MainWindow(QMainWindow):
         self._apply_filters()
 
     def _toggle_expand(self, checked):
+        if (
+            self.fp.rb_all.isChecked()
+            and self.fp.get_view_mode() in ("Tree", "Folders")
+        ):
+            self._set_expand_state(False)
+            self._update_expand_control_visibility()
+            return
         self._set_expand_state(checked)
 
     def _update_content_page(self):
@@ -6189,6 +6422,17 @@ class MainWindow(QMainWindow):
             videos_only=videos_only,
             selecting=selecting,
         )
+
+    def _toggle_select_all(self):
+        has_selection = bool(
+            self.bulk_delete_scope
+            or self.selected_paths
+            or self.page_only_selected_paths
+        )
+        if has_selection:
+            self._unselect_all()
+        else:
+            self._select_all()
 
     def _toggle_current_page_selection(self):
         if not self.tree_model:
@@ -6841,14 +7085,16 @@ class MainWindow(QMainWindow):
         all_targets, inactive_targets, empty_targets = self._collect_selection_button_targets(mode)
 
         focused_selection_mode = mode in ('Inactive', 'Empty')
-        self.btn_select_all.setVisible(not has_selection and not focused_selection_mode)
-        self.btn_clear_selection.setVisible(has_selection and not focused_selection_mode)
-        self.btn_clear_selection.setEnabled(has_selection)
+        self.btn_select_all.setVisible(not focused_selection_mode)
+        self.btn_clear_selection.setVisible(False)
+        self.btn_clear_selection.setEnabled(False)
 
-        if mode == 'Videos':
+        if has_selection and mode == 'Videos':
+            self.btn_select_all.setText("Unselect All Videos")
+        elif has_selection:
+            self.btn_select_all.setText("Unselect All")
+        elif mode == 'Videos':
             self.btn_select_all.setText("Select All Videos")
-        elif self._are_all_indices_checked(all_targets):
-            self.btn_select_all.setText("Deselect All")
         else:
             self.btn_select_all.setText("Select All")
 
@@ -6863,7 +7109,10 @@ class MainWindow(QMainWindow):
             else "Select All Empty"
         )
 
-        self.btn_select_all.setEnabled(bool(all_targets) and mode in ('All', 'Videos'))
+        self.btn_select_all.setEnabled(
+            mode in ('All', 'Videos')
+            and (has_selection or bool(all_targets))
+        )
         self.btn_select_inactive.setEnabled(bool(inactive_targets) and mode == 'Inactive')
         empty_enabled = bool(empty_targets) and mode in ('All', 'Empty')
         self.btn_select_empty.setEnabled(empty_enabled)
@@ -7146,13 +7395,14 @@ class MainWindow(QMainWindow):
         pruned_paths = self._prune_paths(paths)
         folder_count = 0
         file_count = 0
+        total_size = 0
         if pruned_paths:
             from src.file_index_tool import FileIndexTool
 
             tool = FileIndexTool()
             try:
                 cursor = tool.conn.cursor()
-                _, folder_count, file_count, _total_size = summarize_paths_batch(cursor, pruned_paths)
+                _, folder_count, file_count, total_size = summarize_paths_batch(cursor, pruned_paths)
             finally:
                 tool.close()
         return {
@@ -7160,7 +7410,7 @@ class MainWindow(QMainWindow):
             'total': len(pruned_paths),
             'folders': folder_count,
             'files': file_count,
-            'size': self.cached_selected_total,
+            'size': total_size,
         }
 
     def _current_page_file_paths(self):
@@ -7764,6 +8014,11 @@ class MainWindow(QMainWindow):
             'sort_desc': self.sort_order == Qt.SortOrder.DescendingOrder,
             'scan_root': getattr(self, 'current_scan_root', os.path.normpath(self.txt_path.text().strip() or "")),
             'folder_cache': self.folder_cache,
+            'scan_exclusions': getattr(
+                self.fp,
+                'get_scan_exclusions',
+                lambda: ScanExclusions(),
+            )(),
             'lazy_show_all_tree': lazy_show_all_tree,
             'filtered_expanded_tree': filtered_expanded_tree,
             'defer_tree_load_until_scan_done': defer_tree_load_until_scan_done,
@@ -8615,9 +8870,11 @@ class MainWindow(QMainWindow):
         if source_index.isValid():
             self._start_lazy_child_load(source_index)
         QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
+        QTimer.singleShot(0, self._update_expand_control_visibility)
 
     def _on_tree_collapsed(self, proxy_index):
         QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
+        QTimer.singleShot(0, self._update_expand_control_visibility)
 
     def _start_lazy_child_load(self, source_index):
         folder_path = self.tree_model.begin_async_child_load(source_index)
@@ -8637,6 +8894,11 @@ class MainWindow(QMainWindow):
                 self.current_lazy_show_all_tree
                 or self.current_filesystem_scope_fallback
             ),
+            scan_exclusions=getattr(
+                self.fp,
+                'get_scan_exclusions',
+                lambda: ScanExclusions(),
+            )(),
             parent=self,
         )
         self.lazy_child_threads[request_id] = {

@@ -163,26 +163,25 @@ class HorizontalFilterBarTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_selection_button_labels_do_not_move_the_controls(self):
+    def test_select_all_button_changes_to_unselect_without_moving(self):
         window = MainWindow()
         try:
             window.resize(1500, 820)
             window.show()
             window.controls_bar.setVisible(True)
-            window.btn_current_page_selection.setVisible(True)
-            window.btn_select_all.setVisible(True)
-            window.btn_clear_selection.setVisible(False)
+            window._refresh_selection_buttons()
             self.app.processEvents()
-            current_page_x = window.btn_current_page_selection.x()
-            clear_x = window.btn_clear_selection.x()
+            select_x = window.btn_select_all.x()
 
-            window.btn_select_all.setVisible(False)
-            window.btn_clear_selection.setVisible(True)
-            window.btn_current_page_selection.setText("Unselect Current Page")
+            selected_path = os.path.normpath(r"C:\scan\selected.txt")
+            window.selected_paths[window._path_key(selected_path)] = selected_path
+            window._refresh_selection_buttons()
             self.app.processEvents()
 
-            self.assertEqual(window.btn_current_page_selection.x(), current_page_x)
-            self.assertEqual(window.btn_clear_selection.x(), clear_x)
+            self.assertEqual(window.btn_select_all.x(), select_x)
+            self.assertEqual(window.btn_select_all.text(), "Unselect All")
+            self.assertTrue(window.btn_select_all.isVisible())
+            self.assertTrue(window.btn_clear_selection.isHidden())
         finally:
             window.close()
 

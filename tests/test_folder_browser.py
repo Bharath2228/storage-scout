@@ -20,6 +20,7 @@ from src.main_window import (
     PageLoadThread,
     WatchdogTreeModel,
 )
+from src.scan_exclusions import ScanExclusions
 
 
 class FolderBrowserModelTests(unittest.TestCase):
@@ -620,6 +621,90 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertTrue(model.hasChildren(child_index))
         self.assertEqual(model.data(file_index), "old.txt")
         self.assertTrue(result["filesystem_scope_fallback"])
+        connection.close()
+
+    def test_filesystem_scope_calculates_nested_folder_sizes(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            parent_folder = os.path.join(scope, "Parent")
+            child_folder = os.path.join(parent_folder, "Child")
+            os.makedirs(child_folder)
+            with open(os.path.join(parent_folder, "one.bin"), "wb") as handle:
+                handle.write(b"123")
+            with open(os.path.join(child_folder, "two.bin"), "wb") as handle:
+                handle.write(b"12345")
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            options = self._options(temp_root, scope, "Folders")
+            options["age_cutoff"] = None
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                result = PageLoadThread(1, options)._load()
+
+        sizes = {
+            child["name"]: child["size"]
+            for child in result["root_node"]["children"]
+        }
+        self.assertEqual(sizes["Parent"], 8)
+        connection.close()
+
+    def test_filesystem_scope_and_lazy_children_honor_exclusions(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            skipped_folder = os.path.join(scope, "skip")
+            os.makedirs(skipped_folder)
+            with open(os.path.join(skipped_folder, "hidden.txt"), "wb") as handle:
+                handle.write(b"hidden")
+            with open(os.path.join(scope, "ignored.tmp"), "wb") as handle:
+                handle.write(b"ignored")
+            with open(os.path.join(scope, "keep.txt"), "wb") as handle:
+                handle.write(b"kept")
+
+            exclusions = ScanExclusions(
+                folder_names=["skip"],
+                extensions=[".tmp"],
+            )
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            options = self._options(temp_root, scope, "Files")
+            options["age_cutoff"] = None
+            options["scan_exclusions"] = exclusions
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                result = PageLoadThread(1, options)._load()
+
+            emitted = []
+            thread = LazyChildrenLoadThread(
+                1,
+                scope,
+                filesystem_fallback=True,
+                scan_exclusions=exclusions,
+            )
+            thread.children_ready.connect(
+                lambda request_id, path, children: emitted.extend(children)
+            )
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                thread.run()
+
+        self.assertEqual(
+            [child["name"] for child in result["root_node"]["children"]],
+            ["keep.txt"],
+        )
+        self.assertEqual([child["name"] for child in emitted], ["keep.txt"])
         connection.close()
 
     def test_lazy_filesystem_child_loader_expands_nested_nas_folder(self):
