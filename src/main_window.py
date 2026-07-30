@@ -573,12 +573,41 @@ class DeleteThread(QThread):
     def cancel(self):
         self.is_cancelled = True
 
+    def _refresh_parent_folder_summaries(self, connection, parent_paths):
+        for parent_path in parent_paths:
+            if not parent_path:
+                continue
+            try:
+                with os.scandir(parent_path) as entries:
+                    physical_child_count = sum(1 for _entry in entries)
+            except OSError:
+                # Unknown is safer than falsely marking a folder empty.
+                physical_child_count = -1
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM file_index "
+                "WHERE parent_path = ? COLLATE NOCASE",
+                (parent_path,),
+            )
+            visible_child_count = cursor.fetchone()[0] or 0
+            connection.execute(
+                "UPDATE folder_summary "
+                "SET child_count = ?, physical_child_count = ? "
+                "WHERE path = ? COLLATE NOCASE",
+                (
+                    visible_child_count,
+                    physical_child_count,
+                    parent_path,
+                ),
+            )
+
     def run(self):
         from src.file_index_tool import FileIndexTool
 
         deleted_count = 0
         errors = []
         deleted_paths = []
+        affected_parent_paths = set()
         total = len(self.paths)
         tool = FileIndexTool()
 
@@ -589,6 +618,20 @@ class DeleteThread(QThread):
 
                 self.delete_progress.emit(index, total, path)
                 try:
+                    parent_path = os.path.dirname(os.path.normpath(path))
+                    try:
+                        cursor = tool.conn.cursor()
+                        cursor.execute(
+                            "SELECT parent_path FROM file_index "
+                            f"WHERE {case_insensitive_path_sql()} LIMIT 1",
+                            (path,),
+                        )
+                        parent_row = cursor.fetchone()
+                        if parent_row and parent_row[0]:
+                            parent_path = parent_row[0]
+                    except sqlite3.Error:
+                        # Summary refresh is additive and must not block deletion.
+                        pass
                     send2trash.send2trash(path)
                     tool.conn.execute(
                         f"DELETE FROM file_index WHERE {case_insensitive_path_sql()}",
@@ -602,10 +645,18 @@ class DeleteThread(QThread):
                     tool.conn.commit()
                     deleted_count += 1
                     deleted_paths.append(path)
+                    if parent_path:
+                        affected_parent_paths.add(parent_path)
                 except Exception as exc:
                     errors.append(f"{path}: {exc}")
 
                 self.delete_progress.emit(index + 1, total, path)
+            if affected_parent_paths:
+                self._refresh_parent_folder_summaries(
+                    tool.conn,
+                    affected_parent_paths,
+                )
+                tool.conn.commit()
         finally:
             tool.close()
 
@@ -8294,13 +8345,9 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"Path not found or not accessible: {path}")
             return
         
-        previous_scan_root = getattr(self, 'current_scan_root', None)
-        continuing_completed_scan = bool(
-            getattr(self, 'has_completed_scan', False)
-            and previous_scan_root
-            and _path_key(previous_scan_root) == _path_key(path)
-        )
-        self.hide_partial_scan_results = not continuing_completed_scan
+        # Never publish partial rows during either an initial scan or a re-scan.
+        # The completed index is exposed once from _on_scan_done().
+        self.hide_partial_scan_results = True
 
         self.current_page = 0
         self.total_scanned = 0
@@ -9926,8 +9973,28 @@ class MainWindow(QMainWindow):
             if self.folder_cache is not None:
                 for path in deleted_paths:
                     self.folder_cache.remove_path(path)
-                self.cached_folder_total = None
-                self.cached_folder_total_root = None
+                updated_total = (
+                    getattr(self.folder_cache, 'running_total_size', 0) or 0
+                )
+                root_path = getattr(self, 'current_scan_root', None)
+                self.cached_folder_total = updated_total
+                self.cached_folder_total_root = (
+                    _path_key(root_path) if root_path else None
+                )
+                set_total_chip = getattr(
+                    self,
+                    '_set_total_summary_chip',
+                    None,
+                )
+                if callable(set_total_chip):
+                    set_total_chip(updated_total)
+                update_scoped_size = getattr(
+                    self,
+                    '_update_scoped_folder_size_from_cache',
+                    None,
+                )
+                if callable(update_scoped_size):
+                    update_scoped_size()
             self._remove_deleted_paths_from_selection(deleted_paths)
             if hasattr(self, '_refresh_folder_browser_after_delete'):
                 self._refresh_folder_browser_after_delete(deleted_paths)

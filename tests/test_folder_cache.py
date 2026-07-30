@@ -98,6 +98,17 @@ class FolderCacheRemovalTests(unittest.TestCase):
         self.assertEqual(self.cache.folder_sizes[root_key], 30)
         self.assertEqual(self.cache.running_total_size, 30)
 
+    def test_remove_file_updates_parent_physical_child_count(self):
+        self.cache.set_folder_summary(self.root, 35, 3, 3, 2, 2)
+
+        self.assertTrue(self.cache.remove_path(self.root_file))
+
+        root_key = self.cache._key(self.root)
+        self.assertEqual(
+            self.cache.folder_counts[root_key]['physical_children'],
+            1,
+        )
+
     def test_descendant_count_is_scoped_to_requested_folder(self):
         self.assertEqual(self.cache.descendant_count(self.root), 5)
         self.assertEqual(self.cache.descendant_count(self.folder), 3)
@@ -151,7 +162,7 @@ class FolderCacheRemovalTests(unittest.TestCase):
 
 class DeleteCompletionCacheTests(unittest.TestCase):
     def test_shared_delete_completion_invalidates_cache_and_refreshes_totals(self):
-        folder_cache = mock.Mock()
+        folder_cache = mock.Mock(running_total_size=10)
         window = SimpleNamespace(
             delete_progress=None,
             delete_thread=object(),
@@ -160,8 +171,11 @@ class DeleteCompletionCacheTests(unittest.TestCase):
             delete_audit_items=2,
             delete_audit_size=30,
             folder_cache=folder_cache,
+            current_scan_root=r"C:\scan",
             cached_folder_total=30,
             cached_folder_total_root=r"c:\scan",
+            _set_total_summary_chip=mock.Mock(),
+            _update_scoped_folder_size_from_cache=mock.Mock(),
             _remove_deleted_paths_from_selection=mock.Mock(),
             _set_delete_controls_enabled=mock.Mock(),
             _load_page=mock.Mock(),
@@ -187,8 +201,10 @@ class DeleteCompletionCacheTests(unittest.TestCase):
             folder_cache.remove_path.call_args_list,
             [mock.call(path) for path in deleted_paths],
         )
-        self.assertIsNone(window.cached_folder_total)
-        self.assertIsNone(window.cached_folder_total_root)
+        self.assertEqual(window.cached_folder_total, 10)
+        self.assertEqual(window.cached_folder_total_root, r"c:\scan")
+        window._set_total_summary_chip.assert_called_once_with(10)
+        window._update_scoped_folder_size_from_cache.assert_called_once_with()
         window._remove_deleted_paths_from_selection.assert_called_once_with(deleted_paths)
         window._load_page.assert_called_once_with()
         window._start_totals_refresh.assert_called_once_with()

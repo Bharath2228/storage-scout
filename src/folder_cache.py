@@ -190,6 +190,12 @@ class FolderCache:
                     )
                     if ancestor_key == parent_key:
                         counts['children'] = len(self.children.get(parent_key, []))
+                        physical_children = counts.get('physical_children')
+                        if physical_children is not None and physical_children >= 0:
+                            counts['physical_children'] = max(
+                                0,
+                                physical_children - 1,
+                            )
 
                 ancestor_path = ancestor_item.get('location')
                 if ancestor_path is None:
