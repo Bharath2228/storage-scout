@@ -103,6 +103,18 @@ class FolderCacheRemovalTests(unittest.TestCase):
         self.assertEqual(self.cache.descendant_count(self.folder), 3)
         self.assertEqual(self.cache.descendant_count(self.subfolder), 1)
 
+    def test_descendant_count_uses_folder_summary_without_walking_children(self):
+        root_key = self.cache._key(self.root)
+        self.cache.children[root_key] = [self.cache._key(r"C:\missing\child")]
+
+        self.assertEqual(self.cache.descendant_count(self.root), 5)
+
+    def test_descendant_count_falls_back_to_cached_tree_without_summary(self):
+        folder_key = self.cache._key(self.folder)
+        self.cache.folder_counts.pop(folder_key)
+
+        self.assertEqual(self.cache.descendant_count(self.folder), 3)
+
     def test_folder_child_detection_ignores_files(self):
         self.assertTrue(self.cache.has_folder_children(self.folder))
         self.assertFalse(self.cache.has_folder_children(self.subfolder))

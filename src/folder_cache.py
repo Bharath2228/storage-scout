@@ -9,6 +9,7 @@ class FolderCache:
         self.items = {}
         self.folder_sizes = {}
         self.folder_counts = {}
+        self._summarized_folders = set()
         self.running_total_size = 0
         self.filesystem_snapshots = {}
         self.exclusion_hidden_folders = set()
@@ -28,6 +29,7 @@ class FolderCache:
             self.items.clear()
             self.folder_sizes.clear()
             self.folder_counts.clear()
+            self._summarized_folders.clear()
             self.running_total_size = 0
             self.filesystem_snapshots.clear()
             self.exclusion_hidden_folders.clear()
@@ -101,6 +103,7 @@ class FolderCache:
             if physical_child_count is not None:
                 counts['physical_children'] = int(physical_child_count)
             self.folder_counts[key] = counts
+            self._summarized_folders.add(key)
             item = self.items.get(key)
             if item:
                 item['size'] = total_size or 0
@@ -198,6 +201,7 @@ class FolderCache:
                 self.children.pop(subtree_key, None)
                 self.folder_sizes.pop(subtree_key, None)
                 self.folder_counts.pop(subtree_key, None)
+                self._summarized_folders.discard(subtree_key)
 
             self.running_total_size = max(
                 0,
@@ -227,6 +231,18 @@ class FolderCache:
     def descendant_count(self, path):
         key = self._key(path)
         with self._lock:
+            summary = (
+                self.folder_counts.get(key)
+                if key in self._summarized_folders
+                else None
+            )
+            if summary is not None:
+                file_count = summary.get('files')
+                folder_count = summary.get('folders')
+                if file_count is not None and folder_count is not None:
+                    # Folder summaries include the requested folder itself.
+                    return max(0, int(file_count) + int(folder_count) - 1)
+
             count = 0
             pending = list(self.children.get(key, []))
             visited = set()
