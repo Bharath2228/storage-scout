@@ -41,7 +41,8 @@ class FilteredTotalsTests(unittest.TestCase):
                 total_size INTEGER,
                 file_count INTEGER,
                 folder_count INTEGER,
-                child_count INTEGER
+                child_count INTEGER,
+                physical_child_count INTEGER DEFAULT -1
             )
             """
         )

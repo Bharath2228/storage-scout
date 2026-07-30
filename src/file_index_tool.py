@@ -50,10 +50,20 @@ class FileIndexTool:
                 total_size INTEGER DEFAULT 0,
                 file_count INTEGER DEFAULT 0,
                 folder_count INTEGER DEFAULT 0,
-                child_count INTEGER DEFAULT 0
+                child_count INTEGER DEFAULT 0,
+                physical_child_count INTEGER DEFAULT -1
             );
             """
         )
+        summary_columns = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(folder_summary)")
+        }
+        if "physical_child_count" not in summary_columns:
+            self.conn.execute(
+                "ALTER TABLE folder_summary "
+                "ADD COLUMN physical_child_count INTEGER DEFAULT -1"
+            )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON file_index(name);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON file_index(parent_path);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_nocase ON file_index(parent_path COLLATE NOCASE);")
@@ -123,6 +133,7 @@ class FileIndexTool:
                     "file_count": 0,
                     "folder_count": 1,
                     "child_count": 0,
+                    "physical_child_count": 0,
                     "modified_time": modified_time,
                 }
                 folder_info[key] = info
@@ -223,6 +234,8 @@ class FileIndexTool:
                         if cancel_callback and cancel_callback():
                             break
 
+                        with summary_lock:
+                            ensure_folder(current_folder)["physical_child_count"] += 1
                         try:
                             is_folder = entry.is_dir(follow_symlinks=False)
                             stat = entry.stat(follow_symlinks=False)
@@ -367,14 +380,22 @@ class FileIndexTool:
                 item["file_count"],
                 item["folder_count"],
                 item["child_count"],
+                item["physical_child_count"],
             )
             for item in summaries
         ]
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO folder_summary
-            (path, total_size, file_count, folder_count, child_count)
-            VALUES (?, ?, ?, ?, ?);
+            (
+                path,
+                total_size,
+                file_count,
+                folder_count,
+                child_count,
+                physical_child_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?);
             """,
             rows,
         )

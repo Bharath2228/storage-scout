@@ -53,6 +53,42 @@ def _path_key(path):
     return os.path.normcase(os.path.normpath(path))
 
 
+def equivalent_path_variants(path):
+    if not path:
+        return []
+    normalized = os.path.normpath(path)
+    stripped = normalized.rstrip("\\/")
+    variants = {
+        path,
+        normalized,
+        stripped,
+        stripped + "\\",
+        stripped + "/",
+    }
+    variants.update(value.replace("\\", "/") for value in list(variants))
+    variants.update(value.replace("/", "\\") for value in list(variants))
+    return [value for value in variants if value]
+
+
+def folder_is_physically_empty(cursor, path):
+    try:
+        cursor.execute(
+            "SELECT physical_child_count FROM folder_summary "
+            "WHERE path = ? COLLATE NOCASE",
+            (path,),
+        )
+        row = cursor.fetchone()
+    except Exception:
+        row = None
+    if row and row[0] is not None and row[0] >= 0:
+        return row[0] == 0
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is None
+    except OSError:
+        return False
+
+
 class PathKeyIndex:
     """Indexed normalized paths with depth-based ancestor and bisected descendant lookup."""
 
@@ -197,8 +233,10 @@ def paint_tree_row_border(painter, option):
     return
 
 EMPTY_FOLDER_SQL = (
-    "is_folder = 1 AND NOT EXISTS ("
-    "SELECT 1 FROM file_index child WHERE child.parent_path = file_index.path"
+    "is_folder = 1 AND EXISTS ("
+    "SELECT 1 FROM folder_summary summary "
+    "WHERE summary.path = file_index.path COLLATE NOCASE "
+    "AND summary.physical_child_count = 0"
     ") AND lower(name) NOT IN ('.git', '__pycache__', 'venv', '.venv', 'node_modules')"
 )
 
@@ -1040,11 +1078,7 @@ class ExportThread(QThread):
             where_sql = self.config.get("bulk_where_sql", "")
             params = list(self.config.get("bulk_params", []))
             if self.config.get("folder_delete_mode") == "empty_only":
-                folder_clause = (
-                    "(is_folder = 0 OR (is_folder = 1 AND NOT EXISTS "
-                    "(SELECT 1 FROM file_index child "
-                    "WHERE child.parent_path = file_index.path COLLATE NOCASE)))"
-                )
+                folder_clause = f"(is_folder = 0 OR ({EMPTY_FOLDER_SQL}))"
                 where_sql = (
                     where_sql + " AND " + folder_clause
                     if where_sql else " WHERE " + folder_clause
@@ -1308,11 +1342,7 @@ class DeletePreviewThread(QThread):
             elif folder_delete_mode == 'all':
                 paths.append(path)
             elif folder_delete_mode == 'empty_only':
-                cursor.execute(
-                    "SELECT 1 FROM file_index WHERE parent_path = ? COLLATE NOCASE LIMIT 1",
-                    (path,),
-                )
-                if cursor.fetchone() is None:
+                if folder_is_physically_empty(cursor, path):
                     paths.append(path)
         return self._prune_paths(paths)
 
@@ -1931,8 +1961,12 @@ class PageLoadThread(QThread):
 
         scan_root = self.options.get('scan_root')
         if scan_root:
-            where_clauses.append("path != ? COLLATE NOCASE")
-            params.append(scan_root)
+            root_variants = equivalent_path_variants(scan_root)
+            placeholders = ",".join("?" * len(root_variants))
+            where_clauses.append(
+                f"path COLLATE NOCASE NOT IN ({placeholders})"
+            )
+            params.extend(root_variants)
 
         if where_clauses:
             where_sql = " WHERE " + " AND ".join(where_clauses)
@@ -1957,6 +1991,17 @@ class PageLoadThread(QThread):
                 query += f" LIMIT {limit} OFFSET {offset}"
             cursor.execute(query, params)
             rows = cursor.fetchall()
+            if scan_root:
+                scan_root_key = _path_key(scan_root)
+                filtered_rows = [
+                    row for row in rows
+                    if _path_key(row[0]) != scan_root_key
+                ]
+                total_matches = max(
+                    0,
+                    total_matches - (len(rows) - len(filtered_rows)),
+                )
+                rows = filtered_rows
             if not rows and total_matches == 0 and folder_scope:
                 filesystem_result = self._load_filtered_filesystem_scope(folder_scope)
                 if filesystem_result is not None:
@@ -2124,7 +2169,8 @@ class PageLoadThread(QThread):
 
     def _load_filtered_filesystem_scope(self, folder_scope):
         all_rows = {}
-        child_keys = set()
+        physical_child_keys = set()
+        visible_child_keys = set()
         pending = [os.path.normpath(folder_scope)]
         visited = set()
 
@@ -2140,6 +2186,8 @@ class PageLoadThread(QThread):
             except OSError:
                 continue
 
+            if folder_entries:
+                physical_child_keys.add(folder_key)
             for entry in folder_entries:
                 try:
                     is_folder = entry.is_dir(follow_symlinks=True)
@@ -2152,7 +2200,7 @@ class PageLoadThread(QThread):
                     0 if is_folder else stat_result.st_size,
                 ):
                     continue
-                child_keys.add(folder_key)
+                visible_child_keys.add(folder_key)
                 row = (
                     entry.path,
                     entry.name,
@@ -2192,7 +2240,10 @@ class PageLoadThread(QThread):
 
         matched_rows = [
             row for row in all_rows.values()
-            if self._filesystem_row_matches(row, _path_key(row[0]) in child_keys)
+            if self._filesystem_row_matches(
+                row,
+                _path_key(row[0]) in physical_child_keys,
+            )
         ]
         matched_rows.sort(
             key=lambda row: (
@@ -2239,7 +2290,7 @@ class PageLoadThread(QThread):
             list(rows_by_key.values()),
             original_order,
             original_keys,
-            child_keys,
+            visible_child_keys,
             total_matches,
         )
 
@@ -2730,6 +2781,29 @@ class LazyChildrenLoadThread(QThread):
             )
         return folders_with_children
 
+    def _physically_empty_folder_paths(self, cursor, folder_paths):
+        empty_paths = set()
+        for start in range(0, len(folder_paths), 900):
+            batch = folder_paths[start:start + 900]
+            if not batch:
+                continue
+            placeholders = ",".join("?" * len(batch))
+            try:
+                cursor.execute(
+                    "SELECT path FROM folder_summary "
+                    f"WHERE path COLLATE NOCASE IN ({placeholders}) "
+                    "AND physical_child_count = 0",
+                    batch,
+                )
+            except Exception:
+                return set()
+            empty_paths.update(
+                _path_key(path)
+                for (path,) in cursor.fetchall()
+                if path
+            )
+        return empty_paths
+
     def _parent_path_variants(self):
         normalized = os.path.normpath(self.folder_path)
         variants = [self.folder_path, normalized]
@@ -2845,6 +2919,8 @@ class LazyChildrenLoadThread(QThread):
 
         tool = FileIndexTool()
         folders_with_children = set()
+        physically_empty_folders = set()
+        used_filesystem_rows = False
         try:
             cursor = tool.conn.cursor()
             folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
@@ -2861,6 +2937,10 @@ class LazyChildrenLoadThread(QThread):
             rows = cursor.fetchall()
             child_folder_paths = [path for path, _name, is_folder, _size, _modified_time, _parent_path in rows if is_folder]
             folders_with_children = self._child_paths_with_children(cursor, child_folder_paths)
+            physically_empty_folders = self._physically_empty_folder_paths(
+                cursor,
+                child_folder_paths,
+            )
         except Exception as exc:
             self.children_failed.emit(self.request_id, self.folder_path, str(exc))
             return
@@ -2868,6 +2948,7 @@ class LazyChildrenLoadThread(QThread):
             tool.close()
 
         if not rows and self.filesystem_fallback:
+            used_filesystem_rows = True
             try:
                 with os.scandir(self.folder_path) as entries:
                     rows = []
@@ -2925,7 +3006,21 @@ class LazyChildrenLoadThread(QThread):
         for path, name, is_folder, size, modified_time, parent_path in rows:
             is_folder = bool(is_folder)
             has_child = os.path.normcase(os.path.normpath(path)) in folders_with_children
-            status = self._status_for_child(is_folder, modified_time, has_child)
+            status_has_child = has_child
+            if is_folder and self.options.get('status_filter') == 'Empty':
+                if used_filesystem_rows:
+                    try:
+                        with os.scandir(path) as entries:
+                            status_has_child = next(entries, None) is not None
+                    except OSError:
+                        status_has_child = True
+                else:
+                    status_has_child = _path_key(path) not in physically_empty_folders
+            status = self._status_for_child(
+                is_folder,
+                modified_time,
+                status_has_child,
+            )
             if not self._child_matches_options(name, is_folder, status):
                 continue
             children.append({
@@ -3011,10 +3106,7 @@ class BulkPageSelectThread(QThread):
             effective_files = files
             effective_size = total_size
             if self.options.get('folder_delete_mode') == 'empty_only' and folders:
-                folder_clause = (
-                    "is_folder = 1 AND NOT EXISTS "
-                    "(SELECT 1 FROM file_index child WHERE child.parent_path = file_index.path COLLATE NOCASE)"
-                )
+                folder_clause = EMPTY_FOLDER_SQL
                 effective_where = (
                     self.where_sql + " AND " + folder_clause
                     if self.where_sql else " WHERE " + folder_clause
@@ -3903,6 +3995,30 @@ class FolderBrowserTreeModel(QAbstractItemModel):
         self.dataChanged.emit(index, index, [])
         return index
 
+    def remove_path(self, path):
+        node = self.nodes_by_path.get(_path_key(path))
+        if node is None or node.parent is None:
+            return False
+        parent_node = node.parent
+        parent_index = (
+            QModelIndex()
+            if parent_node is self.root_node
+            else self.index_for_path(parent_node.path)
+        )
+        row = node.row()
+        self.beginRemoveRows(parent_index, row, row)
+        parent_node.children.pop(row)
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            stack.extend(current.children)
+            self.nodes_by_path.pop(_path_key(current.path), None)
+        self.endRemoveRows()
+        if parent_node is not self.root_node:
+            parent_node.has_children = bool(parent_node.children)
+            self.dataChanged.emit(parent_index, parent_index, [])
+        return True
+
     def _remove_children(self, node, parent_index):
         if not node.children:
             return
@@ -4054,6 +4170,14 @@ class FolderBrowserPanel(QFrame):
             index = self.model.refresh_path(path)
             if index.isValid() and self.tree.isExpanded(index):
                 self.model.fetchMore(index)
+
+    def remove_paths(self, paths):
+        for path in sorted(
+            dict.fromkeys(path for path in paths if path),
+            key=lambda value: len(os.path.normpath(value)),
+            reverse=True,
+        ):
+            self.model.remove_path(path)
 
     def _on_current_changed(self, current, previous):
         path = self.model.data(current, Qt.ItemDataRole.UserRole)
@@ -6844,8 +6968,12 @@ class MainWindow(QMainWindow):
 
         scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         if scan_root:
-            where_clauses.append("path != ? COLLATE NOCASE")
-            params.append(scan_root)
+            root_variants = equivalent_path_variants(scan_root)
+            placeholders = ",".join("?" * len(root_variants))
+            where_clauses.append(
+                f"path COLLATE NOCASE NOT IN ({placeholders})"
+            )
+            params.extend(root_variants)
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         return where_sql, params
@@ -6877,7 +7005,7 @@ class MainWindow(QMainWindow):
 
         from src.file_index_tool import FileIndexTool
 
-        folder_clause = "is_folder = 1 AND NOT EXISTS (SELECT 1 FROM file_index child WHERE child.parent_path = file_index.path COLLATE NOCASE)"
+        folder_clause = EMPTY_FOLDER_SQL
         effective_where = (where_sql + " AND " + folder_clause) if where_sql else (" WHERE " + folder_clause)
         tool = FileIndexTool()
         try:
@@ -9087,11 +9215,7 @@ class MainWindow(QMainWindow):
                 elif folder_delete_mode == 'all':
                     paths.append(path)
                 elif folder_delete_mode == 'empty_only':
-                    cursor.execute(
-                        "SELECT 1 FROM file_index WHERE parent_path = ? COLLATE NOCASE LIMIT 1",
-                        (path,),
-                    )
-                    if cursor.fetchone() is None:
+                    if folder_is_physically_empty(cursor, path):
                         paths.append(path)
         finally:
             tool.close()
@@ -9115,6 +9239,8 @@ class MainWindow(QMainWindow):
     def _refresh_folder_browser_after_delete(self, deleted_paths):
         if not deleted_paths or not self.folder_browser.root_path:
             return
+        self.folder_browser_request_id += 1
+        self.folder_browser_threads.clear()
         deleted_keys = [_path_key(path) for path in deleted_paths if path]
         deleted_index = PathKeyIndex(deleted_keys)
         if (
@@ -9123,6 +9249,7 @@ class MainWindow(QMainWindow):
         ):
             self.folder_browser.select_root()
             self._set_folder_browser_scope(None, reload=False)
+        self.folder_browser.remove_paths(deleted_paths)
         parent_paths = [
             os.path.dirname(os.path.normpath(path))
             for path in deleted_paths

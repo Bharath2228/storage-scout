@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import QApplication
 from src import file_index_tool
 from src.folder_cache import FolderCache
 from src.main_window import (
+    EMPTY_FOLDER_SQL,
     FolderBrowserTreeModel,
     LazyChildrenLoadThread,
     MainWindow,
@@ -62,6 +63,25 @@ class FolderBrowserModelTests(unittest.TestCase):
         folder_index = model.index(0, 0, root_index)
         self.assertEqual(model.data(folder_index), "Folder A")
         self.assertTrue(model.canFetchMore(folder_index))
+
+    def test_model_removes_deleted_folder_immediately(self):
+        model = FolderBrowserTreeModel()
+        root = os.path.normpath(r"C:\scan")
+        child = os.path.join(root, "Deleted")
+        model.reset_root(root)
+        model.apply_children(
+            root,
+            [{
+                "name": "Deleted",
+                "path": child,
+                "is_dir": True,
+                "_children_loaded": True,
+            }],
+        )
+
+        self.assertTrue(model.remove_path(child))
+        self.assertEqual(model.rowCount(model.index(0, 0)), 0)
+        self.assertFalse(model.index_for_path(child).isValid())
 
     def test_live_scan_cache_populates_folder_browser_without_files(self):
         root = os.path.normpath(r"C:\scan")
@@ -165,6 +185,18 @@ class FolderScopeQueryTests(unittest.TestCase):
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE folder_summary (
+                path TEXT PRIMARY KEY,
+                total_size INTEGER DEFAULT 0,
+                file_count INTEGER DEFAULT 0,
+                folder_count INTEGER DEFAULT 0,
+                child_count INTEGER DEFAULT 0,
+                physical_child_count INTEGER DEFAULT -1
+            )
+            """
+        )
         root = os.path.normpath(r"C:\scan")
         folder_a = os.path.normpath(r"C:\scan\A")
         folder_b = os.path.normpath(r"C:\scan\B")
@@ -223,6 +255,68 @@ class FolderScopeQueryTests(unittest.TestCase):
             ["old.txt"],
         )
         connection.close()
+
+    def test_empty_filter_uses_physical_contents_and_show_all_hides_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = os.path.join(temp_dir, "scan")
+            truly_empty = os.path.join(root, "Truly Empty")
+            excluded_only = os.path.join(root, "Excluded Only")
+            os.makedirs(truly_empty)
+            os.makedirs(excluded_only)
+            with open(os.path.join(excluded_only, "ignored.tmp"), "wb") as handle:
+                handle.write(b"hidden")
+
+            tool = file_index_tool.FileIndexTool(
+                os.path.join(temp_dir, "index.db")
+            )
+            tool.scan(
+                root,
+                exclusions=ScanExclusions(
+                    folder_names=[],
+                    extensions=[".tmp"],
+                ),
+            )
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = tool.conn
+
+                def close(self):
+                    pass
+
+            base_options = self._options(root, None, "Folders")
+            base_options.update({
+                "age_cutoff": None,
+                "scan_exclusions": ScanExclusions(
+                    folder_names=[],
+                    extensions=[".tmp"],
+                ),
+            })
+            empty_options = dict(base_options, status_filter="Empty")
+            with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+                empty_result = PageLoadThread(1, empty_options)._load()
+                all_result = PageLoadThread(
+                    2,
+                    dict(base_options, status_filter=None),
+                )._load()
+
+            cursor = tool.conn.cursor()
+            cursor.execute(
+                "SELECT name FROM file_index WHERE " + EMPTY_FOLDER_SQL
+            )
+            self.assertEqual(
+                {name for (name,) in cursor.fetchall()},
+                {"Truly Empty"},
+            )
+            self.assertEqual(
+                {child["name"] for child in empty_result["root_node"]["children"]},
+                {"Truly Empty"},
+            )
+            self.assertNotIn(
+                os.path.basename(root),
+                {child["name"] for child in all_result["root_node"]["children"]},
+            )
+            tool.close()
 
     def test_nas_scope_follows_parent_links_when_child_path_uses_an_alias(self):
         connection, root, scope = self._database()
@@ -806,11 +900,14 @@ class FolderScopeInteractionTests(unittest.TestCase):
         folder_browser = SimpleNamespace(
             root_path=root,
             select_root=mock.Mock(),
+            remove_paths=mock.Mock(),
             refresh_paths=mock.Mock(),
         )
         window = SimpleNamespace(
             folder_browser=folder_browser,
             folder_browser_scope=scope,
+            folder_browser_request_id=3,
+            folder_browser_threads={1: object()},
             _set_folder_browser_scope=mock.Mock(),
         )
 
@@ -818,7 +915,10 @@ class FolderScopeInteractionTests(unittest.TestCase):
 
         folder_browser.select_root.assert_called_once_with()
         window._set_folder_browser_scope.assert_called_once_with(None, reload=False)
+        folder_browser.remove_paths.assert_called_once_with([scope])
         folder_browser.refresh_paths.assert_called_once_with([root])
+        self.assertEqual(window.folder_browser_request_id, 4)
+        self.assertEqual(window.folder_browser_threads, {})
 
 
 if __name__ == "__main__":
