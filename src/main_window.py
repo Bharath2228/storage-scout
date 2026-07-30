@@ -2608,82 +2608,102 @@ class PageLoadThread(QThread):
             cursor = tool.conn.cursor()
             self._raise_if_cancelled()
             if is_scoped:
-                descendant_sql, descendant_params = descendant_like_sql(root_path)
-                cursor.execute(
-                    f"SELECT COUNT(*) FROM file_index WHERE {descendant_sql}",
-                    descendant_params,
+                stored_root_path = root_path
+                total_matches = (
+                    cache.summary_descendant_count(root_path)
+                    if cache is not None
+                    and hasattr(cache, 'summary_descendant_count')
+                    else None
                 )
-                total_rows = cursor.fetchone()[0] or 0
+                if total_matches is None:
+                    path_variants = equivalent_path_variants(root_path)
+                    placeholders = ",".join("?" * len(path_variants))
+                    cursor.execute(
+                        "SELECT file_count, folder_count FROM folder_summary "
+                        f"WHERE path IN ({placeholders}) LIMIT 1",
+                        path_variants,
+                    )
+                    summary_row = cursor.fetchone()
+                    total_matches = (
+                        max(0, int(summary_row[0] or 0) + int(summary_row[1] or 0) - 1)
+                        if summary_row
+                        else None
+                    )
             else:
                 cursor.execute("SELECT COUNT(*) FROM file_index")
                 total_rows = cursor.fetchone()[0] or 0
 
-            cursor.execute(
-                """
-                SELECT CASE
-                           WHEN path = ? COLLATE NOCASE THEN path
-                           ELSE root
-                       END
-                FROM file_index
-                WHERE path = ? COLLATE NOCASE OR root = ? COLLATE NOCASE
-                ORDER BY CASE WHEN path = ? COLLATE NOCASE THEN 0 ELSE 1 END,
-                         length(path) ASC
-                LIMIT 1
-                """,
-                (root_path, root_path, root_path, root_path),
-            )
-            stored_root_row = cursor.fetchone()
-            if stored_root_row:
-                stored_root_path = stored_root_row[0]
-            elif is_scoped:
-                stored_root_path = root_path
-            else:
+            if not is_scoped:
                 cursor.execute(
                     """
-                    SELECT root
+                    SELECT CASE
+                               WHEN path = ? COLLATE NOCASE THEN path
+                               ELSE root
+                           END
                     FROM file_index
-                    GROUP BY root
-                    ORDER BY COUNT(*) DESC, length(root) ASC
+                    WHERE path = ? COLLATE NOCASE OR root = ? COLLATE NOCASE
+                    ORDER BY CASE WHEN path = ? COLLATE NOCASE THEN 0 ELSE 1 END,
+                             length(path) ASC
                     LIMIT 1
-                    """
+                    """,
+                    (root_path, root_path, root_path, root_path),
                 )
-                fallback_root_row = cursor.fetchone()
-                stored_root_path = fallback_root_row[0] if fallback_root_row else root_path
+                stored_root_row = cursor.fetchone()
+                if stored_root_row:
+                    stored_root_path = stored_root_row[0]
+                else:
+                    cursor.execute(
+                        """
+                        SELECT root
+                        FROM file_index
+                        GROUP BY root
+                        ORDER BY COUNT(*) DESC, length(root) ASC
+                        LIMIT 1
+                        """
+                    )
+                    fallback_root_row = cursor.fetchone()
+                    stored_root_path = fallback_root_row[0] if fallback_root_row else root_path
 
-            cursor.execute(
-                "SELECT 1 FROM file_index WHERE path = ? COLLATE NOCASE LIMIT 1",
-                (stored_root_path,),
-            )
-            total_matches = (
-                total_rows
+                cursor.execute(
+                    "SELECT 1 FROM file_index WHERE path = ? COLLATE NOCASE LIMIT 1",
+                    (stored_root_path,),
+                )
+                total_matches = max(total_rows - (1 if cursor.fetchone() else 0), 0)
+
+            parent_variants = (
+                equivalent_path_variants(stored_root_path)
                 if is_scoped
-                else max(total_rows - (1 if cursor.fetchone() else 0), 0)
+                else [stored_root_path]
             )
-
+            parent_placeholders = ",".join("?" * len(parent_variants))
             cursor.execute(
                 "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
                 "(SELECT 1 FROM file_index child WHERE child.parent_path = f.path COLLATE NOCASE LIMIT 1) "
                 "FROM file_index f "
-                "WHERE f.parent_path = ? COLLATE NOCASE "
+                f"WHERE f.parent_path COLLATE NOCASE IN ({parent_placeholders}) "
                 f"ORDER BY {build_sort_order_clause('Tree', self.options['sort_column'], self.options['sort_desc'])}",
-                (stored_root_path,),
+                parent_variants,
             )
             rows = cursor.fetchall()
             load_source = "parent_path"
-            if not rows and total_matches:
+            if not rows and total_matches and not is_scoped:
                 rows = self._load_direct_children_from_root_index(cursor, stored_root_path)
                 load_source = "root_index_direct"
-            if not rows and total_matches:
+            if not rows and total_matches and not is_scoped:
                 rows = self._load_direct_children_by_path(cursor, stored_root_path)
                 load_source = "path_prefix_direct"
-            if not rows and total_matches:
+            if not rows and total_matches and not is_scoped:
                 rows = self._load_indexed_rows_for_root(cursor, stored_root_path)
                 load_source = "root_index_all"
             if not rows and is_scoped:
-                rows = self._load_direct_children_from_filesystem(stored_root_path)
+                rows = self._load_direct_children_from_filesystem(
+                    stored_root_path,
+                    cursor=cursor,
+                )
                 if rows:
-                    total_matches = len(rows)
                     load_source = "filesystem"
+            if is_scoped and total_matches is None:
+                total_matches = len(rows)
         finally:
             self._connection = None
             tool.close()
@@ -2753,8 +2773,9 @@ class PageLoadThread(QThread):
                 return "\\" not in remainder and "/" not in remainder
         return False
 
-    def _load_direct_children_from_filesystem(self, root_path):
-        rows = []
+    def _load_direct_children_from_filesystem(self, root_path, cursor=None):
+        entries_data = []
+        cache = self.options.get('folder_cache')
         try:
             with os.scandir(root_path) as entries:
                 for entry in entries:
@@ -2771,50 +2792,89 @@ class PageLoadThread(QThread):
                     ):
                         continue
                     if is_folder:
-                        cache = self.options.get('folder_cache')
                         if (
                             cache is not None
                             and hasattr(cache, 'is_exclusion_hidden')
                             and cache.is_exclusion_hidden(entry.path)
                         ):
                             continue
-                        is_cached = (
-                            cache is not None
-                            and hasattr(cache, 'contains_path')
-                            and cache.contains_path(entry.path)
-                        )
-                        if (
-                            not is_cached
-                            and not filesystem_folder_has_visible_entries(
-                                entry.path,
-                                self.options.get('scan_exclusions'),
-                                cancel_check=self._raise_if_cancelled,
-                            )
-                        ):
-                            continue
-                    size = (
-                        self._filesystem_folder_size(entry.path)
-                        if is_folder
-                        else stat_result.st_size
-                    )
+                    size = 0 if is_folder else stat_result.st_size
                     if not is_folder and self._filesystem_entry_is_excluded(
                         entry.name,
                         False,
                         size,
                     ):
                         continue
-                    rows.append((
+                    entries_data.append((
                         entry.path,
                         entry.name,
                         int(is_folder),
                         size,
                         stat_result.st_mtime,
                         root_path,
-                        1 if is_folder and self._filesystem_path_has_children(entry.path) else 0,
                     ))
         except OSError:
             return []
+
+        folder_metadata = self._folder_metadata_for_filesystem_rows(
+            cursor,
+            [row[0] for row in entries_data if row[2]],
+        )
+        rows = []
+        for path, name, is_folder, size, modified_time, parent_path in entries_data:
+            has_child = 0
+            if is_folder:
+                metadata = folder_metadata.get(_path_key(path))
+                if metadata is not None:
+                    size, child_count = metadata
+                    has_child = int((child_count or 0) > 0)
+                else:
+                    has_child = int(self._filesystem_path_has_children(path))
+            rows.append((
+                path,
+                name,
+                is_folder,
+                size,
+                modified_time,
+                parent_path,
+                has_child,
+            ))
         return self._sort_show_all_rows(rows)
+
+    def _folder_metadata_for_filesystem_rows(self, cursor, folder_paths):
+        metadata = {}
+        cache = self.options.get('folder_cache')
+        unresolved = []
+        for path in folder_paths:
+            key = _path_key(path)
+            cached_metadata = (
+                cache.folder_metadata(path)
+                if cache is not None and hasattr(cache, 'folder_metadata')
+                else None
+            )
+            if cached_metadata is None:
+                unresolved.append(path)
+                continue
+            metadata[key] = cached_metadata
+
+        if cursor is None:
+            return metadata
+        for start in range(0, len(unresolved), 900):
+            batch = unresolved[start:start + 900]
+            if not batch:
+                continue
+            placeholders = ",".join("?" * len(batch))
+            cursor.execute(
+                "SELECT path, total_size, child_count FROM folder_summary "
+                f"WHERE path IN ({placeholders})",
+                batch,
+            )
+            for path, total_size, child_count in cursor.fetchall():
+                metadata[_path_key(path)] = (
+                    total_size or 0,
+                    child_count or 0,
+                )
+        return metadata
 
     def _filesystem_path_has_children(self, folder_path, folders_only=False):
         try:

@@ -700,6 +700,97 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertEqual(result["total_matches"], 2)
         connection.close()
 
+    def test_scoped_filesystem_fallback_does_not_walk_child_subtrees(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        with tempfile.TemporaryDirectory() as temp_root:
+            scope = os.path.join(temp_root, "NAS Folder")
+            nested = os.path.join(scope, "Nested")
+            os.makedirs(nested)
+            connection.execute(
+                "INSERT INTO folder_summary "
+                "(path, total_size, file_count, folder_count, child_count) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (nested, 1024, 1, 1, 1),
+            )
+
+            class FakeTool:
+                def __init__(self):
+                    self.conn = connection
+
+                def close(self):
+                    pass
+
+            options = self._options(temp_root, scope, "Tree")
+            options.update({
+                "status_filter": None,
+                "age_cutoff": None,
+                "paginated": False,
+                "folder_cache": FolderCache(),
+                "lazy_show_all_tree": True,
+            })
+            with (
+                mock.patch.object(file_index_tool, "FileIndexTool", FakeTool),
+                mock.patch(
+                    "src.main_window.filesystem_folder_has_visible_entries",
+                    side_effect=AssertionError("child subtrees must not be scanned"),
+                ),
+                mock.patch.object(
+                    PageLoadThread,
+                    "_filesystem_folder_size",
+                    side_effect=AssertionError("folder sizes must use summaries"),
+                ),
+            ):
+                result = PageLoadThread(1, options)._load()
+
+        child = result["root_node"]["children"][0]
+        self.assertEqual(child["path"], nested)
+        self.assertEqual(child["size"], 1024)
+        self.assertFalse(child["_children_loaded"])
+        connection.close()
+
+    def test_scoped_lazy_tree_does_not_scan_the_full_index(self):
+        connection, root, scope = self._database()
+        connection.execute(
+            "INSERT INTO folder_summary "
+            "(path, total_size, file_count, folder_count, child_count) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (scope, 20, 2, 1, 2),
+        )
+        statements = []
+        connection.set_trace_callback(statements.append)
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        options = self._options(root, scope, "Tree")
+        options.update({
+            "status_filter": None,
+            "age_cutoff": None,
+            "paginated": False,
+            "folder_cache": FolderCache(),
+            "lazy_show_all_tree": True,
+        })
+        with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+            result = PageLoadThread(1, options)._load()
+
+        normalized_statements = [
+            " ".join(statement.lower().split())
+            for statement in statements
+        ]
+        self.assertEqual(result["total_matches"], 2)
+        self.assertFalse(any(
+            "from file_index where path like" in statement
+            or "where f.root =" in statement
+            or "with recursive scoped_paths" in statement
+            for statement in normalized_statements
+        ))
+        connection.close()
+
     def test_scoped_filesystem_fallback_supports_other_filters_and_views(self):
         connection, _root, _scope = self._database()
         connection.execute("DELETE FROM file_index")

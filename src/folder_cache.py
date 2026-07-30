@@ -231,17 +231,9 @@ class FolderCache:
     def descendant_count(self, path):
         key = self._key(path)
         with self._lock:
-            summary = (
-                self.folder_counts.get(key)
-                if key in self._summarized_folders
-                else None
-            )
-            if summary is not None:
-                file_count = summary.get('files')
-                folder_count = summary.get('folders')
-                if file_count is not None and folder_count is not None:
-                    # Folder summaries include the requested folder itself.
-                    return max(0, int(file_count) + int(folder_count) - 1)
+            summary_count = self._summary_descendant_count_locked(key)
+            if summary_count is not None:
+                return summary_count
 
             count = 0
             pending = list(self.children.get(key, []))
@@ -254,6 +246,37 @@ class FolderCache:
                 count += 1
                 pending.extend(self.children.get(child_key, []))
             return count
+
+    def summary_descendant_count(self, path):
+        key = self._key(path)
+        with self._lock:
+            return self._summary_descendant_count_locked(key)
+
+    def folder_metadata(self, path):
+        key = self._key(path)
+        with self._lock:
+            if (
+                key not in self._summarized_folders
+                or key not in self.folder_counts
+            ):
+                return None
+            return (
+                self.folder_sizes.get(key, 0) or 0,
+                self.folder_counts.get(key, {}).get('children', 0) or 0,
+            )
+
+    def _summary_descendant_count_locked(self, key):
+        if key not in self._summarized_folders:
+            return None
+        summary = self.folder_counts.get(key)
+        if summary is None:
+            return None
+        file_count = summary.get('files')
+        folder_count = summary.get('folders')
+        if file_count is None or folder_count is None:
+            return None
+        # Folder summaries include the requested folder itself.
+        return max(0, int(file_count) + int(folder_count) - 1)
 
     def snapshot_subtree(self, path):
         key = self._key(path)
