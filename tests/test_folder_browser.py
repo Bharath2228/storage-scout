@@ -728,6 +728,8 @@ class FolderScopeQueryTests(unittest.TestCase):
         cache.add_item(scope, "Projects", True, 0, 1, root)
         cache.add_item(nested, "Nested", True, 0, 1, scope)
         cache.add_item(file_path, "report.csv", False, 42, 1, scope)
+        cache.set_folder_summary(scope, 2090, 1, 2, 2, 2)
+        cache.set_folder_summary(nested, 2048, 1, 1, 1, 1)
 
         options = self._options(root, scope, "Tree")
         options.update({
@@ -744,6 +746,12 @@ class FolderScopeQueryTests(unittest.TestCase):
             {nested, file_path},
         )
         self.assertEqual(result["total_matches"], 2)
+        nested_row = next(
+            child
+            for child in result["root_node"]["children"]
+            if child["path"] == nested
+        )
+        self.assertEqual(nested_row["size"], 2048)
 
     def test_scoped_lazy_tree_falls_back_to_accessible_filesystem_folder(self):
         connection, _root, _scope = self._database()

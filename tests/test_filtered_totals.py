@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from src import file_index_tool
+from src.folder_cache import FolderCache
 from src.main_window import MainWindow, TotalsThread
 
 
@@ -140,6 +141,41 @@ class FilteredTotalsTests(unittest.TestCase):
             )
 
         self.assertEqual(result["scoped_folder_total"], 10)
+
+    def test_selecting_folder_displays_completed_cached_size_immediately(self):
+        root = os.path.normpath(r"Z:\scan")
+        scope = os.path.join(root, "Projects")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Projects", True, 0, 1, root)
+        cache.set_folder_summary(scope, 5 * 1024, 2, 1, 2, 2)
+        window = MainWindow()
+        try:
+            window.current_scan_root = root
+            window.folder_cache = cache
+
+            window._set_folder_browser_scope(scope, reload=False)
+
+            self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
+            self.assertFalse(window.chip_folder_size.isHidden())
+        finally:
+            window.close()
+
+    def test_totals_refresh_reuses_cached_scoped_folder_size(self):
+        with mock.patch.object(
+            TotalsThread,
+            "_scoped_folder_total_size",
+            side_effect=AssertionError("cached size should avoid scoped lookup"),
+        ):
+            result = self._compute(
+                folder_scope=r"C:\scan\Projects",
+                cached_scoped_folder_total=4096,
+                filtered_where_sql=None,
+                filtered_where_params=(),
+                filtered_size_label=None,
+            )
+
+        self.assertEqual(result["scoped_folder_total"], 4096)
 
 
 if __name__ == "__main__":

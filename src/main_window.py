@@ -3759,9 +3759,16 @@ class TotalsThread(QThread):
                 folder_total, folder_file_count = self._browse_folder_total_size(cursor, self.options['root_path'])
 
             filtered_total = self._filtered_results_total_size(cursor)
-            scoped_folder_total = self._scoped_folder_total_size(
-                cursor,
-                self.options.get('folder_scope'),
+            cached_scoped_folder_total = self.options.get(
+                'cached_scoped_folder_total'
+            )
+            scoped_folder_total = (
+                cached_scoped_folder_total
+                if cached_scoped_folder_total is not None
+                else self._scoped_folder_total_size(
+                    cursor,
+                    self.options.get('folder_scope'),
+                )
             )
 
         except TotalsThread._Cancelled:
@@ -6393,8 +6400,41 @@ class MainWindow(QMainWindow):
         if normalized == self.folder_browser_scope:
             return
         self.folder_browser_scope = normalized
+        update_cached_size = getattr(
+            self,
+            '_update_scoped_folder_size_from_cache',
+            None,
+        )
+        if callable(update_cached_size):
+            update_cached_size(normalized)
         if reload:
             self._on_filter_changed(clear_extension=False)
+
+    def _cached_scoped_folder_total(self, path=None):
+        scoped_path = path if path is not None else self.folder_browser_scope
+        cache = getattr(self, 'folder_cache', None)
+        if not scoped_path or cache is None or not hasattr(cache, 'folder_metadata'):
+            return None
+        metadata = cache.folder_metadata(scoped_path)
+        return None if metadata is None else metadata[0]
+
+    def _update_scoped_folder_size_from_cache(self, path=None):
+        scoped_path = path if path is not None else self.folder_browser_scope
+        if not scoped_path:
+            self.chip_folder_size.setVisible(False)
+            return
+        cached_total = self._cached_scoped_folder_total(scoped_path)
+        if cached_total is None:
+            self._set_chip_text(
+                self.chip_folder_size,
+                "Folder Size calculating...",
+            )
+        else:
+            self._set_chip_text(
+                self.chip_folder_size,
+                f"Folder Size {self._format_chip_size(cached_total)}",
+            )
+        self.chip_folder_size.setVisible(True)
 
     def _on_folder_browser_scope_changed(self, path):
         self._set_folder_browser_scope(path)
@@ -9027,6 +9067,7 @@ class MainWindow(QMainWindow):
         root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
         root_key = os.path.normcase(os.path.normpath(root_path)) if root_path else None
         cached_folder_total = self.cached_folder_total if root_key and root_key == self.cached_folder_total_root else None
+        cached_scoped_folder_total = self._cached_scoped_folder_total()
 
         filtered_where_sql = None
         filtered_where_params = ()
@@ -9045,6 +9086,7 @@ class MainWindow(QMainWindow):
             'root_path': root_path,
             'folder_scope': self.folder_browser_scope,
             'cached_folder_total': cached_folder_total,
+            'cached_scoped_folder_total': cached_scoped_folder_total,
             'current_page_file_paths': self._current_page_file_paths(),
             'selected_paths': self._selected_roots_for_delete(),
             'filtered_where_sql': filtered_where_sql,
