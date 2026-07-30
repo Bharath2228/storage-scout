@@ -13,6 +13,7 @@ from .scan_exclusions import ScanExclusions
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_DB = str(DATA_DIR / "file_index.db")
+_SCHEMA_LOCK = threading.Lock()
 
 class FileIndexTool:
     def __init__(self, db_path: str = DEFAULT_DB):
@@ -20,11 +21,12 @@ class FileIndexTool:
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA synchronous=NORMAL;")
-        self.conn.execute("PRAGMA temp_store=MEMORY;")
-        self.conn.execute("PRAGMA cache_size=-65536;")
-        self.create_tables()
+        with _SCHEMA_LOCK:
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=NORMAL;")
+            self.conn.execute("PRAGMA temp_store=MEMORY;")
+            self.conn.execute("PRAGMA cache_size=-65536;")
+            self.create_tables()
 
     def create_tables(self) -> None:
         self.conn.execute(
@@ -60,10 +62,16 @@ class FileIndexTool:
             for row in self.conn.execute("PRAGMA table_info(folder_summary)")
         }
         if "physical_child_count" not in summary_columns:
-            self.conn.execute(
-                "ALTER TABLE folder_summary "
-                "ADD COLUMN physical_child_count INTEGER DEFAULT -1"
-            )
+            try:
+                self.conn.execute(
+                    "ALTER TABLE folder_summary "
+                    "ADD COLUMN physical_child_count INTEGER DEFAULT -1"
+                )
+            except sqlite3.OperationalError as exc:
+                # Another startup thread may have completed the same migration
+                # after this connection inspected the schema.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON file_index(name);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON file_index(parent_path);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_nocase ON file_index(parent_path COLLATE NOCASE);")
