@@ -15,6 +15,12 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_DB = str(DATA_DIR / "file_index.db")
 _SCHEMA_LOCK = threading.Lock()
 
+
+def stable_absolute_path(path: str) -> str:
+    """Make a path absolute without resolving mapped drives to UNC aliases."""
+    return os.path.normpath(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
 class FileIndexTool:
     def __init__(self, db_path: str = DEFAULT_DB):
         self.db_path = os.fspath(db_path)
@@ -113,7 +119,7 @@ class FileIndexTool:
         cancel_callback: Optional[Callable[[], bool]] = None,
         exclusions: ScanExclusions | None = None,
     ) -> int:
-        root_folder = str(Path(root_folder).resolve())
+        root_folder = stable_absolute_path(root_folder)
         if inactive_years is not None:
             inactive_months = inactive_years * 12
         exclusions = exclusions or ScanExclusions()
@@ -603,7 +609,7 @@ class FileIndexTool:
         return results
 
     def children_of_folder(self, folder_path: str, limit: int = 500, offset: int = 0) -> list[tuple]:
-        folder_path = str(Path(folder_path).resolve())
+        folder_path = stable_absolute_path(folder_path)
         cursor = self.conn.execute(
             """
             SELECT path, is_folder, size, modified_time, name

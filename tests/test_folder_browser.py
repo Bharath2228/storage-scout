@@ -797,6 +797,47 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertFalse(nested_row["_children_loaded"])
         connection.close()
 
+    def test_filesystem_folder_metadata_maps_display_root_to_indexed_nas_root(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        connection.execute("DELETE FROM folder_summary")
+        indexed_root = os.path.normpath(r"\\server\share\scan")
+        indexed_folder = os.path.join(indexed_root, "Projects", "Nested")
+        display_root = os.path.normpath(r"Z:\scan")
+        display_folder = os.path.join(display_root, "Projects", "Nested")
+        connection.execute(
+            "INSERT INTO file_index VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                indexed_root,
+                "scan",
+                1,
+                0,
+                1,
+                None,
+                "",
+                indexed_root,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO folder_summary "
+            "(path, total_size, file_count, folder_count, child_count) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (indexed_folder, 5_368_709_120, 4, 1, 4),
+        )
+        options = self._options(display_root, None, "Tree")
+        loader = PageLoadThread(1, options)
+
+        metadata = loader._folder_metadata_for_filesystem_rows(
+            connection.cursor(),
+            [display_folder],
+        )
+
+        self.assertEqual(
+            metadata[os.path.normcase(display_folder)],
+            (5_368_709_120, 4),
+        )
+        connection.close()
+
     def test_scoped_lazy_tree_falls_back_to_accessible_filesystem_folder(self):
         connection, _root, _scope = self._database()
         connection.execute("DELETE FROM file_index")

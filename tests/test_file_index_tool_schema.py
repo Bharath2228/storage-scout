@@ -4,10 +4,18 @@ import threading
 import unittest
 from pathlib import Path
 
-from src.file_index_tool import FileIndexTool
+from src.file_index_tool import FileIndexTool, stable_absolute_path
 
 
 class FileIndexSchemaTests(unittest.TestCase):
+    def test_stable_absolute_path_preserves_mapped_drive_identity(self):
+        mapped_path = r"Z:\shared\scan"
+
+        self.assertEqual(
+            stable_absolute_path(mapped_path),
+            str(Path(mapped_path)),
+        )
+
     def test_concurrent_startup_migrates_physical_child_count_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = str(Path(temp_dir) / "index.db")

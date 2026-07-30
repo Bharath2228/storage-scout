@@ -2895,15 +2895,57 @@ class PageLoadThread(QThread):
         metadata = {}
         cache = self.options.get('folder_cache')
         unresolved = []
+        indexed_root = None
+        display_root = self.options.get('scan_root') or ""
+        if cursor is not None and display_root:
+            try:
+                cursor.execute(
+                    """
+                    SELECT root
+                    FROM file_index
+                    GROUP BY root
+                    ORDER BY COUNT(*) DESC, length(root) ASC
+                    LIMIT 1
+                    """
+                )
+                indexed_root_row = cursor.fetchone()
+                indexed_root = indexed_root_row[0] if indexed_root_row else None
+            except Exception:
+                indexed_root = None
+
+        def indexed_alias(path):
+            if not indexed_root or not display_root:
+                return path
+            try:
+                relative = os.path.relpath(
+                    os.path.normpath(path),
+                    os.path.normpath(display_root),
+                )
+            except ValueError:
+                return path
+            if relative == ".":
+                return os.path.normpath(indexed_root)
+            if relative.startswith(".."):
+                return path
+            return os.path.normpath(os.path.join(indexed_root, relative))
+
         for path in folder_paths:
             key = _path_key(path)
+            alias = indexed_alias(path)
             cached_metadata = (
                 cache.folder_metadata(path)
                 if cache is not None and hasattr(cache, 'folder_metadata')
                 else None
             )
+            if (
+                cached_metadata is None
+                and cache is not None
+                and hasattr(cache, 'folder_metadata')
+                and _path_key(alias) != key
+            ):
+                cached_metadata = cache.folder_metadata(alias)
             if cached_metadata is None:
-                unresolved.append(path)
+                unresolved.append((path, alias))
                 continue
             metadata[key] = cached_metadata
 
@@ -2913,17 +2955,28 @@ class PageLoadThread(QThread):
             batch = unresolved[start:start + 900]
             if not batch:
                 continue
-            placeholders = ",".join("?" * len(batch))
+            lookup_paths = list(dict.fromkeys(
+                candidate
+                for original, alias in batch
+                for candidate in (original, alias)
+            ))
+            placeholders = ",".join("?" * len(lookup_paths))
             cursor.execute(
                 "SELECT path, total_size, child_count FROM folder_summary "
-                f"WHERE path IN ({placeholders})",
-                batch,
+                f"WHERE path COLLATE NOCASE IN ({placeholders})",
+                lookup_paths,
             )
-            for path, total_size, child_count in cursor.fetchall():
-                metadata[_path_key(path)] = (
-                    total_size or 0,
-                    child_count or 0,
+            rows_by_key = {
+                _path_key(path): (total_size or 0, child_count or 0)
+                for path, total_size, child_count in cursor.fetchall()
+            }
+            for original, alias in batch:
+                resolved = (
+                    rows_by_key.get(_path_key(original))
+                    or rows_by_key.get(_path_key(alias))
                 )
+                if resolved is not None:
+                    metadata[_path_key(original)] = resolved
         return metadata
 
     def _filesystem_path_has_children(self, folder_path, folders_only=False):
