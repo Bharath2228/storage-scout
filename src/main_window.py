@@ -2919,6 +2919,7 @@ class LazyChildrenLoadThread(QThread):
         folders_only=False,
         filesystem_fallback=False,
         scan_exclusions=None,
+        force_filesystem=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -2932,6 +2933,7 @@ class LazyChildrenLoadThread(QThread):
         self.folders_only = folders_only
         self.filesystem_fallback = filesystem_fallback
         self.scan_exclusions = scan_exclusions
+        self.force_filesystem = force_filesystem
 
     def _child_paths_with_children(self, cursor, child_paths):
         folders_with_children = set()
@@ -3073,7 +3075,11 @@ class LazyChildrenLoadThread(QThread):
         return True
 
     def run(self):
-        if self.cache and self.cache.has_children_for(self.folder_path):
+        if (
+            not self.force_filesystem
+            and self.cache
+            and self.cache.has_children_for(self.folder_path)
+        ):
             children = self.cache.children_for(self.folder_path, self.sort_column, self.sort_desc)
             if self.folders_only:
                 children = [
@@ -3096,39 +3102,52 @@ class LazyChildrenLoadThread(QThread):
                 self.children_ready.emit(self.request_id, self.folder_path, children)
                 return
 
-        from src.file_index_tool import FileIndexTool
-
-        tool = FileIndexTool()
+        rows = []
         folders_with_children = set()
         physically_empty_folders = set()
         used_filesystem_rows = False
-        try:
-            cursor = tool.conn.cursor()
-            folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
-            parent_variants = self._parent_path_variants()
-            placeholders = ",".join("?" * len(parent_variants))
-            cursor.execute(
-                "SELECT path, name, is_folder, size, modified_time, parent_path "
-                "FROM file_index "
-                f"WHERE parent_path COLLATE NOCASE IN ({placeholders}) "
-                f"{folders_only_sql} "
-                f"ORDER BY {build_sort_order_clause('Tree', self.sort_column, self.sort_desc)}",
-                parent_variants,
-            )
-            rows = cursor.fetchall()
-            child_folder_paths = [path for path, _name, is_folder, _size, _modified_time, _parent_path in rows if is_folder]
-            folders_with_children = self._child_paths_with_children(cursor, child_folder_paths)
-            physically_empty_folders = self._physically_empty_folder_paths(
-                cursor,
-                child_folder_paths,
-            )
-        except Exception as exc:
-            self.children_failed.emit(self.request_id, self.folder_path, str(exc))
-            return
-        finally:
-            tool.close()
+        if not self.force_filesystem:
+            from src.file_index_tool import FileIndexTool
 
-        if not rows and self.filesystem_fallback:
+            tool = FileIndexTool()
+            try:
+                cursor = tool.conn.cursor()
+                folders_only_sql = " AND is_folder = 1" if self.folders_only else ""
+                parent_variants = self._parent_path_variants()
+                placeholders = ",".join("?" * len(parent_variants))
+                cursor.execute(
+                    "SELECT path, name, is_folder, size, modified_time, parent_path "
+                    "FROM file_index "
+                    f"WHERE parent_path COLLATE NOCASE IN ({placeholders}) "
+                    f"{folders_only_sql} "
+                    f"ORDER BY {build_sort_order_clause('Tree', self.sort_column, self.sort_desc)}",
+                    parent_variants,
+                )
+                rows = cursor.fetchall()
+                child_folder_paths = [
+                    path
+                    for path, _name, is_folder, _size, _modified_time, _parent_path in rows
+                    if is_folder
+                ]
+                folders_with_children = self._child_paths_with_children(
+                    cursor,
+                    child_folder_paths,
+                )
+                physically_empty_folders = self._physically_empty_folder_paths(
+                    cursor,
+                    child_folder_paths,
+                )
+            except Exception as exc:
+                self.children_failed.emit(
+                    self.request_id,
+                    self.folder_path,
+                    str(exc),
+                )
+                return
+            finally:
+                tool.close()
+
+        if self.force_filesystem or (not rows and self.filesystem_fallback):
             used_filesystem_rows = True
             try:
                 with os.scandir(self.folder_path) as entries:
@@ -6210,7 +6229,8 @@ class MainWindow(QMainWindow):
                     )
             if children:
                 self.folder_browser.apply_children(folder_path, children)
-                return
+                if self.is_scanning:
+                    return
             if self.is_scanning:
                 # Keep the node retryable while the background loader falls back
                 # to enumerating folders directly from the selected location.
@@ -6226,6 +6246,7 @@ class MainWindow(QMainWindow):
             cache=cache,
             folders_only=True,
             filesystem_fallback=True,
+            force_filesystem=not self.is_scanning,
             scan_exclusions=getattr(
                 getattr(self, 'fp', None),
                 'get_scan_exclusions',
@@ -8160,6 +8181,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'folder_browser'):
             self.folder_browser.setEnabled(True)
             self._refresh_folder_browser_from_cache(force=True)
+            if self.current_scan_root:
+                self._load_folder_browser_children(self.current_scan_root)
         self._update_file_types_enabled()
         
         if finished_thread and finished_thread.is_cancelled:

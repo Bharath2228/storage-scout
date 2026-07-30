@@ -167,6 +167,44 @@ class FolderBrowserModelTests(unittest.TestCase):
         self.assertTrue(thread_class.call_args.kwargs["filesystem_fallback"])
         fake_thread.start.assert_called_once_with()
 
+    def test_completed_scan_reconciles_partial_cache_from_filesystem(self):
+        root = os.path.normpath(r"Z:\scan")
+        cached_folder = os.path.join(root, "Cached")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(cached_folder, "Cached", True, 0, 1, root)
+        browser = SimpleNamespace(
+            apply_children=mock.Mock(),
+            defer_load=mock.Mock(),
+        )
+        window = SimpleNamespace(
+            current_scan_root=root,
+            folder_cache=cache,
+            is_scanning=False,
+            folder_browser=browser,
+            folder_browser_request_id=0,
+            folder_browser_threads={},
+            fp=SimpleNamespace(get_scan_exclusions=lambda: ScanExclusions()),
+            _on_folder_browser_children_ready=mock.Mock(),
+            _on_folder_browser_children_failed=mock.Mock(),
+        )
+        fake_thread = SimpleNamespace(
+            children_ready=SimpleNamespace(connect=mock.Mock()),
+            children_failed=SimpleNamespace(connect=mock.Mock()),
+            finished=SimpleNamespace(connect=mock.Mock()),
+            start=mock.Mock(),
+        )
+
+        with mock.patch(
+            "src.main_window.LazyChildrenLoadThread",
+            return_value=fake_thread,
+        ) as thread_class:
+            MainWindow._load_folder_browser_children(window, root)
+
+        browser.apply_children.assert_called_once()
+        self.assertTrue(thread_class.call_args.kwargs["force_filesystem"])
+        fake_thread.start.assert_called_once_with()
+
 
 class FolderScopeQueryTests(unittest.TestCase):
     def _database(self):
@@ -963,6 +1001,33 @@ class FolderScopeQueryTests(unittest.TestCase):
 
         self.assertEqual([child["name"] for child in emitted], ["Child"])
         connection.close()
+
+    def test_forced_folder_reconciliation_does_not_trust_partial_sql_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "One"))
+            os.makedirs(os.path.join(root, "Two"))
+            emitted = []
+            thread = LazyChildrenLoadThread(
+                1,
+                root,
+                folders_only=True,
+                filesystem_fallback=True,
+                force_filesystem=True,
+                scan_exclusions=ScanExclusions(folder_names=[]),
+            )
+            thread.children_ready.connect(
+                lambda request_id, path, children: emitted.extend(children)
+            )
+            with mock.patch(
+                "src.file_index_tool.FileIndexTool",
+                side_effect=AssertionError("database should be skipped"),
+            ):
+                thread.run()
+
+        self.assertEqual(
+            {child["name"] for child in emitted},
+            {"One", "Two"},
+        )
 
     def test_bulk_selection_where_clause_keeps_folder_scope(self):
         scope = os.path.normpath(r"C:\scan\A")
