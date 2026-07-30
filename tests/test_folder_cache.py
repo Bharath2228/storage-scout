@@ -107,6 +107,31 @@ class FolderCacheRemovalTests(unittest.TestCase):
         self.assertTrue(self.cache.has_folder_children(self.folder))
         self.assertFalse(self.cache.has_folder_children(self.subfolder))
 
+    def test_subtree_snapshot_reuses_sizes_and_physical_child_state(self):
+        self.cache.set_folder_summary(self.root, 35, 3, 3, 2, 2)
+        self.cache.set_folder_summary(self.folder, 30, 2, 2, 2, 2)
+        self.cache.set_folder_summary(self.subfolder, 20, 1, 1, 1, 1)
+
+        rows, physical_children, visible_children = self.cache.snapshot_subtree(
+            self.folder
+        )
+
+        folder_key = self.cache._key(self.folder)
+        subfolder_key = self.cache._key(self.subfolder)
+        self.assertEqual(rows[subfolder_key][3], 20)
+        self.assertIn(folder_key, physical_children)
+        self.assertIn(subfolder_key, physical_children)
+        self.assertIn(folder_key, visible_children)
+
+    def test_delete_invalidates_filesystem_fallback_snapshots(self):
+        key = ("scope", "exclusions")
+        self.cache.store_filesystem_snapshot(key, ({}, set(), set()))
+        self.assertIsNotNone(self.cache.filesystem_snapshot(key))
+
+        self.cache.remove_path(self.root_file)
+
+        self.assertIsNone(self.cache.filesystem_snapshot(key))
+
 
 class DeleteCompletionCacheTests(unittest.TestCase):
     def test_shared_delete_completion_invalidates_cache_and_refreshes_totals(self):

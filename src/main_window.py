@@ -1853,10 +1853,28 @@ class PageLoadThread(QThread):
     page_ready = pyqtSignal(int, dict)
     page_failed = pyqtSignal(int, str)
 
+    class _Cancelled(Exception):
+        pass
+
     def __init__(self, request_id, options, parent=None):
         super().__init__(parent)
         self.request_id = request_id
         self.options = options
+        self.is_cancelled = False
+        self._connection = None
+
+    def cancel(self):
+        self.is_cancelled = True
+        connection = self._connection
+        if connection is not None:
+            try:
+                connection.interrupt()
+            except Exception:
+                pass
+
+    def _raise_if_cancelled(self):
+        if self.is_cancelled:
+            raise PageLoadThread._Cancelled()
 
     def _relative_display_location(self, folder_path):
         if not folder_path:
@@ -1881,12 +1899,16 @@ class PageLoadThread(QThread):
     def run(self):
         try:
             self.page_ready.emit(self.request_id, self._load())
+        except PageLoadThread._Cancelled:
+            return
         except Exception as exc:
-            self.page_failed.emit(self.request_id, str(exc))
+            if not self.is_cancelled:
+                self.page_failed.emit(self.request_id, str(exc))
 
     def _load(self):
         from src.file_index_tool import FileIndexTool
 
+        self._raise_if_cancelled()
         limit = self.options['limit']
         offset = self.options['offset']
         paginated = self.options.get('paginated', True)
@@ -1974,10 +1996,12 @@ class PageLoadThread(QThread):
             count_query += where_sql
 
         tool = FileIndexTool()
+        self._connection = tool.conn
         folders_with_children = set()
         filesystem_scope_fallback = False
         try:
             cursor = tool.conn.cursor()
+            self._raise_if_cancelled()
             cursor.execute(count_query, params)
             total_matches = cursor.fetchone()[0]
 
@@ -1991,6 +2015,7 @@ class PageLoadThread(QThread):
                 query += f" LIMIT {limit} OFFSET {offset}"
             cursor.execute(query, params)
             rows = cursor.fetchall()
+            self._raise_if_cancelled()
             if scan_root:
                 scan_root_key = _path_key(scan_root)
                 filtered_rows = [
@@ -2060,6 +2085,7 @@ class PageLoadThread(QThread):
                         if parent_path
                     )
         finally:
+            self._connection = None
             tool.close()
 
         root_node = {'name': 'root', 'is_dir': True, 'path': 'C:/', 'status': 'Active', 'children': []}
@@ -2168,75 +2194,108 @@ class PageLoadThread(QThread):
         }
 
     def _load_filtered_filesystem_scope(self, folder_scope):
-        all_rows = {}
-        physical_child_keys = set()
-        visible_child_keys = set()
-        pending = [os.path.normpath(folder_scope)]
-        visited = set()
+        cache = self.options.get('folder_cache')
+        exclusions = self.options.get('scan_exclusions')
+        exclusion_key = json.dumps(
+            exclusions.to_dict() if exclusions is not None else {},
+            sort_keys=True,
+        )
+        snapshot_key = (_path_key(folder_scope), exclusion_key)
+        cached_snapshot = (
+            cache.snapshot_subtree(folder_scope)
+            if cache is not None and hasattr(cache, 'snapshot_subtree')
+            else None
+        )
+        if (
+            cached_snapshot is None
+            and cache is not None
+            and hasattr(cache, 'filesystem_snapshot')
+        ):
+            cached_snapshot = cache.filesystem_snapshot(snapshot_key)
+        if cached_snapshot is not None:
+            all_rows, physical_child_keys, visible_child_keys = cached_snapshot
+        else:
+            all_rows = {}
+            physical_child_keys = set()
+            visible_child_keys = set()
+            pending = [os.path.normpath(folder_scope)]
+            visited = set()
 
-        while pending:
-            folder_path = pending.pop()
-            folder_key = _path_key(folder_path)
-            if folder_key in visited:
-                continue
-            visited.add(folder_key)
-            try:
-                with os.scandir(folder_path) as entries:
-                    folder_entries = list(entries)
-            except OSError:
-                continue
-
-            if folder_entries:
-                physical_child_keys.add(folder_key)
-            for entry in folder_entries:
+            while pending:
+                self._raise_if_cancelled()
+                folder_path = pending.pop()
+                folder_key = _path_key(folder_path)
+                if folder_key in visited:
+                    continue
+                visited.add(folder_key)
                 try:
-                    is_folder = entry.is_dir(follow_symlinks=True)
-                    stat_result = entry.stat(follow_symlinks=True)
+                    with os.scandir(folder_path) as entries:
+                        folder_entries = list(entries)
                 except OSError:
                     continue
-                if self._filesystem_entry_is_excluded(
-                    entry.name,
-                    is_folder,
-                    0 if is_folder else stat_result.st_size,
-                ):
-                    continue
-                visible_child_keys.add(folder_key)
-                row = (
-                    entry.path,
-                    entry.name,
-                    int(is_folder),
-                    0 if is_folder else stat_result.st_size,
-                    stat_result.st_mtime,
-                    folder_path,
-                )
-                all_rows[_path_key(entry.path)] = row
-                if is_folder:
-                    pending.append(entry.path)
 
-        folder_sizes = {
-            key: 0
-            for key, row in all_rows.items()
-            if row[2]
-        }
-        for key, row in sorted(
-            all_rows.items(),
-            key=lambda item: item[0].count(os.sep),
-            reverse=True,
-        ):
-            path, name, is_folder, size, modified_time, parent_path = row
-            effective_size = folder_sizes.get(key, 0) if is_folder else (size or 0)
-            if is_folder:
-                all_rows[key] = (
-                    path,
-                    name,
-                    is_folder,
-                    effective_size,
-                    modified_time,
-                    parent_path,
+                if folder_entries:
+                    physical_child_keys.add(folder_key)
+                for entry in folder_entries:
+                    self._raise_if_cancelled()
+                    try:
+                        is_folder = entry.is_dir(follow_symlinks=True)
+                        stat_result = entry.stat(follow_symlinks=True)
+                    except OSError:
+                        continue
+                    if self._filesystem_entry_is_excluded(
+                        entry.name,
+                        is_folder,
+                        0 if is_folder else stat_result.st_size,
+                    ):
+                        continue
+                    visible_child_keys.add(folder_key)
+                    row = (
+                        entry.path,
+                        entry.name,
+                        int(is_folder),
+                        0 if is_folder else stat_result.st_size,
+                        stat_result.st_mtime,
+                        folder_path,
+                    )
+                    all_rows[_path_key(entry.path)] = row
+                    if is_folder:
+                        pending.append(entry.path)
+
+            folder_sizes = {
+                key: 0
+                for key, row in all_rows.items()
+                if row[2]
+            }
+            for key, row in sorted(
+                all_rows.items(),
+                key=lambda item: item[0].count(os.sep),
+                reverse=True,
+            ):
+                self._raise_if_cancelled()
+                path, name, is_folder, size, modified_time, parent_path = row
+                effective_size = (
+                    folder_sizes.get(key, 0)
+                    if is_folder
+                    else (size or 0)
                 )
-            parent_key = _path_key(parent_path)
-            if parent_key in folder_sizes:
-                folder_sizes[parent_key] += effective_size
+                if is_folder:
+                    all_rows[key] = (
+                        path,
+                        name,
+                        is_folder,
+                        effective_size,
+                        modified_time,
+                        parent_path,
+                    )
+                parent_key = _path_key(parent_path)
+                if parent_key in folder_sizes:
+                    folder_sizes[parent_key] += effective_size
+            if cache is not None and hasattr(cache, 'store_filesystem_snapshot'):
+                cache.store_filesystem_snapshot(
+                    snapshot_key,
+                    (all_rows, physical_child_keys, visible_child_keys),
+                )
 
         matched_rows = [
             row for row in all_rows.values()
@@ -2350,8 +2409,15 @@ class PageLoadThread(QThread):
         )
 
     def _filesystem_folder_size(self, folder_path):
+        cache = self.options.get('folder_cache')
+        if cache is not None:
+            folder_sizes = getattr(cache, 'folder_sizes', {})
+            folder_key = _path_key(folder_path)
+            if folder_key in folder_sizes:
+                return folder_sizes[folder_key] or 0
         total = 0
         for current, dir_names, file_names in os.walk(folder_path):
+            self._raise_if_cancelled()
             dir_names[:] = [
                 name for name in dir_names
                 if not self._filesystem_entry_is_excluded(name, True, 0)
@@ -2437,8 +2503,10 @@ class PageLoadThread(QThread):
             }
 
         tool = FileIndexTool()
+        self._connection = tool.conn
         try:
             cursor = tool.conn.cursor()
+            self._raise_if_cancelled()
             if is_scoped:
                 descendant_sql, descendant_params = descendant_like_sql(root_path)
                 cursor.execute(
@@ -2517,6 +2585,7 @@ class PageLoadThread(QThread):
                     total_matches = len(rows)
                     load_source = "filesystem"
         finally:
+            self._connection = None
             tool.close()
 
         root_node = {
@@ -2589,6 +2658,7 @@ class PageLoadThread(QThread):
         try:
             with os.scandir(root_path) as entries:
                 for entry in entries:
+                    self._raise_if_cancelled()
                     try:
                         is_folder = entry.is_dir(follow_symlinks=True)
                         stat_result = entry.stat(follow_symlinks=True)
@@ -2845,6 +2915,11 @@ class LazyChildrenLoadThread(QThread):
         )
 
     def _filesystem_folder_size(self, folder_path):
+        if self.cache is not None:
+            folder_sizes = getattr(self.cache, 'folder_sizes', {})
+            folder_key = _path_key(folder_path)
+            if folder_key in folder_sizes:
+                return folder_sizes[folder_key] or 0
         total = 0
         for current, dir_names, file_names in os.walk(folder_path):
             dir_names[:] = [
@@ -8670,6 +8745,7 @@ class MainWindow(QMainWindow):
                 self.page_load_thread.page_failed.disconnect()
             except TypeError:
                 pass
+            self.page_load_thread.cancel()
 
         self.lbl_status.setText("Loading results...")
         root_path = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")

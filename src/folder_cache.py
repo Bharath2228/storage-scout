@@ -10,6 +10,7 @@ class FolderCache:
         self.folder_sizes = {}
         self.folder_counts = {}
         self.running_total_size = 0
+        self.filesystem_snapshots = {}
 
     def _key(self, path):
         if not path:
@@ -27,6 +28,7 @@ class FolderCache:
             self.folder_sizes.clear()
             self.folder_counts.clear()
             self.running_total_size = 0
+            self.filesystem_snapshots.clear()
 
     def add_item(self, path, name, is_folder, size, modified_time, parent_path, status="Active"):
         if not path:
@@ -61,15 +63,26 @@ class FolderCache:
             else:
                 self.running_total_size += size or 0
 
-    def set_folder_summary(self, path, total_size, file_count, folder_count, child_count=None):
+    def set_folder_summary(
+        self,
+        path,
+        total_size,
+        file_count,
+        folder_count,
+        child_count=None,
+        physical_child_count=None,
+    ):
         key = self._key(path)
         with self._lock:
             self.folder_sizes[key] = total_size or 0
-            self.folder_counts[key] = {
+            counts = {
                 'files': file_count or 0,
                 'folders': folder_count or 0,
                 'children': child_count or 0,
             }
+            if physical_child_count is not None:
+                counts['physical_children'] = int(physical_child_count)
+            self.folder_counts[key] = counts
             item = self.items.get(key)
             if item:
                 item['size'] = total_size or 0
@@ -80,6 +93,7 @@ class FolderCache:
 
         key = self._key(path)
         with self._lock:
+            self.filesystem_snapshots.clear()
             item = self.items.get(key)
             parent_path = item.get('location') if item else os.path.dirname(path)
             parent_key = self._key(parent_path)
@@ -206,6 +220,70 @@ class FolderCache:
                 count += 1
                 pending.extend(self.children.get(child_key, []))
             return count
+
+    def snapshot_subtree(self, path):
+        key = self._key(path)
+        with self._lock:
+            if key not in self.children:
+                return None
+
+            rows = {}
+            physical_child_keys = set()
+            visible_child_keys = set()
+            pending = [key]
+            visited = set()
+            while pending:
+                parent_key = pending.pop()
+                if parent_key in visited:
+                    continue
+                visited.add(parent_key)
+
+                child_keys = list(self.children.get(parent_key, []))
+                if child_keys:
+                    visible_child_keys.add(parent_key)
+                physical_count = self.folder_counts.get(parent_key, {}).get(
+                    'physical_children',
+                    -1,
+                )
+                if physical_count != 0:
+                    physical_child_keys.add(parent_key)
+
+                for child_key in child_keys:
+                    item = self.items.get(child_key)
+                    if not item:
+                        continue
+                    is_folder = bool(item.get('is_dir', False))
+                    size = (
+                        self.folder_sizes.get(child_key, item.get('size', 0))
+                        if is_folder
+                        else item.get('size', 0)
+                    ) or 0
+                    rows[child_key] = (
+                        item.get('path', ''),
+                        item.get('name', ''),
+                        int(is_folder),
+                        size,
+                        item.get('last_modified', 0),
+                        item.get('location'),
+                    )
+                    if is_folder:
+                        pending.append(child_key)
+
+            return rows, physical_child_keys, visible_child_keys
+
+    def filesystem_snapshot(self, key):
+        with self._lock:
+            return self.filesystem_snapshots.get(key)
+
+    def store_filesystem_snapshot(self, key, snapshot):
+        with self._lock:
+            if (
+                key not in self.filesystem_snapshots
+                and len(self.filesystem_snapshots) >= 3
+            ):
+                oldest_key = next(iter(self.filesystem_snapshots))
+                self.filesystem_snapshots.pop(oldest_key, None)
+            self.filesystem_snapshots[key] = snapshot
 
     def children_for(self, path, sort_column=0, sort_desc=False):
         with self._lock:

@@ -379,6 +379,7 @@ class FileIndexTool:
                     item["file_count"],
                     item["folder_count"],
                     item["child_count"],
+                    item["physical_child_count"],
                 )
 
         rows = [
@@ -455,9 +456,26 @@ class FileIndexTool:
                 "Inactive" if inactive else "Active",
             )
 
-        cursor.execute("SELECT path, total_size, file_count, folder_count, child_count FROM folder_summary")
-        for path, total_size, file_count, folder_count, child_count in cursor.fetchall():
-            cache.set_folder_summary(path, total_size, file_count, folder_count, child_count)
+        cursor.execute(
+            "SELECT path, total_size, file_count, folder_count, "
+            "child_count, physical_child_count FROM folder_summary"
+        )
+        for (
+            path,
+            total_size,
+            file_count,
+            folder_count,
+            child_count,
+            physical_child_count,
+        ) in cursor.fetchall():
+            cache.set_folder_summary(
+                path,
+                total_size,
+                file_count,
+                folder_count,
+                child_count,
+                physical_child_count,
+            )
 
     def extension_breakdown(self, limit: int = 20) -> list[tuple[str, int, int]]:
         cursor = self.conn.cursor()

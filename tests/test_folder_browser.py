@@ -749,6 +749,43 @@ class FolderScopeQueryTests(unittest.TestCase):
         self.assertEqual(sizes["Parent"], 8)
         connection.close()
 
+    def test_scoped_filter_uses_scan_cache_without_rewalking_filesystem(self):
+        connection, _root, _scope = self._database()
+        connection.execute("DELETE FROM file_index")
+        root = os.path.normpath(r"Z:\scan")
+        scope = os.path.join(root, "Scope")
+        file_path = os.path.join(scope, "old.txt")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Scope", True, 0, 1, root)
+        cache.add_item(file_path, "old.txt", False, 12, 10, scope)
+        cache.set_folder_summary(root, 12, 1, 2, 1, 1)
+        cache.set_folder_summary(scope, 12, 1, 1, 1, 1)
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        options = self._options(root, scope, "Files")
+        options["folder_cache"] = cache
+        with (
+            mock.patch.object(file_index_tool, "FileIndexTool", FakeTool),
+            mock.patch(
+                "src.main_window.os.scandir",
+                side_effect=AssertionError("filesystem should not be walked"),
+            ),
+        ):
+            result = PageLoadThread(1, options)._load()
+
+        self.assertEqual(
+            [child["name"] for child in result["root_node"]["children"]],
+            ["old.txt"],
+        )
+        connection.close()
+
     def test_filesystem_scope_and_lazy_children_honor_exclusions(self):
         connection, _root, _scope = self._database()
         connection.execute("DELETE FROM file_index")
