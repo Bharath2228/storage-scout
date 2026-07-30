@@ -2724,6 +2724,34 @@ class PageLoadThread(QThread):
                 )
                 if rows:
                     load_source = "filesystem"
+            if rows:
+                folder_metadata = self._folder_metadata_for_filesystem_rows(
+                    cursor,
+                    [row[0] for row in rows if row[2]],
+                )
+                if folder_metadata:
+                    enriched_rows = []
+                    for row in rows:
+                        path, name, is_folder, size, modified_time, parent_path, has_child = row
+                        metadata = (
+                            folder_metadata.get(_path_key(path))
+                            if is_folder
+                            else None
+                        )
+                        if metadata is not None:
+                            cached_size, child_count = metadata
+                            size = cached_size
+                            has_child = int((child_count or 0) > 0)
+                        enriched_rows.append((
+                            path,
+                            name,
+                            is_folder,
+                            size,
+                            modified_time,
+                            parent_path,
+                            has_child,
+                        ))
+                    rows = enriched_rows
             if is_scoped and total_matches is None:
                 total_matches = len(rows)
         finally:

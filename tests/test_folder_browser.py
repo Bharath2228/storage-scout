@@ -753,6 +753,50 @@ class FolderScopeQueryTests(unittest.TestCase):
         )
         self.assertEqual(nested_row["size"], 2048)
 
+    def test_scoped_lazy_tree_uses_persisted_folder_size_for_database_rows(self):
+        connection, root, scope = self._database()
+        nested = os.path.join(scope, "Nested")
+        connection.execute(
+            "INSERT INTO file_index VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (nested, "Nested", 1, 0, 1, scope, "", root),
+        )
+        connection.executemany(
+            "INSERT INTO folder_summary "
+            "(path, total_size, file_count, folder_count, child_count) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (scope, 8212, 2, 2, 3),
+                (nested, 8192, 1, 1, 1),
+            ],
+        )
+
+        class FakeTool:
+            def __init__(self):
+                self.conn = connection
+
+            def close(self):
+                pass
+
+        options = self._options(root, scope, "Tree")
+        options.update({
+            "status_filter": None,
+            "age_cutoff": None,
+            "paginated": False,
+            "folder_cache": FolderCache(),
+            "lazy_show_all_tree": True,
+        })
+        with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
+            result = PageLoadThread(1, options)._load()
+
+        nested_row = next(
+            child
+            for child in result["root_node"]["children"]
+            if child["path"] == nested
+        )
+        self.assertEqual(nested_row["size"], 8192)
+        self.assertFalse(nested_row["_children_loaded"])
+        connection.close()
+
     def test_scoped_lazy_tree_falls_back_to_accessible_filesystem_folder(self):
         connection, _root, _scope = self._database()
         connection.execute("DELETE FROM file_index")
