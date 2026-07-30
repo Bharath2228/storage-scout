@@ -57,6 +57,13 @@ class FileIndexTool:
             );
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exclusion_hidden_folders (
+                path TEXT PRIMARY KEY
+            );
+            """
+        )
         summary_columns = {
             row[1]
             for row in self.conn.execute("PRAGMA table_info(folder_summary)")
@@ -85,6 +92,7 @@ class FileIndexTool:
     def clear_index(self) -> None:
         self.conn.execute("DELETE FROM file_index;")
         self.conn.execute("DELETE FROM folder_summary;")
+        self.conn.execute("DELETE FROM exclusion_hidden_folders;")
         self.conn.commit()
 
     def _default_worker_count(self, root_folder: str) -> int:
@@ -421,6 +429,7 @@ class FileIndexTool:
 
         cache = getattr(self, "_active_cache", None)
         if cache:
+            cache.mark_exclusion_hidden(hidden_paths)
             hidden_keys = {
                 os.path.normcase(os.path.normpath(path))
                 for path in hidden_paths
@@ -460,6 +469,10 @@ class FileIndexTool:
                 f"WHERE path COLLATE NOCASE IN ({placeholders})",
                 batch,
             )
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO exclusion_hidden_folders (path) VALUES (?)",
+            [(path,) for path in hidden_paths],
+        )
 
         rows = [
             (
@@ -555,6 +568,8 @@ class FileIndexTool:
                 child_count,
                 physical_child_count,
             )
+        cursor.execute("SELECT path FROM exclusion_hidden_folders")
+        cache.mark_exclusion_hidden(path for (path,) in cursor.fetchall())
 
     def extension_breakdown(self, limit: int = 20) -> list[tuple[str, int, int]]:
         cursor = self.conn.cursor()

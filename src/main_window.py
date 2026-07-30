@@ -2770,12 +2770,28 @@ class PageLoadThread(QThread):
                         0,
                     ):
                         continue
-                    if is_folder and not filesystem_folder_has_visible_entries(
-                        entry.path,
-                        self.options.get('scan_exclusions'),
-                        cancel_check=self._raise_if_cancelled,
-                    ):
-                        continue
+                    if is_folder:
+                        cache = self.options.get('folder_cache')
+                        if (
+                            cache is not None
+                            and hasattr(cache, 'is_exclusion_hidden')
+                            and cache.is_exclusion_hidden(entry.path)
+                        ):
+                            continue
+                        is_cached = (
+                            cache is not None
+                            and hasattr(cache, 'contains_path')
+                            and cache.contains_path(entry.path)
+                        )
+                        if (
+                            not is_cached
+                            and not filesystem_folder_has_visible_entries(
+                                entry.path,
+                                self.options.get('scan_exclusions'),
+                                cancel_check=self._raise_if_cancelled,
+                            )
+                        ):
+                            continue
                     size = (
                         self._filesystem_folder_size(entry.path)
                         if is_folder
@@ -2808,6 +2824,18 @@ class PageLoadThread(QThread):
                         is_folder = entry.is_dir(follow_symlinks=True)
                         size = 0 if is_folder else entry.stat(follow_symlinks=True).st_size
                     except OSError:
+                        continue
+                    if (
+                        is_folder
+                        and self.options.get('folder_cache') is not None
+                        and hasattr(
+                            self.options.get('folder_cache'),
+                            'is_exclusion_hidden',
+                        )
+                        and self.options.get(
+                            'folder_cache',
+                        ).is_exclusion_hidden(entry.path)
+                    ):
                         continue
                     if self._filesystem_entry_is_excluded(entry.name, is_folder, size):
                         continue
@@ -2999,6 +3027,13 @@ class LazyChildrenLoadThread(QThread):
                         size = 0 if is_folder else entry.stat(follow_symlinks=True).st_size
                     except OSError:
                         continue
+                    if (
+                        is_folder
+                        and self.cache is not None
+                        and hasattr(self.cache, 'is_exclusion_hidden')
+                        and self.cache.is_exclusion_hidden(entry.path)
+                    ):
+                        continue
                     if self._filesystem_entry_is_excluded(entry.name, is_folder, size):
                         continue
                     if not self.folders_only or is_folder:
@@ -3171,14 +3206,26 @@ class LazyChildrenLoadThread(QThread):
                                 continue
                             if (
                                 is_folder
+                                and not self.force_filesystem
                                 and not filesystem_folder_has_visible_entries(
                                     entry.path,
                                     self.scan_exclusions,
                                 )
                             ):
                                 continue
+                            if (
+                                is_folder
+                                and self.cache is not None
+                                and hasattr(self.cache, 'is_exclusion_hidden')
+                                and self.cache.is_exclusion_hidden(entry.path)
+                            ):
+                                continue
                             size = (
-                                self._filesystem_folder_size(entry.path)
+                                (
+                                    0
+                                    if self.folders_only
+                                    else self._filesystem_folder_size(entry.path)
+                                )
                                 if is_folder
                                 else (0 if stat_result is None else stat_result.st_size)
                             )

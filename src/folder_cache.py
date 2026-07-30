@@ -11,6 +11,7 @@ class FolderCache:
         self.folder_counts = {}
         self.running_total_size = 0
         self.filesystem_snapshots = {}
+        self.exclusion_hidden_folders = set()
 
     def _key(self, path):
         if not path:
@@ -29,6 +30,23 @@ class FolderCache:
             self.folder_counts.clear()
             self.running_total_size = 0
             self.filesystem_snapshots.clear()
+            self.exclusion_hidden_folders.clear()
+
+    def mark_exclusion_hidden(self, paths):
+        with self._lock:
+            self.exclusion_hidden_folders.update(
+                self._key(path)
+                for path in paths
+                if path
+            )
+
+    def is_exclusion_hidden(self, path):
+        with self._lock:
+            return self._key(path) in self.exclusion_hidden_folders
+
+    def contains_path(self, path):
+        with self._lock:
+            return self._key(path) in self.items
 
     def add_item(self, path, name, is_folder, size, modified_time, parent_path, status="Active"):
         if not path:

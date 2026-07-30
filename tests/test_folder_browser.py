@@ -396,6 +396,14 @@ class FolderScopeQueryTests(unittest.TestCase):
             self.assertNotIn(os.path.normpath(child), indexed_paths)
             self.assertNotIn(cache._key(parent), cache.items)
             self.assertNotIn(cache._key(child), cache.items)
+            cursor.execute("SELECT path FROM exclusion_hidden_folders")
+            hidden_paths = {path for (path,) in cursor.fetchall()}
+            self.assertIn(os.path.normpath(parent), hidden_paths)
+            self.assertIn(os.path.normpath(child), hidden_paths)
+            warmed_cache = FolderCache()
+            tool.warm_cache(warmed_cache)
+            self.assertTrue(warmed_cache.is_exclusion_hidden(parent))
+            self.assertTrue(warmed_cache.is_exclusion_hidden(child))
             tool.close()
 
     def test_nas_scope_follows_parent_links_when_child_path_uses_an_alias(self):
@@ -1006,10 +1014,15 @@ class FolderScopeQueryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "One"))
             os.makedirs(os.path.join(root, "Two"))
+            hidden = os.path.join(root, "Hidden")
+            os.makedirs(hidden)
+            cache = FolderCache()
+            cache.mark_exclusion_hidden([hidden])
             emitted = []
             thread = LazyChildrenLoadThread(
                 1,
                 root,
+                cache=cache,
                 folders_only=True,
                 filesystem_fallback=True,
                 force_filesystem=True,
@@ -1021,6 +1034,13 @@ class FolderScopeQueryTests(unittest.TestCase):
             with mock.patch(
                 "src.file_index_tool.FileIndexTool",
                 side_effect=AssertionError("database should be skipped"),
+            ), mock.patch(
+                "src.main_window.filesystem_folder_has_visible_entries",
+                side_effect=AssertionError("subtrees should not be walked"),
+            ), mock.patch.object(
+                LazyChildrenLoadThread,
+                "_filesystem_folder_size",
+                side_effect=AssertionError("folder sizes are not needed here"),
             ):
                 thread.run()
 
