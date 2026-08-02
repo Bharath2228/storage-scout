@@ -54,6 +54,14 @@ def _path_key(path):
     return os.path.normcase(os.path.normpath(path))
 
 
+def bulk_scope_excluded_keys(scope):
+    return {
+        _path_key(path)
+        for path in (scope or {}).get("excluded_paths", [])
+        if path
+    }
+
+
 def equivalent_path_variants(path):
     if not path:
         return []
@@ -1241,6 +1249,11 @@ class ExportThread(QThread):
         written = 0
         processed = 0
         retained_paths = PathKeyIndex()
+        excluded_keys = (
+            bulk_scope_excluded_keys(self.config)
+            if scope == "bulk_scope"
+            else set()
+        )
         while True:
             self._check_cancelled()
             rows = cursor.fetchmany(1000)
@@ -1250,6 +1263,8 @@ class ExportThread(QThread):
                 self._check_cancelled()
                 processed += 1
                 row_key = _path_key(row[0])
+                if row_key in excluded_keys:
+                    continue
                 if prune_bulk_roots and retained_paths.has_ancestor(row_key, include_self=False):
                     continue
                 writer.writerow(_export_listing_row(row, columns, self.config.get("age_cutoff")))
@@ -1550,8 +1565,11 @@ class DeletePreviewThread(QThread):
         rows = cursor.fetchall()
 
         paths = []
+        excluded_keys = bulk_scope_excluded_keys(self.bulk_scope)
         for path, is_folder in rows:
             self._raise_if_cancelled()
+            if self._path_key(path) in excluded_keys:
+                continue
             if not is_folder:
                 paths.append(path)
             elif folder_delete_mode == 'all':
@@ -1582,6 +1600,7 @@ class DeletePreviewThread(QThread):
                     params,
                 )
                 total, folders, files = cursor.fetchone()
+                total = max(0, (total or 0) - len(bulk_scope_excluded_keys(self.bulk_scope)))
                 paths = self._build_bulk_paths(cursor)
             else:
                 total = len(self.paths)
@@ -6709,12 +6728,12 @@ class MainWindow(QMainWindow):
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(SPACE_XS)
         self.btn_expand.setObjectName("selectionControlBtn")
-        self.btn_expand.setFixedSize(104, 30)
+        self.btn_expand.setFixedSize(112, 34)
         controls_layout.addWidget(self.btn_expand)
         self.btn_select_all = QPushButton("Select All")
         self.btn_select_all.setObjectName("selectionControlBtn")
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_select_all.setFixedSize(104, 30)
+        self.btn_select_all.setFixedSize(112, 34)
         self.btn_select_all.clicked.connect(self._toggle_select_all)
         controls_layout.addWidget(self.btn_select_all)
 
@@ -6722,7 +6741,7 @@ class MainWindow(QMainWindow):
         self.btn_current_page_selection.setObjectName("selectionControlBtn")
         self.btn_current_page_selection.setToolTip("Select every item shown on this page")
         self.btn_current_page_selection.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_current_page_selection.setFixedSize(148, 30)
+        self.btn_current_page_selection.setFixedSize(164, 34)
         self.btn_current_page_selection.setVisible(False)
         self.btn_current_page_selection.clicked.connect(self._toggle_current_page_selection)
         controls_layout.addWidget(self.btn_current_page_selection)
@@ -6730,14 +6749,14 @@ class MainWindow(QMainWindow):
         self.btn_clear_selection = QPushButton("Unselect All")
         self.btn_clear_selection.setObjectName("selectionControlBtn")
         self.btn_clear_selection.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear_selection.setFixedSize(116, 30)
+        self.btn_clear_selection.setFixedSize(124, 34)
         self.btn_clear_selection.clicked.connect(self._unselect_all)
         self.btn_clear_selection.setVisible(False)
         
         self.btn_select_inactive = QPushButton("Select All Inactive")
         self.btn_select_inactive.setObjectName("selectionControlBtn")
         self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_select_inactive.setFixedSize(144, 30)
+        self.btn_select_inactive.setFixedSize(160, 34)
         self.btn_select_inactive.clicked.connect(self._select_inactive)
         self.btn_select_inactive.setEnabled(False)
         controls_layout.addWidget(self.btn_select_inactive)
@@ -6745,7 +6764,7 @@ class MainWindow(QMainWindow):
         self.btn_select_empty = QPushButton("Select All Empty")
         self.btn_select_empty.setObjectName("selectionControlBtn")
         self.btn_select_empty.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_select_empty.setFixedSize(128, 30)
+        self.btn_select_empty.setFixedSize(144, 34)
         self.btn_select_empty.setToolTip("No empty folders are available in the current view.")
         self.btn_select_empty.clicked.connect(self._select_empty)
         self.btn_select_empty.setEnabled(False)
@@ -8335,6 +8354,10 @@ class MainWindow(QMainWindow):
             self._clear_current_page_checks()
             return
 
+        requested_scope = "current"
+        if getattr(self, "bulk_delete_scope", None):
+            self._set_bulk_scope_page_excluded(indices, False)
+            requested_scope = "bulk_current"
         self._preserve_results_focus = True
         self._begin_chunked_bulk_selection(
             indices,
@@ -8344,7 +8367,7 @@ class MainWindow(QMainWindow):
             offer_all_pages=False,
             status=status,
             videos_only=videos_only,
-            requested_scope="current",
+            requested_scope=requested_scope,
         )
 
     def _clear_all_checks(self):
@@ -8376,13 +8399,24 @@ class MainWindow(QMainWindow):
         self._do_recount()
 
     def _clear_current_page_checks(self):
-        self.bulk_delete_scope = None
         self.cached_selected_total = None
         if not self.tree_model:
             self._do_recount()
             return
 
-        indices = self._collect_checked_source_indices()
+        if self.bulk_delete_scope:
+            mode = self._display_mode()
+            all_targets, inactive_targets, empty_targets = self._collect_selection_button_targets(mode)
+            indices = (
+                inactive_targets
+                if mode == "Inactive"
+                else empty_targets
+                if mode == "Empty"
+                else all_targets
+            )
+            self._set_bulk_scope_page_excluded(indices, True)
+        else:
+            indices = self._collect_checked_source_indices()
         if indices:
             self._set_indices_check_state_direct_suppressed(
                 indices,
@@ -8527,10 +8561,11 @@ class MainWindow(QMainWindow):
         if not indices:
             return False
         for index in indices:
-            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole)
-            if not item_data or not item_data.get('path'):
-                return False
-            if not self._is_effectively_selected(item_data['path']):
+            if (
+                not index.isValid()
+                or self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole)
+                != Qt.CheckState.Checked
+            ):
                 return False
         return True
 
@@ -8582,6 +8617,19 @@ class MainWindow(QMainWindow):
 
         started_at = time.perf_counter() if PERF_DEBUG else None
         visited = 0
+        bulk_scope = self.bulk_delete_scope
+        bulk_status = bulk_scope.get('status') if bulk_scope else None
+        bulk_videos_only = bool(bulk_scope and bulk_scope.get('videos_only', False))
+        bulk_exact_only = bool(
+            bulk_scope
+            and (
+                self.proxy_model.has_active_filters()
+                or bulk_status is not None
+                or bulk_videos_only
+            )
+        )
+        bulk_checked_indices = []
+        bulk_unchecked_indices = []
         stack = [QModelIndex()]
         while stack:
             parent = stack.pop()
@@ -8592,16 +8640,38 @@ class MainWindow(QMainWindow):
                 if item_data and item_data.get('path') and self._is_persistable_selection_index(index):
                     key = self._path_key(item_data['path'])
                     state = self.tree_model.data(index, Qt.ItemDataRole.CheckStateRole)
+                    is_page_result = item_data.get(
+                        '_is_page_result',
+                        not item_data.get('_is_context_fetched', False),
+                    )
+                    is_bulk_target = bool(
+                        bulk_scope
+                        and is_page_result
+                        and (bulk_status is None or item_data.get('status') == bulk_status)
+                        and (not bulk_videos_only or self._is_video_item(item_data))
+                        and (
+                            not bulk_exact_only
+                            or self.proxy_model.matches_source_index(index)
+                        )
+                    )
                     if state == Qt.CheckState.Checked:
                         self.excluded_paths.remove_descendants(key, include_self=True)
                         if not self._is_descendant_of_selected_path(item_data['path']):
                             self.selected_paths[key] = item_data['path']
+                        if is_bulk_target:
+                            bulk_checked_indices.append(index)
                     elif state == Qt.CheckState.Unchecked:
                         if self._has_any_selected_ancestor(item_data['path'], include_self=False):
                             self.excluded_paths[key] = item_data['path']
                         self.selected_paths.pop(key, None)
+                        if is_bulk_target:
+                            bulk_unchecked_indices.append(index)
                 if self.tree_model.hasChildren(index):
                     stack.append(index)
+        if bulk_checked_indices:
+            self._set_bulk_scope_page_excluded(bulk_checked_indices, False)
+        if bulk_unchecked_indices:
+            self._set_bulk_scope_page_excluded(bulk_unchecked_indices, True)
         _perf_log(
             "selection model sync",
             started_at,
@@ -8886,7 +8956,72 @@ class MainWindow(QMainWindow):
             'folder_delete_mode': folder_delete_mode,
             'status': status,
             'videos_only': videos_only,
+            'excluded_paths': [],
+            '_base_total': effective_total,
+            '_base_folders': effective_folders,
+            '_base_files': effective_files,
+            '_base_size': effective_size,
+            '_base_matched_total': total,
+            '_excluded_items': {},
         }
+
+    def _set_bulk_scope_page_excluded(self, indices, excluded):
+        scope = self.bulk_delete_scope
+        if not scope:
+            return
+
+        excluded_items = scope.setdefault('_excluded_items', {})
+        folder_delete_mode = scope.get('folder_delete_mode', 'empty_only')
+        for index in indices:
+            item_data = self.tree_model.data(index, Qt.ItemDataRole.UserRole) or {}
+            path = item_data.get('path')
+            if not path:
+                continue
+            key = self._path_key(path)
+            if excluded:
+                is_folder = bool(item_data.get('is_dir', False))
+                deletable = (
+                    not is_folder
+                    or folder_delete_mode == 'all'
+                    or item_data.get('status') == 'Empty'
+                )
+                excluded_items[key] = {
+                    'path': path,
+                    'is_folder': is_folder,
+                    'size': int(item_data.get('size', 0) or 0) if not is_folder else 0,
+                    'deletable': deletable,
+                }
+            else:
+                excluded_items.pop(key, None)
+
+        scope['excluded_paths'] = [item['path'] for item in excluded_items.values()]
+        excluded_deletable = [
+            item for item in excluded_items.values() if item.get('deletable', True)
+        ]
+        scope['total'] = max(
+            0,
+            scope.get('_base_total', scope.get('total', 0)) - len(excluded_deletable),
+        )
+        scope['folders'] = max(
+            0,
+            scope.get('_base_folders', scope.get('folders', 0))
+            - sum(1 for item in excluded_deletable if item.get('is_folder')),
+        )
+        scope['files'] = max(
+            0,
+            scope.get('_base_files', scope.get('files', 0))
+            - sum(1 for item in excluded_deletable if not item.get('is_folder')),
+        )
+        scope['size'] = max(
+            0,
+            scope.get('_base_size', scope.get('size', 0))
+            - sum(item.get('size', 0) for item in excluded_deletable),
+        )
+        scope['matched_total'] = max(
+            0,
+            scope.get('_base_matched_total', scope.get('matched_total', 0))
+            - len(excluded_items),
+        )
 
     def _choose_select_scope(self, label, current_page_count=0):
         if not (hasattr(self, 'lbl_page_info') and self.lbl_page_info.isVisible()):
@@ -8968,7 +9103,15 @@ class MainWindow(QMainWindow):
             return
 
         mode = self._display_mode()
-        has_selection = bool(self.bulk_delete_scope or self.selected_paths or self.page_only_selected_paths)
+        bulk_has_selection = bool(
+            self.bulk_delete_scope
+            and self.bulk_delete_scope.get('total', 1) > 0
+        )
+        has_selection = bool(
+            bulk_has_selection
+            or self.selected_paths
+            or self.page_only_selected_paths
+        )
         all_targets, inactive_targets, empty_targets = self._collect_selection_button_targets(mode)
 
         focused_selection_mode = mode in ('Inactive', 'Empty')
@@ -8985,23 +9128,29 @@ class MainWindow(QMainWindow):
         else:
             self.btn_select_all.setText("Select All")
 
+        inactive_checked = self._are_all_indices_checked(inactive_targets)
+        empty_checked = self._are_all_indices_checked(empty_targets)
+        inactive_has_selection = has_selection if mode == 'Inactive' else inactive_checked
+        empty_has_selection = has_selection if mode == 'Empty' else empty_checked
         self.btn_select_inactive.setText(
-            "Deselect All Inactive"
-            if self._are_all_indices_checked(inactive_targets)
+            "Unselect All Inactive"
+            if inactive_has_selection
             else "Select All Inactive"
         )
         self.btn_select_empty.setText(
-            "Deselect All Empty"
-            if self._are_all_indices_checked(empty_targets)
-            else "Select All Empty"
+            "Unselect All Empty" if empty_has_selection else "Select All Empty"
         )
 
         self.btn_select_all.setEnabled(
             mode in ('All', 'Videos')
             and (has_selection or bool(all_targets))
         )
-        self.btn_select_inactive.setEnabled(bool(inactive_targets) and mode == 'Inactive')
-        empty_enabled = bool(empty_targets) and mode in ('All', 'Empty')
+        self.btn_select_inactive.setEnabled(
+            mode == 'Inactive' and (inactive_has_selection or bool(inactive_targets))
+        )
+        empty_enabled = mode in ('All', 'Empty') and (
+            empty_has_selection or bool(empty_targets)
+        )
         self.btn_select_empty.setEnabled(empty_enabled)
         self.btn_select_empty.setToolTip(
             "Select every empty folder in the current view."
@@ -9010,6 +9159,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_select_inactive.setVisible(mode == 'Inactive')
         self.btn_select_empty.setVisible(mode == 'Empty')
+        page_checked = False
         if hasattr(self, "btn_current_page_selection"):
             page_targets = (
                 inactive_targets
@@ -9028,6 +9178,27 @@ class MainWindow(QMainWindow):
                 else "Select every item shown on this page"
             )
             self.btn_current_page_selection.setEnabled(bool(page_targets))
+
+        self._set_selection_control_active(self.btn_select_all, has_selection)
+        self._set_selection_control_active(
+            self.btn_select_inactive,
+            inactive_has_selection,
+        )
+        self._set_selection_control_active(self.btn_select_empty, empty_has_selection)
+        if hasattr(self, "btn_current_page_selection"):
+            self._set_selection_control_active(
+                self.btn_current_page_selection,
+                page_checked,
+            )
+
+    def _set_selection_control_active(self, button, active):
+        active = bool(active)
+        if button.property("selectionActive") == active:
+            return
+        button.setProperty("selectionActive", active)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
 
     def _collect_selection_button_targets(self, mode):
         if not self.tree_model or self.proxy_model.sourceModel() is None:
@@ -9392,7 +9563,26 @@ class MainWindow(QMainWindow):
             return
 
         button = self.btn_select_inactive if status == 'Inactive' else self.btn_select_empty
-        selecting = not button.text().startswith("Deselect")
+        selecting = not button.text().startswith(("Unselect", "Deselect"))
+        if not selecting:
+            self._clear_all_checks()
+            self._focus_results_view()
+            return
+        scope_status = self.bulk_delete_scope.get('status') if self.bulk_delete_scope else None
+        if scope_status == status:
+            indices = self._collect_bulk_target_indices(status=status)
+            self._set_bulk_scope_page_excluded(indices, False)
+            self._begin_chunked_bulk_selection(
+                indices,
+                Qt.CheckState.Checked,
+                current_page_count=len(indices),
+                label=f"{status.lower()} items",
+                offer_all_pages=False,
+                status=status,
+                videos_only=False,
+                requested_scope="bulk_current",
+            )
+            return
         self._begin_page_select_flow(
             label=f"{status.lower()} items",
             status=status,
@@ -10111,6 +10301,7 @@ class MainWindow(QMainWindow):
         has_persistent_selection = bool(self.selected_paths)
         bulk_status = bulk_scope.get('status') if bulk_scope else None
         bulk_videos_only = bool(bulk_scope and bulk_scope.get('videos_only', False))
+        bulk_excluded_keys = bulk_scope_excluded_keys(bulk_scope)
         bulk_exact_only = bool(
             bulk_scope
             and (
@@ -10171,6 +10362,7 @@ class MainWindow(QMainWindow):
                             if (
                                 bulk_scope
                                 and persistable
+                                and path_key not in bulk_excluded_keys
                                 and (bulk_status is None or item_data.get('status') == bulk_status)
                                 and (not bulk_videos_only or is_video)
                                 and (not bulk_exact_only or is_exact_match)
@@ -10299,6 +10491,8 @@ class MainWindow(QMainWindow):
                 )
             elif self.bulk_select_requested_scope == 'ask_after':
                 self._promote_current_page_selection_to_page_only()
+            elif self.bulk_select_requested_scope == 'bulk_current':
+                pass
             else:
                 self.bulk_delete_scope = None
         else:
@@ -11077,7 +11271,10 @@ class MainWindow(QMainWindow):
 
             paths = []
             folder_delete_mode = self.bulk_delete_scope.get('folder_delete_mode', 'empty_only')
+            excluded_keys = bulk_scope_excluded_keys(self.bulk_delete_scope)
             for path, is_folder in rows:
+                if self._path_key(path) in excluded_keys:
+                    continue
                 if not is_folder:
                     paths.append(path)
                 elif folder_delete_mode == 'all':
@@ -11455,6 +11652,9 @@ class MainWindow(QMainWindow):
                 "folder_delete_mode": self.bulk_delete_scope.get(
                     "folder_delete_mode",
                     "empty_only",
+                ),
+                "excluded_paths": list(
+                    self.bulk_delete_scope.get("excluded_paths", [])
                 ),
             })
 

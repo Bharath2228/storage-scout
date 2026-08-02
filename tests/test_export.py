@@ -309,8 +309,9 @@ class ExportTests(unittest.TestCase):
                     "bulk_where_sql": " WHERE root = ?",
                     "bulk_params": [r"C:\root-a"],
                     "folder_delete_mode": "empty_only",
+                    "excluded_paths": [r"C:\root-a\two.log"],
                 },
-                2,
+                1,
             ),
         )
         for scope, extra_config, expected in cases:

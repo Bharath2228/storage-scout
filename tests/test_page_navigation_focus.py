@@ -106,6 +106,59 @@ class PageNavigationFocusTests(unittest.TestCase):
 
         window._clear_current_page_checks.assert_called_once_with()
 
+    def test_reselect_current_page_preserves_existing_all_pages_scope(self):
+        indices = [object(), object()]
+        window = SimpleNamespace(
+            tree_model=object(),
+            bulk_delete_scope={"status": "Inactive", "excluded_paths": ["page-two"]},
+            _display_mode=mock.Mock(return_value="Inactive"),
+            _collect_bulk_target_indices=mock.Mock(return_value=indices),
+            _are_all_indices_checked=mock.Mock(return_value=False),
+            _set_bulk_scope_page_excluded=mock.Mock(),
+            _begin_chunked_bulk_selection=mock.Mock(),
+            _preserve_results_focus=False,
+        )
+
+        MainWindow._toggle_current_page_selection(window)
+
+        window._set_bulk_scope_page_excluded.assert_called_once_with(indices, False)
+        self.assertEqual(
+            window._begin_chunked_bulk_selection.call_args.kwargs["requested_scope"],
+            "bulk_current",
+        )
+
+    def test_unselect_all_inactive_clears_matching_all_pages_scope(self):
+        window = SimpleNamespace(
+            tree_model=object(),
+            bulk_delete_scope={"status": "Inactive"},
+            btn_select_inactive=SimpleNamespace(text=lambda: "Unselect All Inactive"),
+            btn_select_empty=SimpleNamespace(text=lambda: "Select All Empty"),
+            _clear_all_checks=mock.Mock(),
+            _focus_results_view=mock.Mock(),
+            _begin_page_select_flow=mock.Mock(),
+        )
+
+        MainWindow._select_by_status(window, "Inactive")
+
+        window._clear_all_checks.assert_called_once_with()
+        window._begin_page_select_flow.assert_not_called()
+
+    def test_unselect_all_inactive_clears_selection_from_other_pages(self):
+        window = SimpleNamespace(
+            tree_model=object(),
+            bulk_delete_scope=None,
+            btn_select_inactive=SimpleNamespace(text=lambda: "Unselect All Inactive"),
+            btn_select_empty=SimpleNamespace(text=lambda: "Select All Empty"),
+            _clear_all_checks=mock.Mock(),
+            _focus_results_view=mock.Mock(),
+            _begin_page_select_flow=mock.Mock(),
+        )
+
+        MainWindow._select_by_status(window, "Inactive")
+
+        window._clear_all_checks.assert_called_once_with()
+        window._begin_page_select_flow.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

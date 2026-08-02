@@ -1315,21 +1315,32 @@ def apply_theme(app, theme_name="light"):
             font-weight: {body_weight};
         }}
         QPushButton#selectionControlBtn {{
-            background-color: transparent;
+            background-color: {surface};
             color: {text};
             border: 1px solid {border};
-            border-radius: 7px;
-            padding: 0 {SPACE_SM}px;
+            border-radius: 6px;
+            padding: 0 {SPACE_MD}px;
             font-weight: {body_weight};
         }}
         QPushButton#selectionControlBtn:hover {{
             background-color: {surface_hover};
-            border-color: {border};
+            border-color: {accent};
             color: {text};
         }}
         QPushButton#selectionControlBtn:pressed {{
-            background-color: {bg};
+            background-color: {accent_tint};
             color: {text};
+        }}
+        QPushButton#selectionControlBtn[selectionActive="true"] {{
+            background-color: {accent_tint};
+            border-color: {accent};
+            color: {accent};
+            font-weight: {header_weight};
+        }}
+        QPushButton#selectionControlBtn[selectionActive="true"]:hover {{
+            background-color: {surface_hover};
+            border-color: {accent_hover};
+            color: {accent_hover};
         }}
         QPushButton#emptyBrowseBtn {{
             background-color: {accent};

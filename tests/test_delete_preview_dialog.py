@@ -88,6 +88,25 @@ class DeletePreviewDialogTests(unittest.TestCase):
         with self.assertRaises(DeletePreviewThread._Cancelled):
             thread._raise_if_cancelled()
 
+    def test_bulk_preview_omits_paths_unselected_from_a_page(self):
+        cursor = mock.Mock()
+        cursor.fetchall.return_value = [
+            (r"C:\scan\page-one.txt", 0),
+            (r"C:\scan\page-two.txt", 0),
+        ]
+        thread = DeletePreviewThread(
+            bulk_scope={
+                "where_sql": "",
+                "params": [],
+                "folder_delete_mode": "empty_only",
+                "excluded_paths": [r"C:\scan\page-two.txt"],
+            }
+        )
+
+        paths = thread._build_bulk_paths(cursor)
+
+        self.assertEqual(paths, [r"C:\scan\page-one.txt"])
+
     def test_window_reject_uses_same_cancel_signal_as_cancel_button(self):
         thread = DeletePreviewThread()
         self.dialog.finished.connect(thread.cancel)
