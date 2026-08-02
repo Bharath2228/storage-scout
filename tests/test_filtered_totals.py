@@ -161,6 +161,58 @@ class FilteredTotalsTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_pending_refresh_keeps_completed_cache_totals_visible(self):
+        root = os.path.normpath(r"Z:\scan")
+        scope = os.path.join(root, "Projects")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Projects", True, 0, 1, root)
+        cache.set_folder_summary(root, 12 * 1024, 3, 2, 1, 1)
+        cache.set_folder_summary(scope, 5 * 1024, 2, 1, 2, 2)
+        window = MainWindow()
+        try:
+            window.is_scanning = False
+            window.current_scan_root = root
+            window.folder_browser_scope = scope
+            window.folder_cache = cache
+            window.cached_folder_total = None
+            window.cached_folder_total_root = None
+
+            window._set_size_totals_pending(browse=True)
+
+            self.assertEqual(window.chip_browse_size.text(), "Total Size 12.0 KB")
+            self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
+        finally:
+            window.close()
+
+    def test_latest_totals_failure_restores_known_values(self):
+        root = os.path.normpath(r"Z:\scan")
+        scope = os.path.join(root, "Projects")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Projects", True, 0, 1, root)
+        cache.set_folder_summary(root, 12 * 1024, 3, 2, 1, 1)
+        cache.set_folder_summary(scope, 5 * 1024, 2, 1, 2, 2)
+        window = MainWindow()
+        try:
+            window.is_scanning = False
+            window.current_scan_root = root
+            window.folder_browser_scope = scope
+            window.folder_cache = cache
+            window.totals_request_id = 9
+            window._set_total_summary_chip("--")
+            window._set_chip_text(
+                window.chip_folder_size,
+                "Folder Size calculating...",
+            )
+
+            window._on_totals_failed(9, "temporary read error")
+
+            self.assertEqual(window.chip_browse_size.text(), "Total Size 12.0 KB")
+            self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
+        finally:
+            window.close()
+
     def test_totals_refresh_reuses_cached_scoped_folder_size(self):
         with mock.patch.object(
             TotalsThread,

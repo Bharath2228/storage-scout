@@ -13,11 +13,12 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStyledItemDelegate, QButtonGroup, QApplication, QFileDialog,
     QSpinBox, QAbstractItemView, QStackedWidget, QStyleOptionViewItem,
     QMenu, QSizePolicy, QFrame, QStyle, QDialog, QProgressBar,
-    QTableWidget, QTableWidgetItem, QComboBox, QAbstractScrollArea,
-    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect, QCheckBox, QSplitter
+    QTableWidget, QTableWidgetItem, QComboBox, QAbstractScrollArea, QBoxLayout,
+    QLayout, QSystemTrayIcon, QGraphicsDropShadowEffect, QCheckBox, QSplitter,
+    QScrollArea, QToolButton
 )
-from PyQt6.QtCore import Qt, QRect, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings, QAbstractItemModel
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont
+from PyQt6.QtCore import Qt, QRect, QRectF, QModelIndex, QPersistentModelIndex, QTimer, QEvent, QSignalBlocker, QThread, pyqtSignal, QSize, QSettings, QAbstractItemModel
+from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QIcon, QFont, QFontMetrics
 
 from .models import WatchdogTreeModel, WatchdogFilterProxyModel, format_size, format_age
 from .scanner import ScannerThread
@@ -783,6 +784,24 @@ DEFAULT_EXPORT_COLUMNS = (
 )
 
 
+def _preferred_csv_delimiter():
+    """Use the separator configured for spreadsheet lists on Windows."""
+    if os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Control Panel\International",
+            ) as key:
+                delimiter = str(winreg.QueryValueEx(key, "sList")[0] or "")
+                if delimiter in {",", ";", "\t", "|"}:
+                    return delimiter
+        except (OSError, ValueError):
+            pass
+    return ","
+
+
 def _export_status(is_folder, modified_time, is_empty, age_cutoff):
     if is_folder and is_empty:
         return "Empty"
@@ -830,6 +849,20 @@ class ExportDialog(QDialog):
         ("delete_audit", "Delete audit log"),
         ("scan_history", "Scan history"),
     )
+    TYPE_DESCRIPTIONS = {
+        "listing": "Export file and folder rows with the columns you choose below.",
+        "file_types": "Export one summary row per file extension, including size and file count.",
+        "folder_summary": "Export folder paths with their total size, file count, and folder count.",
+        "delete_audit": "Export saved delete authorization and completion history.",
+        "scan_history": "Export one summary row for each previously scanned root folder.",
+    }
+    SCOPE_DESCRIPTIONS = {
+        "current_page": "Only export the rows visible on the current results page.",
+        "all_matching": "Export every item matching the current filters and folder scope across all pages.",
+        "entire_scan": "Export the complete indexed scan, regardless of the current filters or page.",
+        "selected": "Only export items you have manually selected or checked.",
+        "bulk_scope": "Export the complete all-pages selection currently prepared for bulk deletion.",
+    }
 
     def __init__(self, has_selection=False, has_bulk_scope=False, settings=None, parent=None):
         super().__init__(parent)
@@ -837,10 +870,10 @@ class ExportDialog(QDialog):
         self.setWindowTitle("Export CSV")
         self.setModal(True)
         self.setObjectName("modalDialog")
-        self.setMinimumWidth(560)
+        self.setMinimumSize(400, 360)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
+        layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
         layout.setSpacing(SPACE_MD)
 
         title = QLabel("Export data")
@@ -849,7 +882,26 @@ class ExportDialog(QDialog):
 
         detail = QLabel("Choose the report, scope, and columns to include.")
         detail.setObjectName("modalDetail")
+        detail.setWordWrap(True)
         layout.addWidget(detail)
+
+        self.options_scroll = QScrollArea()
+        self.options_scroll.setObjectName("exportOptionsScroll")
+        self.options_scroll.setWidgetResizable(True)
+        self.options_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.options_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.options_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.options_content = QWidget()
+        self.options_content.setObjectName("exportOptionsContent")
+        options_layout = QVBoxLayout(self.options_content)
+        options_layout.setContentsMargins(0, 0, SPACE_XS, 0)
+        options_layout.setSpacing(SPACE_MD)
+        self.options_scroll.setWidget(self.options_content)
+        layout.addWidget(self.options_scroll, 1)
 
         type_row = QHBoxLayout()
         type_label = QLabel("Export type")
@@ -857,9 +909,18 @@ class ExportDialog(QDialog):
         self.type_combo = QComboBox()
         for key, label in self.TYPE_OPTIONS:
             self.type_combo.addItem(label, key)
+            self.type_combo.setItemData(
+                self.type_combo.count() - 1,
+                self.TYPE_DESCRIPTIONS[key],
+                Qt.ItemDataRole.ToolTipRole,
+            )
         type_row.addWidget(type_label)
         type_row.addWidget(self.type_combo, 1)
-        layout.addLayout(type_row)
+        options_layout.addLayout(type_row)
+        self.type_help = QLabel()
+        self.type_help.setObjectName("exportOptionHelp")
+        self.type_help.setWordWrap(True)
+        options_layout.addWidget(self.type_help)
 
         self.scope_frame = QFrame()
         self.scope_frame.setObjectName("modalSection")
@@ -874,12 +935,34 @@ class ExportDialog(QDialog):
         for index, (key, label) in enumerate(self.SCOPE_OPTIONS):
             button = QRadioButton(label)
             button.setChecked(index == 0)
+            button.setToolTip(self.SCOPE_DESCRIPTIONS[key])
+            button.setProperty("exportScope", True)
             self.scope_group.addButton(button)
             self.scope_buttons[key] = button
             scope_layout.addWidget(button)
         self.scope_buttons["selected"].setEnabled(has_selection)
         self.scope_buttons["bulk_scope"].setEnabled(has_bulk_scope)
-        layout.addWidget(self.scope_frame)
+        if not has_selection:
+            self.scope_buttons["selected"].setText(
+                "Selected / checked items only (Unavailable)"
+            )
+            self.scope_buttons["selected"].setProperty("unavailable", True)
+            self.scope_buttons["selected"].setToolTip(
+                "Select or check at least one item before using this export scope."
+            )
+        if not has_bulk_scope:
+            self.scope_buttons["bulk_scope"].setText(
+                "Current bulk delete scope (Unavailable)"
+            )
+            self.scope_buttons["bulk_scope"].setProperty("unavailable", True)
+            self.scope_buttons["bulk_scope"].setToolTip(
+                "Create an all-pages bulk selection before using this export scope."
+            )
+        self.scope_help = QLabel()
+        self.scope_help.setObjectName("exportOptionHelp")
+        self.scope_help.setWordWrap(True)
+        scope_layout.addWidget(self.scope_help)
+        options_layout.addWidget(self.scope_frame)
 
         self.columns_frame = QFrame()
         self.columns_frame.setObjectName("modalSection")
@@ -900,16 +983,17 @@ class ExportDialog(QDialog):
             checkbox.setChecked(key in stored)
             self.column_checks[key] = checkbox
             columns_layout.addWidget(checkbox, 1 + index // 2, index % 2)
-        layout.addWidget(self.columns_frame)
+        options_layout.addWidget(self.columns_frame)
 
         self.include_summary = QCheckBox("Include export summary header")
         self.include_summary.setChecked(False)
-        layout.addWidget(self.include_summary)
+        options_layout.addWidget(self.include_summary)
 
         self.validation_label = QLabel("")
         self.validation_label.setObjectName("authMessage")
         self.validation_label.setVisible(False)
-        layout.addWidget(self.validation_label)
+        options_layout.addWidget(self.validation_label)
+        options_layout.addStretch(1)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -924,9 +1008,26 @@ class ExportDialog(QDialog):
         layout.addLayout(buttons)
 
         self.type_combo.currentIndexChanged.connect(self._update_type_state)
+        self.scope_group.buttonClicked.connect(self._update_option_help)
         for checkbox in self.column_checks.values():
             checkbox.toggled.connect(self._update_validation)
+        self._fit_to_available_screen()
         self._update_type_state()
+
+    def _fit_to_available_screen(self):
+        screen = self.parentWidget().screen() if self.parentWidget() else None
+        screen = screen or QApplication.primaryScreen()
+        if screen is None:
+            self._listing_height = 720
+            self.resize(560, self._listing_height)
+            return
+
+        available = screen.availableGeometry()
+        max_width = max(360, available.width() - (2 * SPACE_XL))
+        max_height = max(360, available.height() - (2 * SPACE_XL))
+        self.setMinimumSize(min(400, max_width), min(360, max_height))
+        self._listing_height = min(720, max_height)
+        self.resize(min(560, max_width), self._listing_height)
 
     def export_type(self):
         return self.type_combo.currentData()
@@ -947,8 +1048,16 @@ class ExportDialog(QDialog):
         is_listing = self.export_type() == "listing"
         self.scope_frame.setVisible(is_listing)
         self.columns_frame.setVisible(is_listing)
+        self._update_option_help()
         self._update_validation()
-        self.adjustSize()
+        target_height = self._listing_height if is_listing else min(360, self._listing_height)
+        self.resize(self.width(), target_height)
+
+    def _update_option_help(self, _button=None):
+        export_type = self.export_type()
+        self.type_help.setText(self.TYPE_DESCRIPTIONS.get(export_type, ""))
+        scope = self.export_scope()
+        self.scope_help.setText(self.SCOPE_DESCRIPTIONS.get(scope, ""))
 
     def _update_validation(self):
         valid = self.export_type() != "listing" or bool(self.selected_columns())
@@ -1060,7 +1169,7 @@ class ExportThread(QThread):
             os.makedirs(os.path.dirname(self.target_path) or ".", exist_ok=True)
             tool = FileIndexTool()
             with open(self.temp_path, "w", newline="", encoding="utf-8-sig") as handle:
-                writer = csv.writer(handle, delimiter=";")
+                writer = csv.writer(handle, delimiter=_preferred_csv_delimiter())
                 if self.config.get("include_summary"):
                     for key, value in self.config.get("metadata", {}).items():
                         writer.writerow([f"# {key}", value])
@@ -1802,10 +1911,9 @@ class FileTypeBreakdownThread(QThread):
     breakdown_ready = pyqtSignal(int, list)
     breakdown_failed = pyqtSignal(int, str)
 
-    def __init__(self, request_id, limit=20, parent=None):
+    def __init__(self, request_id, parent=None):
         super().__init__(parent)
         self.request_id = request_id
-        self.limit = limit
         self.is_cancelled = False
 
     def cancel(self):
@@ -1818,7 +1926,7 @@ class FileTypeBreakdownThread(QThread):
         try:
             if self.is_cancelled:
                 return
-            rows = tool.extension_breakdown(limit=self.limit)
+            rows = tool.extension_breakdown()
             if not self.is_cancelled:
                 self.breakdown_ready.emit(self.request_id, rows)
         except Exception as exc:
@@ -1829,6 +1937,14 @@ class FileTypeBreakdownThread(QThread):
 
 
 class FileTypeBarDelegate(QStyledItemDelegate):
+    @staticmethod
+    def format_share(share):
+        if share <= 0:
+            return "0%"
+        if share < 0.001:
+            return "<0.1%"
+        return f"{share * 100:.1f}%"
+
     def paint(self, painter, option, index):
         painter.save()
         try:
@@ -1836,19 +1952,61 @@ class FileTypeBarDelegate(QStyledItemDelegate):
         except (TypeError, ValueError):
             share = 0.0
 
-        rect = option.rect.adjusted(12, 10, -12, -10)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
         palette = current_palette()
+
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor(palette["accent_tint"]))
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, QColor(palette["surface_hover"]))
+
+        content_rect = option.rect.adjusted(12, 0, -12, 0)
+        percentage_width = 54
+        track_rect = QRect(
+            content_rect.left(),
+            content_rect.center().y() - 4,
+            max(0, content_rect.width() - percentage_width - SPACE_SM),
+            8,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(palette["border"]))
-        painter.drawRoundedRect(rect, 5, 5)
+        painter.drawRoundedRect(track_rect, 4, 4)
 
         if share > 0:
-            width = max(3, int(rect.width() * min(1.0, share)))
-            bar_rect = QRect(rect.left(), rect.top(), width, rect.height())
+            width = max(2, int(track_rect.width() * min(1.0, share)))
+            bar_rect = QRect(
+                track_rect.left(),
+                track_rect.top(),
+                width,
+                track_rect.height(),
+            )
             painter.setBrush(QColor(palette["accent"]))
-            painter.drawRoundedRect(bar_rect, 5, 5)
+            painter.drawRoundedRect(bar_rect, 4, 4)
+
+        percentage_rect = QRect(
+            track_rect.right() + SPACE_SM,
+            option.rect.top(),
+            percentage_width,
+            option.rect.height(),
+        )
+        painter.setPen(QColor(palette["text_muted"]))
+        painter.drawText(
+            percentage_rect,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            self.format_share(share),
+        )
         painter.restore()
+
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text, numeric_value):
+        super().__init__(text)
+        self.numeric_value = numeric_value
+
+    def __lt__(self, other):
+        if isinstance(other, NumericTableWidgetItem):
+            return self.numeric_value < other.numeric_value
+        return super().__lt__(other)
 
 
 class FileTypesDialog(QDialog):
@@ -1858,7 +2016,8 @@ class FileTypesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("File Types")
         self.setModal(False)
-        self.resize(620, 520)
+        self.resize(700, 560)
+        self.setMinimumSize(600, 420)
         self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
@@ -1873,76 +2032,147 @@ class FileTypesDialog(QDialog):
         self.detail_label.setObjectName("modalDetail")
         layout.addWidget(self.detail_label)
 
+        self.summary_strip = QFrame()
+        self.summary_strip.setObjectName("fileTypesSummary")
+        summary_layout = QHBoxLayout(self.summary_strip)
+        summary_layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        summary_layout.setSpacing(SPACE_LG)
+        self.summary_types_value, types_metric = self._make_summary_metric("Types")
+        self.summary_files_value, files_metric = self._make_summary_metric("Files")
+        self.summary_size_value, size_metric = self._make_summary_metric("Total size")
+        summary_layout.addWidget(types_metric)
+        summary_layout.addWidget(self._summary_divider())
+        summary_layout.addWidget(files_metric)
+        summary_layout.addWidget(self._summary_divider())
+        summary_layout.addWidget(size_metric)
+        summary_layout.addStretch(1)
+        self.summary_strip.setVisible(False)
+        layout.addWidget(self.summary_strip)
+
         self.table = QTableWidget(0, 4)
+        self.table.setObjectName("fileTypesTable")
         self.table.setFrameShape(QFrame.Shape.NoFrame)
         self.table.setHorizontalHeaderLabels(["Type", "Share", "Size", "Files"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(48)
         self.table.setShowGrid(False)
+        self.table.setMouseTracking(True)
+        self.table.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
         self.table.setItemDelegateForColumn(1, FileTypeBarDelegate(self.table))
         header = self.table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 180)
-        self.table.setColumnWidth(2, 110)
-        self.table.setColumnWidth(3, 90)
+        self.table.setColumnWidth(1, 200)
+        self.table.setColumnWidth(2, 120)
+        self.table.setColumnWidth(3, 80)
+        self.table.setSortingEnabled(True)
+        header.setSortIndicator(2, Qt.SortOrder.DescendingOrder)
         self.table.cellClicked.connect(self._activate_row)
         layout.addWidget(self.table, 1)
 
-        hint = QLabel("Click a file type to show matching files.")
-        hint.setObjectName("modalSecondary")
-        layout.addWidget(hint)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(SPACE_MD)
+        self.hint_label = QLabel("Select a type to show its matching files.")
+        self.hint_label.setObjectName("modalSecondary")
+        footer.addWidget(self.hint_label, 1)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.setObjectName("modalCancel")
+        self.close_btn.setFixedSize(100, 36)
+        self.close_btn.clicked.connect(self.reject)
+        footer.addWidget(self.close_btn)
+        layout.addLayout(footer)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.setObjectName("modalCancel")
-        close_btn.clicked.connect(self.reject)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+    @staticmethod
+    def _summary_divider():
+        divider = QFrame()
+        divider.setObjectName("fileTypesSummaryDivider")
+        divider.setFrameShape(QFrame.Shape.VLine)
+        divider.setFixedWidth(1)
+        return divider
+
+    @staticmethod
+    def _make_summary_metric(label_text):
+        container = QWidget()
+        metric_layout = QVBoxLayout(container)
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        metric_layout.setSpacing(0)
+        value = QLabel("--")
+        value.setObjectName("fileTypesMetricValue")
+        label = QLabel(label_text)
+        label.setObjectName("fileTypesMetricLabel")
+        metric_layout.addWidget(value)
+        metric_layout.addWidget(label)
+        return value, container
 
     def set_loading(self):
         self.detail_label.setText("Calculating file type breakdown...")
+        self.detail_label.setVisible(True)
+        self.summary_strip.setVisible(False)
         self.table.setRowCount(0)
 
     def set_error(self, message):
         self.detail_label.setText(f"Could not load file types: {message}")
+        self.detail_label.setVisible(True)
+        self.summary_strip.setVisible(False)
         self.table.setRowCount(0)
 
     def set_rows(self, rows):
         total_size = sum(size for _label, size, _count in rows) or 0
         total_files = sum(count for _label, _size, count in rows) or 0
-        self.detail_label.setText(
-            f"{len(rows)} groups · {format_size(total_size)} · {total_files:,} files"
-        )
+        self.detail_label.setVisible(False)
+        self.summary_types_value.setText(f"{len(rows):,}")
+        self.summary_files_value.setText(f"{total_files:,}")
+        self.summary_size_value.setText(format_size(total_size))
+        self.summary_strip.setVisible(True)
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for row, (label, total_size_for_type, file_count) in enumerate(rows):
             raw_extension = None
             if label == "(no extension)":
                 raw_extension = ""
-            elif label != "Other":
+            else:
                 raw_extension = label
 
-            type_item = QTableWidgetItem(label)
+            display_label = label
+            if label != "(no extension)" and not label.startswith("."):
+                display_label = f".{label}"
+            type_item = QTableWidgetItem(display_label)
             type_item.setData(Qt.ItemDataRole.UserRole, raw_extension)
+            type_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
             self.table.setItem(row, 0, type_item)
 
-            share_item = QTableWidgetItem("")
-            share_item.setData(
-                Qt.ItemDataRole.UserRole,
-                (total_size_for_type / total_size) if total_size else 0.0,
-            )
+            share = (total_size_for_type / total_size) if total_size else 0.0
+            share_item = NumericTableWidgetItem("", share)
+            share_item.setData(Qt.ItemDataRole.UserRole, share)
             self.table.setItem(row, 1, share_item)
 
-            self.table.setItem(row, 2, QTableWidgetItem(format_size(total_size_for_type)))
-            self.table.setItem(row, 3, QTableWidgetItem(f"{file_count:,}"))
-        self.table.resizeRowsToContents()
+            size_item = NumericTableWidgetItem(
+                format_size(total_size_for_type),
+                total_size_for_type,
+            )
+            size_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            self.table.setItem(row, 2, size_item)
+            files_item = NumericTableWidgetItem(f"{file_count:,}", file_count)
+            files_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            self.table.setItem(row, 3, files_item)
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(2, Qt.SortOrder.DescendingOrder)
 
     def _activate_row(self, row, _column):
         item = self.table.item(row, 0)
@@ -4239,6 +4469,53 @@ class AccordionHeader(QFrame):
         super().mousePressEvent(event)
 
 
+class SegmentedRadioButton(QRadioButton):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setMouseTracking(True)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        palette = current_palette()
+        # Draw one inset outline on half pixels so the one-pixel border stays
+        # crisp while its rounded corners remain smoothly anti-aliased.
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        checked = self.isChecked()
+        hovered = self.underMouse()
+
+        background = QColor(0, 0, 0, 0)
+        border = palette["border"]
+        text = palette["text"]
+
+        if checked:
+            background = QColor(palette["accent_tint"])
+            border = palette["accent"]
+            text = palette["accent"]
+        elif hovered:
+            background = QColor(palette["accent_tint"])
+            border = palette["accent"]
+            text = palette["text"]
+
+        pen = QPen(QColor(border), 1.0)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 8, 8)
+        painter.setPen(QColor(text))
+        painter.setFont(self.font())
+        painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignCenter, self.text())
+
+
 class FilterPopover(QWidget):
     closed = pyqtSignal()
 
@@ -4596,6 +4873,9 @@ class FolderBrowserTreeView(QTreeView):
 
 
 class FolderBrowserPanel(QFrame):
+    MIN_WIDTH = 160
+    DEFAULT_WIDTH = MIN_WIDTH
+
     scopeChanged = pyqtSignal(str)
     closeRequested = pyqtSignal()
     loadRequested = pyqtSignal(str)
@@ -4603,12 +4883,12 @@ class FolderBrowserPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setMinimumWidth(160)
+        self.setMinimumWidth(self.MIN_WIDTH)
         self.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Expanding,
         )
-        self.resize(240, self.height())
+        self.resize(self.DEFAULT_WIDTH, self.height())
         self.root_path = None
 
         layout = QVBoxLayout(self)
@@ -4619,8 +4899,8 @@ class FolderBrowserPanel(QFrame):
         header.setObjectName("searchSection")
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_MD)
-        title = QLabel("FOLDERS")
-        title.setObjectName("searchHeader")
+        title = QLabel("Folders Panel")
+        title.setObjectName("filterDrawerTitle")
         header_layout.addWidget(title)
         layout.addWidget(header)
 
@@ -4632,6 +4912,7 @@ class FolderBrowserPanel(QFrame):
         self.tree.setAnimated(False)
         self.tree.setIndentation(16)
         self.tree.setIconSize(QSize(18, 18))
+        self.tree.setViewportMargins(SPACE_SM, 0, 0, 0)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setExpandsOnDoubleClick(True)
@@ -4650,23 +4931,41 @@ class FolderBrowserPanel(QFrame):
 
         action_box = QWidget()
         action_box.setObjectName("sidebarActionBox")
+        self.action_box = action_box
         action_layout = QVBoxLayout(action_box)
-        action_layout.setContentsMargins(SPACE_SM, SPACE_MD, SPACE_SM, SPACE_LG)
-        self.btn_close = QPushButton("Close folders")
+        action_layout.setContentsMargins(SPACE_SM, SPACE_MD, SPACE_SM, SPACE_SM)
+        self.btn_close = QPushButton("Close Folders Panel")
         self.btn_close.setObjectName("closeSidebar")
         self.btn_close.setToolTip("Hide the folder browser")
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setFixedHeight(32)
+        self.btn_close.setMinimumWidth(0)
+        self.btn_close.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self.btn_close.clicked.connect(self.closeRequested)
         action_layout.addWidget(self.btn_close)
         layout.addWidget(action_box)
 
         self.set_root(None)
+        self._update_close_button_width()
 
     def sizeHint(self):
-        return QSize(240, 0)
+        return QSize(self.DEFAULT_WIDTH, 0)
 
     def minimumSizeHint(self):
         return QSize(0, 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_close_button_width()
+
+    def _update_close_button_width(self):
+        if not hasattr(self, "btn_close"):
+            return
+        available_width = max(120, self.width() - (2 * SPACE_SM))
+        self.btn_close.setMaximumWidth(min(172, available_width))
 
     def set_root(self, path):
         self.root_path = os.path.normpath(path) if path else None
@@ -4730,10 +5029,21 @@ class FilterPanel(QFrame):
     MAX_STALE_MONTHS = 24
     MAX_MANUAL_STALE_MONTHS = 240
     DEFAULT_STATUS_FILTER = "Inactive"
+    MIN_WIDTH = 240
+    DEFAULT_WIDTH = MIN_WIDTH
+    MAX_WIDTH = 520
+    FILTER_SEGMENT_MAX_WIDTH = 142
+    FILTER_SEGMENT_MIN_WIDTH = 72
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("sidebar")
+        self.setObjectName("filterDrawer")
+        self.setMinimumWidth(self.MIN_WIDTH)
+        self.setMaximumWidth(self.MAX_WIDTH)
+        self.resize(self.DEFAULT_WIDTH, self.height())
+        self._initial_drawer_width_applied = False
+        self._exclusions_popup_layout_active = False
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.setVisible(False)
         self.settings = QSettings("IBMS", "Watchdog")
 
@@ -4741,38 +5051,75 @@ class FilterPanel(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        drawer_header = QFrame()
+        drawer_header.setObjectName("filterDrawerHeader")
+        drawer_header_layout = QHBoxLayout(drawer_header)
+        self.drawer_header_layout = drawer_header_layout
+        drawer_header_layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_MD, SPACE_MD)
+        drawer_header_layout.setSpacing(SPACE_SM)
+        drawer_title_box = QWidget()
+        drawer_title_layout = QVBoxLayout(drawer_title_box)
+        drawer_title_layout.setContentsMargins(0, 0, 0, 0)
+        drawer_title_layout.setSpacing(2)
+        drawer_title = QLabel("Filters")
+        drawer_title.setObjectName("filterDrawerTitle")
+        drawer_title_layout.addWidget(drawer_title)
+        drawer_header_layout.addWidget(drawer_title_box, 1)
+        outer.addWidget(drawer_header)
+
         staging = QWidget()
+        staging.setMinimumWidth(0)
+        staging.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         staging_layout = QVBoxLayout(staging)
         staging_layout.setContentsMargins(0, 0, 0, 0)
         staging_layout.setSpacing(0)
 
         scroll_content = QWidget()
         scroll_content.setObjectName("filterStagingContent")
+        scroll_content.setMinimumWidth(0)
         scroll_content.setMinimumHeight(0)
-        scroll_content.setFixedWidth(self.width())
-        scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        scroll_content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
         body = QVBoxLayout(scroll_content)
-        body.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-        body.setContentsMargins(0, SPACE_LG, 0, SPACE_MD)
+        body.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
+        body.setContentsMargins(0, SPACE_SM, 0, SPACE_MD)
         body.setSpacing(0)
         staging_layout.addWidget(scroll_content)
 
         search_section = QWidget()
         search_section.setObjectName("searchSection")
         search_layout = QVBoxLayout(search_section)
-        search_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
-        search_layout.setSpacing(SPACE_MD)
+        self.search_layout = search_layout
+        search_layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        search_layout.setSpacing(SPACE_SM)
 
         lbl_search = QLabel("SEARCH")
         lbl_search.setObjectName("searchHeader")
         search_layout.addWidget(lbl_search)
 
+        self.search_shell = QFrame()
+        self.search_shell.setObjectName("searchFieldShell")
+        self.search_shell.setFixedHeight(40)
+        self.search_shell.setMinimumWidth(0)
+        search_shell_layout = QHBoxLayout(self.search_shell)
+        self.search_shell_layout = search_shell_layout
+        search_shell_layout.setContentsMargins(SPACE_MD, 0, 4, 0)
+        search_shell_layout.setSpacing(SPACE_SM)
+
+        self.search_icon_label = QLabel()
+        self.search_icon_label.setObjectName("searchFieldIcon")
+        search_icon = QIcon(os.path.join(os.path.dirname(__file__), "assets", "search.svg"))
+        self.search_icon_label.setPixmap(search_icon.pixmap(QSize(18, 18)))
+        search_shell_layout.addWidget(self.search_icon_label)
+
         self.txt_search = QLineEdit()
-        self.txt_search.setObjectName("filterSearch")
-        self.txt_search.setPlaceholderText("Search files and folders...")
+        self.txt_search.setObjectName("searchFieldInput")
+        self.txt_search.setMinimumWidth(0)
+        self.txt_search.setPlaceholderText("Search files and folders")
         self.txt_search.setToolTip("Filter the current results by file or folder name")
         self.txt_search.setFixedHeight(36)
-        clear_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton)
+        clear_icon = QIcon(
+            os.path.join(os.path.dirname(__file__), "assets", "x-circle-light.svg")
+        )
         self.search_clear_action = self.txt_search.addAction(
             clear_icon,
             QLineEdit.ActionPosition.TrailingPosition,
@@ -4780,23 +5127,41 @@ class FilterPanel(QFrame):
         self.search_clear_action.setToolTip("Clear search")
         self.search_clear_action.setVisible(False)
         self.search_clear_action.triggered.connect(self.clear_search_text)
+        for button in self.txt_search.findChildren(QToolButton):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.txt_search.textChanged.connect(
             lambda text: self.search_clear_action.setVisible(bool(text))
         )
         self.txt_search.installEventFilter(self)
-        search_layout.addWidget(self.txt_search)
+        search_shell_layout.addWidget(self.txt_search, 1)
+
+        self.btn_search_submit = QPushButton()
+        self.btn_search_submit.setObjectName("searchFieldAction")
+        self.btn_search_submit.setToolTip("Apply search")
+        self.btn_search_submit.setAccessibleName("Apply search")
+        self.btn_search_submit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_search_submit.setFixedSize(32, 32)
+        self.btn_search_submit.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "arrow_right.svg"))
+        )
+        self.btn_search_submit.setIconSize(QSize(18, 18))
+        self.btn_search_submit.clicked.connect(self.txt_search.returnPressed.emit)
+        search_shell_layout.addWidget(self.btn_search_submit)
+
+        search_layout.addWidget(self.search_shell)
 
         body.addWidget(search_section)
-        body.addSpacing(SPACE_XL)
+        body.addSpacing(SPACE_SM)
 
-        self._age_section_expanded = False
+        self._age_section_expanded = True
         self._exclusions_section_expanded = False
 
         # Section 1: Display Mode
         display_section = QWidget()
         display_section.setObjectName("displayModeSection")
         display_layout = QVBoxLayout(display_section)
-        display_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        self.display_layout = display_layout
+        display_layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
         display_layout.setSpacing(SPACE_SM)
 
         lbl_display = QLabel("DISPLAY MODE")
@@ -4804,68 +5169,72 @@ class FilterPanel(QFrame):
 
         display_layout.addWidget(lbl_display)
 
-        self.rb_all      = QRadioButton("Show all")
-        self.rb_inactive = QRadioButton("Inactive only")
-        self.rb_empty    = QRadioButton("Empty only")
-        self.rb_videos   = QRadioButton("Videos only")
+        self.rb_all      = SegmentedRadioButton("Show all")
+        self.rb_inactive = SegmentedRadioButton("Inactive only")
+        self.rb_empty    = SegmentedRadioButton("Empty only")
+        self.rb_videos   = SegmentedRadioButton("Videos only")
         self.rb_all.setChecked(True)
         self.bg = QButtonGroup()
-        segment_width = (self.width() - (2 * SPACE_LG) - SPACE_SM) // 2
         display_grid = QGridLayout()
+        self.display_grid = display_grid
         display_grid.setContentsMargins(0, 0, 0, 0)
         display_grid.setSpacing(SPACE_SM)
-        display_grid.setColumnStretch(0, 1)
-        display_grid.setColumnStretch(1, 1)
-        for rb in [self.rb_all, self.rb_inactive, self.rb_empty, self.rb_videos]:
+        self.display_buttons = [
+            self.rb_all,
+            self.rb_inactive,
+            self.rb_empty,
+            self.rb_videos,
+        ]
+        for rb in self.display_buttons:
             self.bg.addButton(rb)
-            rb.setFixedWidth(segment_width)
             rb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             rb.setProperty("segment", True)
+            rb.setFixedHeight(32)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
-        display_grid.addWidget(self.rb_all, 0, 0)
-        display_grid.addWidget(self.rb_inactive, 0, 1)
-        display_grid.addWidget(self.rb_empty, 1, 0)
-        display_grid.addWidget(self.rb_videos, 1, 1)
+        self._rebuild_button_grid(self.display_grid, self.display_buttons, 2)
         display_layout.addLayout(display_grid)
         
         body.addWidget(display_section)
-        body.addSpacing(SPACE_XL)
+        body.addSpacing(SPACE_SM)
 
         # Section 1.5: View Mode
         view_section = QWidget()
         view_section.setObjectName("viewModeSection")
         view_layout = QVBoxLayout(view_section)
-        view_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        self.view_layout = view_layout
+        view_layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
         view_layout.setSpacing(SPACE_SM)
 
         lbl_view = QLabel("VIEW MODE")
         lbl_view.setObjectName("viewModeHeader")
         view_layout.addWidget(lbl_view)
 
-        self.rb_view_tree    = QRadioButton("Tree view")
-        self.rb_view_files   = QRadioButton("Files only")
-        self.rb_view_folders = QRadioButton("Folders only")
+        self.rb_view_tree    = SegmentedRadioButton("Tree view")
+        self.rb_view_files   = SegmentedRadioButton("Files only")
+        self.rb_view_folders = SegmentedRadioButton("Folders only")
         self.rb_view_tree.setChecked(True)
         
         self.bg_view = QButtonGroup()
         view_grid = QGridLayout()
+        self.view_grid = view_grid
         view_grid.setContentsMargins(0, 0, 0, 0)
         view_grid.setSpacing(SPACE_SM)
-        view_grid.setColumnStretch(0, 1)
-        view_grid.setColumnStretch(1, 1)
-        for rb in [self.rb_view_tree, self.rb_view_files, self.rb_view_folders]:
+        self.view_buttons = [
+            self.rb_view_tree,
+            self.rb_view_files,
+            self.rb_view_folders,
+        ]
+        for rb in self.view_buttons:
             self.bg_view.addButton(rb)
-            rb.setFixedWidth(segment_width)
             rb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             rb.setProperty("segment", True)
+            rb.setFixedHeight(32)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
-        view_grid.addWidget(self.rb_view_tree, 0, 0)
-        view_grid.addWidget(self.rb_view_files, 0, 1)
-        view_grid.addWidget(self.rb_view_folders, 1, 0)
+        self._rebuild_button_grid(self.view_grid, self.view_buttons, 2)
         view_layout.addLayout(view_grid)
             
         body.addWidget(view_section)
-        body.addSpacing(SPACE_XL)
+        body.addSpacing(SPACE_SM)
 
 
 
@@ -4877,20 +5246,24 @@ class FilterPanel(QFrame):
         age_section = QWidget()
         age_section.setObjectName("ageThresholdSection")
         age_outer_layout = QVBoxLayout(age_section)
-        age_outer_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
-        age_outer_layout.setSpacing(SPACE_MD)
+        self.age_outer_layout = age_outer_layout
+        age_outer_layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        age_outer_layout.setSpacing(SPACE_SM)
 
-        self.btn_age_toggle = self._make_accordion_header("AGE THRESHOLD")
-        self.btn_age_toggle.clicked.connect(lambda: self._toggle_collapsible_section("age"))
-        age_outer_layout.addWidget(self.btn_age_toggle)
+        self.age_heading = QLabel("Age: Off")
+        self.age_heading.setObjectName("ageSectionHeading")
+        self.age_heading.setCursor(Qt.CursorShape.ArrowCursor)
+        age_outer_layout.addWidget(self.age_heading)
 
         self.age_box = QFrame()
         self.age_box.setObjectName("ageControl")
         age_layout = QVBoxLayout(self.age_box)
+        self.age_layout = age_layout
         age_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
         age_layout.setSpacing(SPACE_SM)
 
         age_hdr = QHBoxLayout()
+        self.age_summary_layout = age_hdr
         age_hdr.setSpacing(SPACE_SM)
         self.lbl_pill = QLabel()
         self.lbl_pill.setObjectName("agePill")
@@ -4898,8 +5271,8 @@ class FilterPanel(QFrame):
         self.lbl_pill.setFixedHeight(20)
         self.lbl_val = QLabel()
         self.lbl_val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.lbl_val.setWordWrap(True)
-        age_hdr.addWidget(self.lbl_pill)
+        self.lbl_val.setWordWrap(False)
+        self.lbl_pill.setVisible(False)
         age_hdr.addWidget(self.lbl_val)
         age_hdr.addStretch()
         age_layout.addLayout(age_hdr)
@@ -4910,6 +5283,7 @@ class FilterPanel(QFrame):
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider.setTickInterval(1)
         self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.slider.installEventFilter(self)
         self.slider.valueChanged.connect(self._update_age_label)
         self.slider.valueChanged.connect(self._sync_manual_age_from_slider)
         age_layout.addWidget(self.slider)
@@ -4930,14 +5304,17 @@ class FilterPanel(QFrame):
         self.applied_age_value = self.AGE_FILTER_DISABLED
 
         bot_row = QHBoxLayout()
+        self.age_manual_row = bot_row
         bot_row.setSpacing(SPACE_SM)
-        lbl_manual = QLabel("Months")
-        lbl_manual.setObjectName("manualLabel")
+        lbl_manual = QLabel("More than 24 months? Enter here")
+        lbl_manual.setObjectName("ageManualHint")
+        lbl_manual.setWordWrap(True)
+        self.age_manual_label = lbl_manual
 
-        bot_row.addWidget(lbl_manual)
         bot_row.addWidget(self.age_input)
         bot_row.addWidget(self.btn_apply_age)
         bot_row.addStretch()
+        age_layout.addWidget(lbl_manual)
         age_layout.addLayout(bot_row)
         age_outer_layout.addWidget(self.age_box)
 
@@ -4945,13 +5322,14 @@ class FilterPanel(QFrame):
         self.age_input.valueChanged.connect(self._update_age_apply_state)
         
         body.addWidget(age_section)
-        body.addSpacing(SPACE_XL)
+        body.addSpacing(SPACE_SM)
 
         exclusions_section = QWidget()
         exclusions_section.setObjectName("exclusionsSection")
         exclusions_outer_layout = QVBoxLayout(exclusions_section)
-        exclusions_outer_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
-        exclusions_outer_layout.setSpacing(SPACE_MD)
+        self.exclusions_outer_layout = exclusions_outer_layout
+        exclusions_outer_layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        exclusions_outer_layout.setSpacing(SPACE_SM)
 
         self.btn_exclusions_toggle = self._make_accordion_header("EXCLUSIONS")
         self.btn_exclusions_toggle.clicked.connect(lambda: self._toggle_collapsible_section("exclusions"))
@@ -4959,50 +5337,58 @@ class FilterPanel(QFrame):
 
         self.exclusions_box = QWidget()
         exclusions_layout = QVBoxLayout(self.exclusions_box)
-        exclusions_layout.setContentsMargins(0, SPACE_MD, 0, SPACE_MD)
-        exclusions_layout.setSpacing(SPACE_MD)
+        exclusions_layout.setContentsMargins(0, SPACE_SM, 0, SPACE_SM)
+        exclusions_layout.setSpacing(SPACE_SM)
 
-        lbl_folders = QLabel("Folders")
+        lbl_folders = QLabel("Folder names")
         lbl_folders.setObjectName("manualLabel")
         exclusions_layout.addWidget(lbl_folders)
 
         self.txt_excluded_folders = QLineEdit()
         self.txt_excluded_folders.setObjectName("scanExclusionInput")
-        self.txt_excluded_folders.setPlaceholderText("node_modules, *.git*, Temp")
+        self.txt_excluded_folders.setPlaceholderText(
+            "Example: node_modules, *.git*, Temp"
+        )
         self.txt_excluded_folders.setToolTip("Folder names or simple patterns to skip on the next scan")
         self.txt_excluded_folders.setFixedHeight(32)
         exclusions_layout.addWidget(self.txt_excluded_folders)
 
-        lbl_extensions = QLabel("Extensions")
+        lbl_extensions = QLabel("File extensions")
         lbl_extensions.setObjectName("manualLabel")
         exclusions_layout.addWidget(lbl_extensions)
 
         self.txt_excluded_extensions = QLineEdit()
         self.txt_excluded_extensions.setObjectName("scanExclusionInput")
-        self.txt_excluded_extensions.setPlaceholderText(".tmp, .log, .iso")
+        self.txt_excluded_extensions.setPlaceholderText(
+            "Example: .tmp, .log, .iso"
+        )
         self.txt_excluded_extensions.setToolTip("File extensions to skip on the next scan")
         self.txt_excluded_extensions.setFixedHeight(32)
         exclusions_layout.addWidget(self.txt_excluded_extensions)
 
-        size_row = QHBoxLayout()
-        size_row.setSpacing(SPACE_SM)
-        lbl_min_size = QLabel("Ignore under:")
+        lbl_min_size = QLabel("Ignore files smaller than")
         lbl_min_size.setObjectName("manualLabel")
+        exclusions_layout.addWidget(lbl_min_size)
+
+        size_row = QHBoxLayout()
+        self.exclusions_size_row = size_row
+        size_row.setSpacing(SPACE_SM)
         self.min_size_input = QSpinBox()
         self.min_size_input.setObjectName("scanExclusionSize")
         self.min_size_input.setRange(0, 999999)
         self.min_size_input.setValue(0)
         self.min_size_input.setFixedWidth(86)
+        self.min_size_input.setFixedHeight(36)
         self.min_size_input.setCursor(Qt.CursorShape.PointingHandCursor)
         self.min_size_unit = QComboBox()
         self.min_size_unit.setObjectName("scanExclusionUnit")
         self.min_size_unit.addItems(["KB", "MB", "GB"])
         self.min_size_unit.setFixedWidth(72)
+        self.min_size_unit.setFixedHeight(36)
         self.min_size_unit.setCursor(Qt.CursorShape.PointingHandCursor)
-        size_row.addWidget(lbl_min_size)
-        size_row.addStretch()
         size_row.addWidget(self.min_size_input)
         size_row.addWidget(self.min_size_unit)
+        size_row.addStretch()
         exclusions_layout.addLayout(size_row)
 
         self.lbl_exclusions_hint = QLabel("Exclusion changes apply on next scan - click Re-scan to apply.")
@@ -5011,39 +5397,66 @@ class FilterPanel(QFrame):
         self.lbl_exclusions_hint.setVisible(False)
         exclusions_layout.addWidget(self.lbl_exclusions_hint)
 
-        self.btn_reset_exclusions = QPushButton("Reset exclusions")
+        self.btn_reset_exclusions = QPushButton("Reset to defaults")
         self.btn_reset_exclusions.setObjectName("resetExclusions")
         self.btn_reset_exclusions.setToolTip("Restore the default scan exclusions")
         self.btn_reset_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
-        exclusions_layout.addWidget(self.btn_reset_exclusions, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.btn_reset_exclusions.setFixedHeight(36)
 
-        self.btn_rescan_exclusions = QPushButton("Re-scan")
+        self.btn_rescan_exclusions = QPushButton("Apply and Re-scan")
+        self.btn_rescan_exclusions.setAccessibleName("Apply and re-scan")
         self.btn_rescan_exclusions.setObjectName("primaryBtn")
-        self.btn_rescan_exclusions.setToolTip("Save these exclusions and scan the selected folder again")
+        self.btn_rescan_exclusions.setToolTip(
+            "Apply these exclusions and scan the selected folder again"
+        )
         self.btn_rescan_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_rescan_exclusions.setFixedHeight(34)
-        exclusions_layout.addWidget(self.btn_rescan_exclusions)
+        self.btn_rescan_exclusions.setFixedHeight(36)
+        exclusions_actions = QHBoxLayout()
+        self.exclusions_actions_layout = exclusions_actions
+        exclusions_actions.setSpacing(SPACE_SM)
+        exclusions_actions.addWidget(self.btn_reset_exclusions)
+        exclusions_actions.addStretch()
+        exclusions_actions.addWidget(self.btn_rescan_exclusions)
+        exclusions_layout.addLayout(exclusions_actions)
 
         exclusions_outer_layout.addWidget(self.exclusions_box)
         body.addWidget(exclusions_section)
 
         self._update_age_label(self.slider.value())
         self._restore_scan_exclusions()
-        self._age_section_expanded = self.age_input.value() != self.AGE_FILTER_DISABLED
+        self._age_section_expanded = True
         self._exclusions_section_expanded = self._scan_exclusions_from_controls().differs_from_default()
         self._sync_collapsible_sections()
+        self.txt_excluded_folders.textChanged.connect(
+            lambda _text: self.exclusionChanged.emit()
+        )
+        self.txt_excluded_extensions.textChanged.connect(
+            lambda _text: self.exclusionChanged.emit()
+        )
         self.txt_excluded_folders.editingFinished.connect(self._normalize_and_save_scan_exclusions)
         self.txt_excluded_extensions.editingFinished.connect(self._normalize_and_save_scan_exclusions)
         self.min_size_input.valueChanged.connect(self._save_scan_exclusions_from_controls)
         self.min_size_unit.currentTextChanged.connect(self._save_scan_exclusions_from_controls)
         self.btn_reset_exclusions.clicked.connect(self.reset_scan_exclusions_to_defaults)
         body.addStretch()
-        outer.addWidget(staging, 1)
+        self.filter_scroll = QScrollArea()
+        self.filter_scroll.setObjectName("filterDrawerScroll")
+        self.filter_scroll.setWidgetResizable(True)
+        self.filter_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.filter_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.filter_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.filter_scroll.setWidget(staging)
+        outer.addWidget(self.filter_scroll, 1)
 
         # Section 4: Actions
         action_box = QWidget()
         action_box.setObjectName("sidebarActionBox")
         action_layout = QVBoxLayout(action_box)
+        self.action_layout = action_layout
         action_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_LG)
         action_layout.setSpacing(SPACE_SM)
         
@@ -5053,20 +5466,61 @@ class FilterPanel(QFrame):
         self.btn_reset.setToolTip("Reset all filters to their default values")
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close = QPushButton("Close sidebar")
-        self.btn_close.setObjectName("closeSidebar")
+        self.btn_close.setObjectName("closeFilterDrawer")
         self.btn_close.setToolTip("Hide the filter sidebar")
+        self.btn_close.setAccessibleName("Close filters")
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setText("×")
+        self.btn_close.setFixedSize(32, 32)
         action_layout.addWidget(self.btn_reset)
-        action_layout.addWidget(self.btn_close)
+        drawer_header_layout.addWidget(self.btn_close)
         outer.addWidget(action_box)
-        self._convert_to_horizontal_layout(
-            outer,
-            staging,
-            action_box,
-            search_section,
-            display_section,
-            view_section,
-        )
+
+    def prepare_exclusions_popup_layout(self):
+        """Give the exclusions popover aligned, evenly sized control rows."""
+        self._exclusions_popup_layout_active = True
+        size_row = self.exclusions_size_row
+        while size_row.count():
+            size_row.takeAt(0)
+        size_row.setDirection(QBoxLayout.Direction.LeftToRight)
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(SPACE_SM)
+        for control in (self.min_size_input, self.min_size_unit):
+            control.setFixedHeight(36)
+            control.setMinimumWidth(0)
+            control.setMaximumWidth(16777215)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Fixed,
+            )
+            size_row.addWidget(control, 1)
+
+        actions = self.exclusions_actions_layout
+        while actions.count():
+            actions.takeAt(0)
+        actions.setDirection(QBoxLayout.Direction.LeftToRight)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(SPACE_SM)
+        for button in (self.btn_reset_exclusions, self.btn_rescan_exclusions):
+            button.setFixedHeight(36)
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(16777215)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Fixed,
+            )
+            actions.addWidget(button, 1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._initial_drawer_width_applied:
+            self.resize(self.DEFAULT_WIDTH, self.height())
+            self._initial_drawer_width_applied = True
+        self._update_responsive_drawer_layout()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_responsive_drawer_layout()
 
     def _convert_to_horizontal_layout(
         self,
@@ -5100,7 +5554,7 @@ class FilterPanel(QFrame):
         search_layout.setContentsMargins(0, 0, 0, 0)
         search_layout.setSpacing(0)
         search_layout.itemAt(0).widget().setVisible(False)
-        self.txt_search.setFixedWidth(180)
+        self.search_shell.setFixedWidth(240)
         self.txt_search.setFixedHeight(36)
         main_layout.addWidget(
             search_section,
@@ -5129,11 +5583,11 @@ class FilterPanel(QFrame):
         main_layout.addWidget(self._vline())
         main_layout.addStretch(1)
 
-        self.btn_age_toggle.setParent(main_row)
-        self.btn_age_toggle.setFixedWidth(116)
-        self.btn_age_toggle.setFixedHeight(36)
+        self.age_heading.setParent(main_row)
+        self.age_heading.setFixedWidth(116)
+        self.age_heading.setFixedHeight(36)
         main_layout.addWidget(
-            self.btn_age_toggle,
+            self.age_heading,
             alignment=Qt.AlignmentFlag.AlignVCenter,
         )
 
@@ -5178,7 +5632,7 @@ class FilterPanel(QFrame):
         old_scroll.deleteLater()
         old_action_box.setParent(None)
         old_action_box.deleteLater()
-        self._age_section_expanded = False
+        self._age_section_expanded = True
         self._exclusions_section_expanded = False
         self._sync_collapsible_sections()
 
@@ -5210,27 +5664,21 @@ class FilterPanel(QFrame):
         age_summary = QHBoxLayout()
         age_summary.setContentsMargins(0, 0, 0, 0)
         age_summary.setSpacing(SPACE_SM)
-        age_summary.addWidget(self.lbl_pill)
+        self.lbl_pill.setVisible(False)
         self.lbl_val.setMinimumWidth(0)
-        self.lbl_val.setWordWrap(True)
+        self.lbl_val.setWordWrap(False)
         age_summary.addWidget(self.lbl_val, 1)
         age_layout.addLayout(age_summary)
 
         self.slider.setMinimumWidth(0)
         age_layout.addWidget(self.slider)
 
-        manual_label = next(
-            (
-                label for label in self.age_box.findChildren(QLabel)
-                if label.objectName() == "manualLabel" and label.text() == "Months"
-            ),
-            None,
-        )
+        manual_label = getattr(self, "age_manual_label", None)
         manual_row = QHBoxLayout()
         manual_row.setContentsMargins(0, 0, 0, 0)
         manual_row.setSpacing(SPACE_SM)
         if manual_label is not None:
-            manual_row.addWidget(manual_label)
+            age_layout.addWidget(manual_label)
         manual_row.addWidget(self.age_input, 1)
         manual_row.addWidget(self.btn_apply_age)
         age_layout.addLayout(manual_row)
@@ -5246,9 +5694,9 @@ class FilterPanel(QFrame):
             for label in self.exclusions_box.findChildren(QLabel)
             if label.objectName() == "manualLabel"
         }
-        folders_label = detail_labels.get("Folders")
-        extensions_label = detail_labels.get("Extensions")
-        size_label = detail_labels.get("Ignore under:")
+        folders_label = detail_labels.get("Folder names")
+        extensions_label = detail_labels.get("File extensions")
+        size_label = detail_labels.get("Ignore files smaller than")
         if folders_label is not None:
             exclusions_layout.addWidget(folders_label)
         self.txt_excluded_folders.setMinimumWidth(0)
@@ -5258,19 +5706,21 @@ class FilterPanel(QFrame):
         self.txt_excluded_extensions.setMinimumWidth(0)
         exclusions_layout.addWidget(self.txt_excluded_extensions)
 
+        if size_label is not None:
+            exclusions_layout.addWidget(size_label)
         size_row = QHBoxLayout()
+        self.exclusions_size_row = size_row
         size_row.setContentsMargins(0, 0, 0, 0)
         size_row.setSpacing(SPACE_SM)
-        if size_label is not None:
-            size_row.addWidget(size_label)
-        size_row.addStretch()
         size_row.addWidget(self.min_size_input)
         size_row.addWidget(self.min_size_unit)
+        size_row.addStretch()
         exclusions_layout.addLayout(size_row)
 
         self.lbl_exclusions_hint.setMaximumWidth(16777215)
         exclusions_layout.addWidget(self.lbl_exclusions_hint)
         exclusions_actions = QHBoxLayout()
+        self.exclusions_actions_layout = exclusions_actions
         exclusions_actions.setContentsMargins(0, 0, 0, 0)
         exclusions_actions.setSpacing(SPACE_SM)
         exclusions_actions.addWidget(self.btn_reset_exclusions)
@@ -5281,31 +5731,185 @@ class FilterPanel(QFrame):
     def _make_accordion_header(self, text):
         return AccordionHeader(text, self)
 
+    def _rebuild_button_grid(self, grid, buttons, columns):
+        while grid.count():
+            grid.takeAt(0)
+        for column in range(4):
+            grid.setColumnStretch(column, 0)
+        for index, button in enumerate(buttons):
+            row = index // columns
+            column = index % columns
+            grid.addWidget(button, row, column, alignment=Qt.AlignmentFlag.AlignLeft)
+
+    def _set_filter_button_widths(self, buttons, section_margin):
+        scrollbar_clearance = 14
+        grid_spacing = max(0, self.display_grid.spacing())
+        usable_width = (
+            self.width()
+            - (2 * section_margin)
+            - scrollbar_clearance
+            - grid_spacing
+        )
+        button_width = max(
+            self.FILTER_SEGMENT_MIN_WIDTH,
+            min(self.FILTER_SEGMENT_MAX_WIDTH, usable_width // 2),
+        )
+        for button in buttons:
+            button.setFixedWidth(button_width)
+
+    def _update_responsive_drawer_layout(self):
+        compact = self.width() <= 280
+        section_margin = SPACE_MD if compact else SPACE_LG
+        shell_left_margin = SPACE_SM if compact else SPACE_MD
+        shell_right_margin = 2 if compact else 4
+        shell_spacing = SPACE_XS if compact else SPACE_SM
+
+        if hasattr(self, "drawer_header_layout"):
+            self.drawer_header_layout.setContentsMargins(
+                section_margin,
+                SPACE_LG if not compact else SPACE_MD,
+                SPACE_SM,
+                SPACE_MD,
+            )
+        if hasattr(self, "search_layout"):
+            self.search_layout.setContentsMargins(
+                section_margin,
+                SPACE_SM,
+                section_margin,
+                SPACE_SM,
+            )
+        if hasattr(self, "display_layout"):
+            self.display_layout.setContentsMargins(
+                section_margin,
+                SPACE_SM,
+                section_margin,
+                SPACE_SM,
+            )
+        if hasattr(self, "view_layout"):
+            self.view_layout.setContentsMargins(
+                section_margin,
+                SPACE_SM,
+                section_margin,
+                SPACE_SM,
+            )
+        if hasattr(self, "age_outer_layout"):
+            self.age_outer_layout.setContentsMargins(
+                section_margin,
+                SPACE_SM,
+                section_margin,
+                SPACE_SM,
+            )
+        if hasattr(self, "exclusions_outer_layout"):
+            self.exclusions_outer_layout.setContentsMargins(
+                section_margin,
+                SPACE_SM,
+                section_margin,
+                SPACE_SM,
+            )
+        if hasattr(self, "action_layout"):
+            self.action_layout.setContentsMargins(
+                section_margin,
+                SPACE_MD,
+                section_margin,
+                SPACE_LG,
+            )
+        if hasattr(self, "search_shell_layout"):
+            self.search_shell_layout.setContentsMargins(
+                shell_left_margin,
+                0,
+                shell_right_margin,
+                0,
+            )
+            self.search_shell_layout.setSpacing(shell_spacing)
+
+        if hasattr(self, "display_grid") and hasattr(self, "display_buttons"):
+            self._set_filter_button_widths(self.display_buttons, section_margin)
+            self._rebuild_button_grid(
+                self.display_grid,
+                self.display_buttons,
+                2,
+            )
+        if hasattr(self, "view_grid") and hasattr(self, "view_buttons"):
+            self._set_filter_button_widths(self.view_buttons, section_margin)
+            self._rebuild_button_grid(
+                self.view_grid,
+                self.view_buttons,
+                2,
+            )
+
+        if hasattr(self, "age_summary_layout"):
+            self.age_summary_layout.setDirection(
+                QBoxLayout.Direction.TopToBottom if compact
+                else QBoxLayout.Direction.LeftToRight
+            )
+        if hasattr(self, "age_manual_row"):
+            self.age_manual_row.setDirection(QBoxLayout.Direction.LeftToRight)
+            self.age_manual_row.setSpacing(shell_spacing)
+        if hasattr(self, "age_manual_label"):
+            self.age_manual_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+        if hasattr(self, "btn_apply_age"):
+            self.btn_apply_age.setMinimumWidth(52)
+            self.btn_apply_age.setMaximumWidth(52)
+            self.btn_apply_age.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+
+        if hasattr(self, "exclusions_size_row"):
+            self.exclusions_size_row.setDirection(
+                QBoxLayout.Direction.LeftToRight
+                if self._exclusions_popup_layout_active
+                else QBoxLayout.Direction.TopToBottom if compact
+                else QBoxLayout.Direction.LeftToRight
+            )
+            self.exclusions_size_row.setSpacing(shell_spacing)
+        if hasattr(self, "exclusions_actions_layout"):
+            self.exclusions_actions_layout.setDirection(
+                QBoxLayout.Direction.LeftToRight
+                if self._exclusions_popup_layout_active or not compact
+                else QBoxLayout.Direction.TopToBottom
+            )
+            self.exclusions_actions_layout.setSpacing(shell_spacing)
+        if hasattr(self, "min_size_input"):
+            expanding = self._exclusions_popup_layout_active or compact
+            self.min_size_input.setMinimumWidth(0 if expanding else 86)
+            self.min_size_input.setMaximumWidth(16777215 if expanding else 86)
+            self.min_size_input.setSizePolicy(
+                QSizePolicy.Policy.Ignored
+                if self._exclusions_popup_layout_active
+                else QSizePolicy.Policy.Expanding if expanding
+                else QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+        if hasattr(self, "min_size_unit"):
+            expanding = self._exclusions_popup_layout_active or compact
+            self.min_size_unit.setMinimumWidth(0 if expanding else 72)
+            self.min_size_unit.setMaximumWidth(16777215 if expanding else 72)
+            self.min_size_unit.setSizePolicy(
+                QSizePolicy.Policy.Ignored
+                if self._exclusions_popup_layout_active
+                else QSizePolicy.Policy.Expanding if expanding
+                else QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+
     def _toggle_collapsible_section(self, section):
         if section == "age":
-            if (
-                hasattr(self, "age_popover")
-                and (
-                    self.age_popover.isVisible()
-                    or self.age_popover.recently_hidden()
-                )
-            ):
-                self._age_section_expanded = False
-            else:
-                self._age_section_expanded = True
-                self._exclusions_section_expanded = False
+            self._age_section_expanded = True
         elif section == "exclusions":
-            if (
-                hasattr(self, "exclusions_popover")
-                and (
+            if hasattr(self, "exclusions_popover"):
+                should_close = (
                     self.exclusions_popover.isVisible()
                     or self.exclusions_popover.recently_hidden()
                 )
-            ):
+            else:
+                should_close = self._exclusions_section_expanded
+            if should_close:
                 self._exclusions_section_expanded = False
             else:
                 self._exclusions_section_expanded = True
-                self._age_section_expanded = False
         self._sync_collapsible_sections()
 
     def _sync_collapsible_sections(self):
@@ -5315,7 +5919,7 @@ class FilterPanel(QFrame):
             self.exclusions_box.setVisible(True)
             if self._age_section_expanded and self.isVisible():
                 self.exclusions_popover.hide()
-                self.age_popover.show_below(self.btn_age_toggle)
+                self.age_popover.show_below(self.age_heading)
             else:
                 self.age_popover.hide()
             if self._exclusions_section_expanded and self.isVisible():
@@ -5324,13 +5928,12 @@ class FilterPanel(QFrame):
             else:
                 self.exclusions_popover.hide()
         elif hasattr(self, 'age_box'):
-            self.age_box.setVisible(self._age_section_expanded)
+            self.age_box.setVisible(True)
             self.age_box.updateGeometry()
             self.exclusions_box.setVisible(self._exclusions_section_expanded)
             self.exclusions_box.updateGeometry()
-        if hasattr(self, 'btn_age_toggle'):
-            self.btn_age_toggle.set_expanded(self._age_section_expanded)
-            self.btn_age_toggle.updateGeometry()
+        if hasattr(self, 'age_heading'):
+            self.age_heading.updateGeometry()
         if hasattr(self, 'btn_exclusions_toggle'):
             self.btn_exclusions_toggle.set_expanded(self._exclusions_section_expanded)
             self.btn_exclusions_toggle.updateGeometry()
@@ -5338,32 +5941,29 @@ class FilterPanel(QFrame):
 
     def _on_filter_popover_closed(self, section):
         if section == "age":
-            self._age_section_expanded = False
-            self.btn_age_toggle.set_expanded(False)
+            self._age_section_expanded = True
         elif section == "exclusions":
             self._exclusions_section_expanded = False
             self.btn_exclusions_toggle.set_expanded(False)
 
     def close_popovers(self):
-        self._age_section_expanded = False
+        self._age_section_expanded = True
         self._exclusions_section_expanded = False
         if hasattr(self, "age_popover"):
             self.age_popover.hide()
         if hasattr(self, "exclusions_popover"):
             self.exclusions_popover.hide()
-        if hasattr(self, "btn_age_toggle"):
-            self.btn_age_toggle.set_expanded(False)
         if hasattr(self, "btn_exclusions_toggle"):
             self.btn_exclusions_toggle.set_expanded(False)
 
     def _update_popover_summaries(self):
-        if hasattr(self, "btn_age_toggle") and hasattr(self, "applied_age_value"):
+        if hasattr(self, "age_heading") and hasattr(self, "applied_age_value"):
             age_text = (
                 "Off"
                 if self.applied_age_value == self.AGE_FILTER_DISABLED
                 else f"{self.applied_age_value}mo"
             )
-            self.btn_age_toggle.set_text(f"Age: {age_text}")
+            self.age_heading.setText(f"Age: {age_text}")
         if hasattr(self, "btn_exclusions_toggle") and hasattr(
             self,
             "txt_excluded_folders",
@@ -5466,16 +6066,13 @@ class FilterPanel(QFrame):
         self._save_scan_exclusions_from_controls()
 
     def _restore_scan_exclusions(self):
-        raw_value = self.settings.value("scan_exclusions", "")
-        try:
-            data = json.loads(raw_value) if raw_value else {}
-        except (TypeError, ValueError):
-            data = {}
-        self._set_scan_exclusions_controls(ScanExclusions.from_dict(data))
+        # Exclusions are intentionally session-only; every launch starts clean.
+        self.settings.remove("scan_exclusions")
+        self._set_scan_exclusions_controls(ScanExclusions())
 
     def _save_scan_exclusions_from_controls(self):
         exclusions = self._scan_exclusions_from_controls()
-        self.settings.setValue("scan_exclusions", json.dumps(exclusions.to_dict()))
+        self.settings.remove("scan_exclusions")
         self._update_popover_summaries()
         self.exclusionChanged.emit()
 
@@ -5547,6 +6144,13 @@ class FilterPanel(QFrame):
         self._update_popover_summaries()
 
     def eventFilter(self, obj, event):
+        if (
+            hasattr(self, "slider")
+            and obj == self.slider
+            and event.type() == QEvent.Type.Wheel
+        ):
+            event.ignore()
+            return True
         if (
             obj == self.txt_search
             and event.type() == QEvent.Type.KeyPress
@@ -5627,6 +6231,8 @@ class MainWindow(QMainWindow):
         self.export_progress = None
         self.export_target_path = None
         self.active_extension_filter = None
+        self.applied_scan_exclusions = None
+        self.scan_exclusions_in_progress = None
         self.settings = QSettings("IBMS", "Watchdog")
         self.current_theme_name = resolve_theme_name(self.settings.value("theme", "light"))
         self.notifications_enabled = self.settings.value(
@@ -5762,52 +6368,123 @@ class MainWindow(QMainWindow):
         label.setFixedSize(80, 80)
         return label
 
+    def _themed_toolbar_icon(self, asset_name, dark_color="#ffffff", light_color="#000000", size=18):
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", asset_name)
+        pixmap = QIcon(icon_path).pixmap(QSize(size, size))
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(
+            pixmap.rect(),
+            QColor(dark_color if self.current_theme_name == "dark" else light_color),
+        )
+        painter.end()
+        return QIcon(pixmap)
+
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        vbox = QVBoxLayout(root)
+        app_layout = QVBoxLayout(root)
+        app_layout.setContentsMargins(0, 0, 0, 0)
+        app_layout.setSpacing(0)
+
+        self.app_menu = QFrame()
+        self.app_menu.setObjectName("appMenu")
+        self.app_menu.setFixedHeight(58)
+        menu_layout = QHBoxLayout(self.app_menu)
+        menu_layout.setContentsMargins(SPACE_LG, SPACE_XS, SPACE_LG, SPACE_SM)
+        menu_layout.setSpacing(SPACE_SM)
+
+        workspace = QWidget()
+        workspace.setObjectName("workspace")
+        vbox = QVBoxLayout(workspace)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
+        app_layout.addWidget(workspace, 1)
 
         # Top bar
         self.topbar = QWidget()
         self.topbar.setObjectName("topbar")
-        tb = QHBoxLayout(self.topbar)
-        tb.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
-        tb.setSpacing(SPACE_MD)
+        tb = QGridLayout(self.topbar)
+        tb.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_LG, SPACE_SM)
+        tb.setHorizontalSpacing(SPACE_MD)
+        tb.setVerticalSpacing(0)
+        tb.setColumnMinimumWidth(0, 170)
+        tb.setColumnMinimumWidth(2, 170)
+        tb.setColumnStretch(0, 1)
+        tb.setColumnStretch(2, 1)
 
-        lbl = QLabel("IBMS Watchdog")
-        lbl.setObjectName("appTitle")
-        tb.addWidget(lbl)
+        self.brand_block = QFrame()
+        self.brand_block.setObjectName("brandBlock")
+        self.brand_block.setFixedWidth(170)
+        brand_layout = QHBoxLayout(self.brand_block)
+        brand_layout.setContentsMargins(0, SPACE_XS, SPACE_SM, SPACE_XS)
+        brand_layout.setSpacing(0)
+        self.lbl_app_title = QLabel("IBMS Watchdog")
+        self.lbl_app_title.setObjectName("appTitle")
+        brand_layout.addWidget(self.lbl_app_title)
+        tb.addWidget(
+            self.brand_block,
+            0,
+            0,
+            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        self.path_action_layout = QHBoxLayout()
+        path_action_layout = self.path_action_layout
+        path_action_layout.setContentsMargins(0, 0, 0, 0)
+        path_action_layout.setSpacing(SPACE_SM)
+
+        self.path_input_shell = QFrame()
+        self.path_input_shell.setObjectName("browsePathShell")
+        self.path_input_shell.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.path_input_shell.setMinimumWidth(280)
+        self.path_input_shell.setFixedHeight(44)
+        path_input_layout = QHBoxLayout(self.path_input_shell)
+        path_input_layout.setContentsMargins(SPACE_MD, 0, SPACE_SM, 0)
+        path_input_layout.setSpacing(SPACE_SM)
 
         self.txt_path = QLineEdit()
+        self.txt_path.setObjectName("browsePathInput")
         self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.txt_path.setMinimumWidth(240)
-        self.txt_path.setFixedHeight(38)
-        self.txt_path.setPlaceholderText("Enter or browse a folder path...")
-        
-        # Add folder icon to the left of the path input
-        path_icon = QIcon.fromTheme("folder-open", QIcon.fromTheme("folder"))
-        self.txt_path.addAction(path_icon, QLineEdit.ActionPosition.LeadingPosition)
+        self.txt_path.setMinimumWidth(0)
+        self.txt_path.setFixedHeight(36)
+        self.txt_path.setPlaceholderText("Choose a folder to scan")
+        self.txt_path.setToolTip("Selected folder path")
+        self.txt_path.setReadOnly(True)
+        self.txt_path.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.txt_path.textChanged.connect(self._on_path_display_changed)
+        path_input_layout.addWidget(self.txt_path)
 
         self.btn_browse = QPushButton("Browse")
-        self.btn_browse.setObjectName("primaryBtn")
+        self.btn_browse.setObjectName("browsePathBtn")
         self.btn_browse.setToolTip("Browse folder")
+        self.btn_browse.setAccessibleName("Browse folder")
         self.btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_browse.setFixedHeight(38)
+        self.btn_browse.setFixedHeight(32)
         self.btn_browse.clicked.connect(self._browse)
-        tb.addWidget(self.txt_path)
-        tb.addWidget(self.btn_browse)
+        path_input_layout.addWidget(self.btn_browse)
 
-        self.btn_rescan = QPushButton("Re-scan")
-        self.btn_rescan.setObjectName("primaryBtn")
-        self.btn_rescan.setToolTip("Start scanning the selected folder path")
+        path_action_layout.addWidget(self.path_input_shell)
+
+        self.btn_rescan = QPushButton("Rescan")
+        self.btn_rescan.setObjectName("rescanBtn")
+        self.btn_rescan.setToolTip("Scan the selected folder again")
         self.btn_rescan.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_rescan.setFixedHeight(38)
+        self.btn_rescan.setFixedSize(80, 32)
+        self.btn_rescan.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "toolbar_refresh_green.svg"))
+        )
+        self.btn_rescan.setIconSize(QSize(18, 18))
         self.btn_rescan.clicked.connect(self.start_scan)
-        tb.addWidget(self.btn_rescan)
+        path_action_layout.addWidget(self.btn_rescan)
+        tb.addLayout(
+            path_action_layout,
+            0,
+            1,
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
 
-        self.btn_folder_browser = QPushButton("Folders")
+        self.btn_folder_browser = QPushButton("Folders Panel")
         self.btn_folder_browser.setObjectName("filterBtn")
         self.btn_folder_browser.setCheckable(True)
         self.btn_folder_browser.setChecked(True)
@@ -5818,39 +6495,71 @@ class MainWindow(QMainWindow):
         )
         self.btn_folder_browser.setIconSize(QSize(18, 18))
         self.btn_folder_browser.setFixedHeight(38)
-        self.btn_folder_browser.setMinimumWidth(92)
+        self.btn_folder_browser.setMinimumWidth(138)
         self.btn_folder_browser.clicked.connect(self._toggle_folder_browser)
-        tb.addWidget(self.btn_folder_browser)
+        self.btn_folder_browser.setProperty("menuItem", True)
+        menu_layout.addWidget(self.btn_folder_browser)
 
         self.btn_filter = QPushButton("Filters")
         self.btn_filter.setObjectName("ghostBtn")
         self.btn_filter.setCheckable(True)
         self.btn_filter.setToolTip("Toggle filter bar (Alt+F)")
         self.btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_filter.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "toolbar_filters_sliders.svg"))
+        )
+        self.btn_filter.setIconSize(QSize(18, 18))
         self.btn_filter.setFixedHeight(38)
         self.btn_filter.clicked.connect(self._toggle_filters)
-        tb.addWidget(self.btn_filter)
+        self.btn_filter.setObjectName("menuFilterBtn")
+        self.btn_filter.setProperty("menuItem", True)
+        menu_layout.addWidget(self.btn_filter)
 
-        self.btn_file_types = QPushButton("Types")
-        self.btn_file_types.setObjectName("ghostBtn")
-        self.btn_file_types.setToolTip("File Types: show disk usage by extension")
+        self.btn_file_types = QPushButton("File Extensions")
+        self.btn_file_types.setObjectName("filterBtn")
+        self.btn_file_types.setCheckable(True)
+        self.btn_file_types.setToolTip("Show disk usage by file extension")
         self.btn_file_types.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_file_types.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "file_blue.svg"))
+        )
+        self.btn_file_types.setIconSize(QSize(18, 18))
         self.btn_file_types.setFixedHeight(38)
         self.btn_file_types.setEnabled(False)
         self.btn_file_types.clicked.connect(self._show_file_types)
-        tb.addWidget(self.btn_file_types)
+        self.btn_file_types.setProperty("menuItem", True)
+        menu_layout.addWidget(self.btn_file_types)
 
-        self.theme_selector = QComboBox()
-        self.theme_selector.setObjectName("themeSelector")
-        self.theme_selector.addItem("Light", "light")
-        self.theme_selector.addItem("Dark", "dark")
-        self.theme_selector.setToolTip("Switch theme")
-        self.theme_selector.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_selector.setFixedHeight(38)
-        theme_index = self.theme_selector.findData(self.current_theme_name)
-        self.theme_selector.setCurrentIndex(max(0, theme_index))
-        self.theme_selector.currentIndexChanged.connect(self._on_theme_changed)
-        tb.addWidget(self.theme_selector)
+        self.btn_exclusions = QPushButton("Exclusions")
+        self.btn_exclusions.setObjectName("filterBtn")
+        self.btn_exclusions.setCheckable(True)
+        self.btn_exclusions.setToolTip("Choose files and folders to ignore during a scan")
+        self.btn_exclusions.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_exclusions.setIcon(self._themed_toolbar_icon("toolbar_shield_lock.svg"))
+        self.btn_exclusions.setIconSize(QSize(18, 18))
+        self.btn_exclusions.setFixedHeight(38)
+        self.btn_exclusions.setMinimumWidth(118)
+        self.btn_exclusions.setSizePolicy(
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.btn_exclusions.clicked.connect(self._toggle_exclusions_popup)
+        self.btn_exclusions.setProperty("menuItem", True)
+        menu_layout.addWidget(self.btn_exclusions)
+
+        self.btn_theme_toggle = QPushButton()
+        self.btn_theme_toggle.setObjectName("themeToggleBtn")
+        self.btn_theme_toggle.setToolTip("Toggle color scheme")
+        self.btn_theme_toggle.setAccessibleName("Toggle color scheme")
+        self.btn_theme_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_theme_toggle.setFixedSize(38, 38)
+        self.btn_theme_toggle.clicked.connect(self._on_theme_changed)
+        tb.addWidget(
+            self.btn_theme_toggle,
+            0,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
 
         self.btn_expand = QPushButton("Expand All")
         self.btn_expand.setObjectName("collapseAll")
@@ -5859,35 +6568,61 @@ class MainWindow(QMainWindow):
         self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_expand.clicked.connect(self._toggle_expand)
 
-        # Push Export + Delete to the far right
-        tb.addStretch()
-        tb.addWidget(self._vbar())
+        menu_layout.addStretch()
 
         self.btn_export = QPushButton("Export CSV")
-        self.btn_export.setObjectName("primaryBtn")
+        self.btn_export.setObjectName("ghostBtn")
         self.btn_export.setToolTip("Export files, summaries, audit data, or scan history to CSV")
         self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_export.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "toolbar_download.svg"))
+        )
+        self.btn_export.setIconSize(QSize(18, 18))
         self.btn_export.setFixedHeight(38)
+        self.btn_export.setFixedWidth(138)
+        self.btn_export.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.btn_export.clicked.connect(self._export_csv)
-        tb.addWidget(self.btn_export)
+        self.btn_export.setProperty("menuItem", True)
+        self.btn_export.setProperty("menuAction", True)
+        menu_layout.addWidget(self.btn_export)
 
         self.btn_delete = QPushButton("Delete Selected")
         self.btn_delete.setObjectName("deleteBtn")
-        self.btn_delete.setToolTip("Permanently delete selected items")
+        self.btn_delete.setToolTip("Select items to move to the Recycle Bin")
+        self.btn_delete.setAccessibleDescription(
+            "Select items to move to the Recycle Bin"
+        )
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_icon_path = os.path.join(
+            os.path.dirname(__file__),
+            "assets",
+            "toolbar_trash.svg",
+        )
+        self._delete_icon_active_path = os.path.join(
+            os.path.dirname(__file__),
+            "assets",
+            "toolbar_trash_white.svg",
+        )
+        self.btn_delete.setIcon(QIcon(self._delete_icon_path))
+        self.btn_delete.setIconSize(QSize(18, 18))
         self.btn_delete.setFixedHeight(38)
+        self.btn_delete.setFixedWidth(176)
         self.btn_delete.clicked.connect(self._delete_selected)
         self._set_delete_armed(False)
         self.btn_delete.setEnabled(False)
-        tb.addWidget(self.btn_delete)
-
+        self.btn_delete.setProperty("menuItem", True)
+        self.btn_delete.setProperty("menuAction", True)
+        menu_layout.addWidget(self.btn_delete)
+        self._update_theme_toggle_ui()
         vbox.addWidget(self.topbar)
+        vbox.addWidget(self.app_menu)
+        self._update_topbar_responsive_typography()
 
         # Main Content Area (resizable folder browser + content)
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setObjectName("mainSplitter")
         self.main_splitter.setChildrenCollapsible(False)
-        self.main_splitter.setHandleWidth(6)
+        self.main_splitter.setHandleWidth(3)
 
         # Left sidebar (folder browser only)
         self.folder_browser = FolderBrowserPanel()
@@ -5897,6 +6632,8 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.folder_browser)
 
         self.fp = FilterPanel()
+        self._filter_panel_width = self.fp.minimumWidth()
+        self.fp.btn_close.clicked.connect(self._toggle_filters)
         self.fp.btn_reset.clicked.connect(self._reset_filters)
         # Dynamic filtering
         self.fp.bg.buttonClicked.connect(lambda _btn: self._on_filter_changed())
@@ -5906,6 +6643,50 @@ class MainWindow(QMainWindow):
         self.fp.btn_apply_age.clicked.connect(self._on_age_filter_apply_clicked)
         self.fp.exclusionChanged.connect(self._on_scan_exclusions_changed)
         self.fp.btn_rescan_exclusions.clicked.connect(self._rescan_from_exclusions)
+
+        exclusions_section = self.fp.btn_exclusions_toggle.parentWidget()
+        exclusions_section.setVisible(False)
+        self.exclusions_popup_content = QWidget()
+        exclusions_popup_layout = QVBoxLayout(self.exclusions_popup_content)
+        exclusions_popup_layout.setContentsMargins(0, 0, 0, 0)
+        exclusions_popup_layout.setSpacing(SPACE_XS)
+
+        exclusions_title_row = QHBoxLayout()
+        exclusions_title_row.setContentsMargins(0, 0, 0, 0)
+        exclusions_title_row.setSpacing(SPACE_SM)
+        exclusions_popup_title = QLabel("Exclusions")
+        exclusions_popup_title.setObjectName("filterDrawerTitle")
+        exclusions_title_row.addWidget(exclusions_popup_title)
+        exclusions_title_row.addStretch(1)
+        self.lbl_exclusions_rule_count = QLabel()
+        self.lbl_exclusions_rule_count.setObjectName("exclusionsRuleCount")
+        exclusions_title_row.addWidget(self.lbl_exclusions_rule_count)
+        exclusions_popup_layout.addLayout(exclusions_title_row)
+
+        exclusions_status_row = QHBoxLayout()
+        exclusions_status_row.setContentsMargins(0, 0, 0, 0)
+        exclusions_status_row.setSpacing(SPACE_SM)
+        self.exclusions_popup_subtitle = QLabel(
+            "Changes take effect after a re-scan."
+        )
+        self.exclusions_popup_subtitle.setObjectName("filterDrawerSubtitle")
+        self.exclusions_popup_subtitle.setWordWrap(False)
+        exclusions_status_row.addWidget(self.exclusions_popup_subtitle)
+        exclusions_status_row.addStretch(1)
+        self.lbl_exclusions_pending = QLabel("Re-scan required")
+        self.lbl_exclusions_pending.setObjectName("exclusionsPendingBadge")
+        self.lbl_exclusions_pending.setVisible(False)
+        exclusions_status_row.addWidget(self.lbl_exclusions_pending)
+        exclusions_popup_layout.addLayout(exclusions_status_row)
+        exclusions_popup_layout.addSpacing(SPACE_SM)
+        exclusions_popup_layout.addWidget(self.fp.exclusions_box)
+        self.fp.prepare_exclusions_popup_layout()
+        self.exclusions_popup = FilterPopover(380, self)
+        self.exclusions_popup.set_content(self.exclusions_popup_content)
+        self.exclusions_popup.closed.connect(
+            lambda: self.btn_exclusions.setChecked(False)
+        )
+        self._update_exclusions_indicator()
         
         # View mode connections
         self.fp.rb_view_tree.toggled.connect(self._on_filter_changed)
@@ -5915,56 +6696,56 @@ class MainWindow(QMainWindow):
         self._apply_default_browse_preset(apply_now=False)
         self._update_age_controls_enabled()
         self._update_expand_control_visibility()
-        vbox.addWidget(self.fp)
-
         # Right Content Area
         self.right_content = QWidget()
         self.right_content.setObjectName("contentArea")
         right_v = QVBoxLayout(self.right_content)
-        right_v.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
-        right_v.setSpacing(SPACE_LG)
+        right_v.setContentsMargins(SPACE_XL, SPACE_MD, SPACE_XL, SPACE_MD)
+        right_v.setSpacing(SPACE_SM)
 
         # Controls row (above tree): expand / select all
         self.controls_bar = QWidget()
         controls_layout = QHBoxLayout(self.controls_bar)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(SPACE_MD)
+        controls_layout.setSpacing(SPACE_XS)
+        self.btn_expand.setObjectName("selectionControlBtn")
+        self.btn_expand.setFixedSize(104, 30)
         controls_layout.addWidget(self.btn_expand)
         self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.setObjectName("selectionControlBtn")
         self.btn_select_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_select_all.setFixedWidth(150)
-        select_all_policy = self.btn_select_all.sizePolicy()
-        select_all_policy.setRetainSizeWhenHidden(True)
-        self.btn_select_all.setSizePolicy(select_all_policy)
+        self.btn_select_all.setFixedSize(104, 30)
         self.btn_select_all.clicked.connect(self._toggle_select_all)
         controls_layout.addWidget(self.btn_select_all)
 
         self.btn_current_page_selection = QPushButton("Select Current Page")
-        self.btn_current_page_selection.setObjectName("currentPageSelectionBtn")
+        self.btn_current_page_selection.setObjectName("selectionControlBtn")
         self.btn_current_page_selection.setToolTip("Select every item shown on this page")
         self.btn_current_page_selection.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_current_page_selection.setFixedWidth(180)
+        self.btn_current_page_selection.setFixedSize(148, 30)
         self.btn_current_page_selection.setVisible(False)
         self.btn_current_page_selection.clicked.connect(self._toggle_current_page_selection)
         controls_layout.addWidget(self.btn_current_page_selection)
 
         self.btn_clear_selection = QPushButton("Unselect All")
+        self.btn_clear_selection.setObjectName("selectionControlBtn")
         self.btn_clear_selection.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear_selection.setFixedWidth(150)
-        clear_selection_policy = self.btn_clear_selection.sizePolicy()
-        clear_selection_policy.setRetainSizeWhenHidden(True)
-        self.btn_clear_selection.setSizePolicy(clear_selection_policy)
+        self.btn_clear_selection.setFixedSize(116, 30)
         self.btn_clear_selection.clicked.connect(self._unselect_all)
         self.btn_clear_selection.setVisible(False)
         
         self.btn_select_inactive = QPushButton("Select All Inactive")
+        self.btn_select_inactive.setObjectName("selectionControlBtn")
         self.btn_select_inactive.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select_inactive.setFixedSize(144, 30)
         self.btn_select_inactive.clicked.connect(self._select_inactive)
         self.btn_select_inactive.setEnabled(False)
         controls_layout.addWidget(self.btn_select_inactive)
 
         self.btn_select_empty = QPushButton("Select All Empty")
+        self.btn_select_empty.setObjectName("selectionControlBtn")
         self.btn_select_empty.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select_empty.setFixedSize(128, 30)
         self.btn_select_empty.setToolTip("No empty folders are available in the current view.")
         self.btn_select_empty.clicked.connect(self._select_empty)
         self.btn_select_empty.setEnabled(False)
@@ -5974,7 +6755,7 @@ class MainWindow(QMainWindow):
 
         self.btn_prev_page = QPushButton("<")
         self.btn_prev_page.setObjectName("pageNavBtn")
-        self.btn_prev_page.setFixedSize(34, 34)
+        self.btn_prev_page.setFixedSize(30, 30)
         self.btn_prev_page.setToolTip("Previous Page")
         self.btn_prev_page.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_prev_page.clicked.connect(self._prev_page)
@@ -5984,15 +6765,52 @@ class MainWindow(QMainWindow):
         self.lbl_page_info.setObjectName("pageInfo")
         self.lbl_page_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_page_info.setMinimumWidth(150)
+        self.lbl_page_info.setFixedHeight(30)
         controls_layout.addWidget(self.lbl_page_info)
 
         self.btn_next_page = QPushButton(">")
         self.btn_next_page.setObjectName("pageNavBtn")
-        self.btn_next_page.setFixedSize(34, 34)
+        self.btn_next_page.setFixedSize(30, 30)
         self.btn_next_page.setToolTip("Next Page")
         self.btn_next_page.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_next_page.clicked.connect(self._next_page)
         controls_layout.addWidget(self.btn_next_page)
+
+        self.type_filter_banner = QFrame()
+        self.type_filter_banner.setObjectName("activeTypeFilter")
+        type_filter_layout = QHBoxLayout(self.type_filter_banner)
+        type_filter_layout.setContentsMargins(
+            SPACE_MD,
+            SPACE_XS,
+            SPACE_MD,
+            SPACE_XS,
+        )
+        type_filter_layout.setSpacing(SPACE_SM)
+
+        type_filter_title = QLabel("File type filter")
+        type_filter_title.setObjectName("activeTypeFilterLabel")
+        type_filter_layout.addWidget(type_filter_title)
+
+        self.lbl_active_type_filter = QLabel()
+        self.lbl_active_type_filter.setObjectName("activeTypeFilterValue")
+        self.lbl_active_type_filter.setWordWrap(False)
+        type_filter_layout.addWidget(self.lbl_active_type_filter)
+
+        self.lbl_active_type_filter_meta = QLabel()
+        self.lbl_active_type_filter_meta.setObjectName("activeTypeFilterMeta")
+        self.lbl_active_type_filter_meta.setWordWrap(False)
+        type_filter_layout.addWidget(self.lbl_active_type_filter_meta)
+        type_filter_layout.addStretch()
+
+        self.btn_clear_type_filter = QPushButton("Clear type")
+        self.btn_clear_type_filter.setObjectName("activeTypeFilterClear")
+        self.btn_clear_type_filter.setToolTip("Clear the selected file type")
+        self.btn_clear_type_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_type_filter.clicked.connect(self._clear_type_filter)
+        type_filter_layout.addWidget(self.btn_clear_type_filter)
+
+        self.type_filter_banner.setVisible(False)
+        right_v.addWidget(self.type_filter_banner)
 
         self.controls_bar.setVisible(False)
         right_v.addWidget(self.controls_bar)
@@ -6022,9 +6840,9 @@ class MainWindow(QMainWindow):
         sub_lbl.setMaximumWidth(420)
 
         btn_browse_cta = QPushButton("Browse folder...")
-        btn_browse_cta.setObjectName("primaryBtn")
+        btn_browse_cta.setObjectName("emptyBrowseBtn")
         btn_browse_cta.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_browse_cta.setFixedWidth(180)
+        btn_browse_cta.setFixedWidth(168)
         btn_browse_cta.clicked.connect(self._browse)
 
         ep_layout.addStretch()
@@ -6199,11 +7017,23 @@ class MainWindow(QMainWindow):
 
         right_v.addWidget(self.tree_container, 1)
         self.main_splitter.addWidget(self.right_content)
+        self.main_splitter.addWidget(self.fp)
+        self.main_splitter.setCollapsible(0, False)
+        self.main_splitter.setCollapsible(1, False)
+        self.main_splitter.setCollapsible(2, False)
+        self.main_splitter.splitterMoved.connect(self._remember_filter_panel_width)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([240, 1000])
+        self.main_splitter.setStretchFactor(2, 0)
+        self.main_splitter.setSizes([self.folder_browser.minimumWidth(), 1000, 0])
 
-        vbox.addWidget(self.main_splitter, 1)
+        content_shell = QWidget()
+        content_shell.setObjectName("contentShell")
+        content_shell_layout = QHBoxLayout(content_shell)
+        content_shell_layout.setContentsMargins(0, 0, 0, 0)
+        content_shell_layout.setSpacing(0)
+        content_shell_layout.addWidget(self.main_splitter, 1)
+        vbox.addWidget(content_shell, 1)
 
         # Status bar
         sb = QWidget()
@@ -6243,22 +7073,61 @@ class MainWindow(QMainWindow):
         # Do NOT auto-start scan - let the user enter a path first
 
     def _on_theme_changed(self):
-        theme_name = self.theme_selector.currentData() or "light"
-        self.current_theme_name = resolve_theme_name(theme_name)
+        next_theme = "dark" if self.current_theme_name == "light" else "light"
+        self.current_theme_name = resolve_theme_name(next_theme)
         self.settings.setValue("theme", self.current_theme_name)
         apply_theme(QApplication.instance(), self.current_theme_name)
-        self.fp._update_age_label(self.fp.age_input.value())
+        self._update_theme_toggle_ui()
+        if hasattr(self, 'fp'):
+            self.fp._update_age_label(self.fp.age_input.value())
         if self.scanner_thread and self.scanner_thread.isRunning():
-            palette = current_palette()
-            self.btn_rescan.setStyleSheet(
-                f"background-color: {palette['status_danger']}; border-color: {palette['status_danger']};"
-            )
+            self._set_rescan_stop_ui()
         if hasattr(self, 'tree'):
             self._update_status_column_visibility()
             self.tree.viewport().update()
             self.tree.header().viewport().update()
         if self.file_types_dialog:
             self.file_types_dialog.update()
+
+    def _update_theme_toggle_ui(self):
+        if not hasattr(self, 'btn_theme_toggle'):
+            return
+        icon_name = "theme_moon.svg" if self.current_theme_name == "light" else "theme_sun.svg"
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", icon_name)
+        self.btn_theme_toggle.setIcon(QIcon(icon_path))
+        self.btn_theme_toggle.setIconSize(QSize(22, 22))
+        if hasattr(self, "btn_exclusions"):
+            self.btn_exclusions.setIcon(self._themed_toolbar_icon("toolbar_shield_lock.svg"))
+            self.btn_exclusions.setIconSize(QSize(18, 18))
+        button_label = "Switch to dark mode" if self.current_theme_name == "light" else "Switch to light mode"
+        self.btn_theme_toggle.setToolTip(button_label)
+        self.btn_theme_toggle.setAccessibleName(button_label)
+
+    def _set_rescan_idle_ui(self):
+        if not hasattr(self, 'btn_rescan'):
+            return
+        self.btn_rescan.setObjectName("rescanBtn")
+        self.btn_rescan.setText("Rescan")
+        self.btn_rescan.setToolTip("Scan the selected folder again")
+        self.btn_rescan.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "toolbar_refresh_green.svg"))
+        )
+        self.btn_rescan.setIconSize(QSize(18, 18))
+        self.btn_rescan.style().unpolish(self.btn_rescan)
+        self.btn_rescan.style().polish(self.btn_rescan)
+
+    def _set_rescan_stop_ui(self):
+        if not hasattr(self, 'btn_rescan'):
+            return
+        self.btn_rescan.setObjectName("stopScanBtn")
+        self.btn_rescan.setText("Stop")
+        self.btn_rescan.setToolTip("Stop the active scan")
+        self.btn_rescan.setIcon(
+            QIcon(os.path.join(os.path.dirname(__file__), "assets", "toolbar_stop_red.svg"))
+        )
+        self.btn_rescan.setIconSize(QSize(18, 18))
+        self.btn_rescan.style().unpolish(self.btn_rescan)
+        self.btn_rescan.style().polish(self.btn_rescan)
 
     def _sep(self):
         l = QLabel("-")
@@ -6307,6 +7176,25 @@ class MainWindow(QMainWindow):
             display_text = text if str(text).startswith("Total Size ") else f"Total Size {text}"
         self._set_chip_text(self.chip_browse_size, display_text)
 
+    def _known_browse_total(self):
+        root_path = getattr(self, 'current_scan_root', None)
+        root_key = self._path_key(root_path) if root_path else None
+        if (
+            root_key
+            and root_key == self.cached_folder_total_root
+            and self.cached_folder_total is not None
+        ):
+            return self.cached_folder_total
+
+        cache = getattr(self, 'folder_cache', None)
+        if cache is None:
+            return None
+        if root_path and hasattr(cache, 'folder_metadata'):
+            metadata = cache.folder_metadata(root_path)
+            if metadata is not None:
+                return metadata[0]
+        return getattr(cache, 'running_total_size', None)
+
     def _set_scanning_total_chip(self):
         running_total = 0
         if self.folder_cache is not None:
@@ -6349,13 +7237,20 @@ class MainWindow(QMainWindow):
             self.scan_detail.setText(detail)
 
     def _format_scan_duration(self, seconds):
-        seconds = int(max(0, seconds or 0))
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
+        seconds = max(0.0, float(seconds or 0.0))
+        if seconds < 10:
+            if seconds < 1:
+                return f"{seconds:.2f}s"
+            return f"{seconds:.1f}s"
+        whole_seconds = int(seconds)
+        if whole_seconds < 60:
+            return f"{whole_seconds}s"
+        hours = whole_seconds // 3600
+        minutes = (whole_seconds % 3600) // 60
+        secs = whole_seconds % 60
         if hours:
             return f"{hours}:{minutes:02d}:{secs:02d}"
-        return f"{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
 
     def _scan_stats_text(self, detail=None):
         if not detail:
@@ -6387,9 +7282,21 @@ class MainWindow(QMainWindow):
             if self.is_scanning:
                 self._set_scanning_total_chip()
             else:
-                self._set_total_summary_chip("--")
+                known_total = self._known_browse_total()
+                self._set_total_summary_chip(
+                    "--" if known_total is None else known_total
+                )
                 if self.folder_browser_scope:
-                    self._set_chip_text(self.chip_folder_size, "Folder Size calculating...")
+                    cached_scoped_total = self._cached_scoped_folder_total()
+                    self._set_chip_text(
+                        self.chip_folder_size,
+                        "Folder Size calculating..."
+                        if cached_scoped_total is None
+                        else (
+                            "Folder Size "
+                            f"{self._format_chip_size(cached_scoped_total)}"
+                        ),
+                    )
                     self.chip_folder_size.setVisible(True)
                 else:
                     self.chip_folder_size.setVisible(False)
@@ -6475,6 +7382,137 @@ class MainWindow(QMainWindow):
                 self._reposition_scroll_top_btn()
                 QTimer.singleShot(0, self._fit_tree_columns_to_viewport)
         return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        self._update_topbar_responsive_typography()
+        self._update_path_field_width()
+        super().resizeEvent(event)
+
+    def _on_path_display_changed(self, path):
+        self.txt_path.setToolTip(path or "Selected folder path")
+        self._update_path_field_width()
+
+    def _update_path_field_width(self):
+        if not hasattr(self, 'path_input_shell'):
+            return
+
+        path = self.txt_path.text().strip()
+        text_width = self.txt_path.fontMetrics().horizontalAdvance(
+            path or self.txt_path.placeholderText()
+        )
+        browse_width = self.btn_browse.width() if hasattr(self, 'btn_browse') else 74
+        desired_width = max(420, text_width + browse_width + 64)
+
+        title_width = self.lbl_app_title.sizeHint().width() if hasattr(self, 'lbl_app_title') else 0
+        theme_width = self.btn_theme_toggle.width() if hasattr(self, 'btn_theme_toggle') else 38
+        rescan_width = self.btn_rescan.width() if hasattr(self, 'btn_rescan') else 80
+        available_width = max(
+            280,
+            self.width() - title_width - theme_width - rescan_width - 128,
+        )
+        self.path_input_shell.setFixedWidth(
+            min(desired_width, 720, available_width)
+        )
+
+    def _update_topbar_responsive_typography(self):
+        if not hasattr(self, 'topbar'):
+            return
+
+        width = max(720, self.width())
+        if width >= 1400:
+            title_size = 16
+            control_size = 12
+            compact_size = 11
+        elif width >= 1200:
+            title_size = 15
+            control_size = 11
+            compact_size = 10
+        elif width >= 980:
+            title_size = 14
+            control_size = 10
+            compact_size = 9
+        else:
+            title_size = 13
+            control_size = 9
+            compact_size = 8
+        self._topbar_control_font_px = control_size
+
+        title_font = QFont(self.lbl_app_title.font())
+        title_font.setPixelSize(title_size)
+        self.lbl_app_title.setFont(title_font)
+
+        control_targets = (
+            self.txt_path,
+            self.btn_browse,
+            self.btn_rescan,
+            self.btn_folder_browser,
+            self.btn_filter,
+            self.btn_file_types,
+            self.btn_exclusions,
+            self.btn_export,
+            self.btn_delete,
+        )
+        for widget in control_targets:
+            font = QFont(widget.font())
+            font.setPixelSize(control_size)
+            widget.setFont(font)
+        toggle_font = QFont(self.btn_theme_toggle.font())
+        toggle_font.setPixelSize(compact_size)
+        self.btn_theme_toggle.setFont(toggle_font)
+
+        browse_width = max(66, self.btn_browse.fontMetrics().horizontalAdvance("Browse") + 26)
+        self.btn_browse.setFixedWidth(browse_width)
+        self._update_delete_button_layout()
+        self._update_path_field_width()
+
+    def _update_delete_button_layout(self):
+        if not hasattr(self, 'btn_delete'):
+            return
+
+        base_size = getattr(
+            self,
+            '_topbar_control_font_px',
+            self.btn_delete.font().pixelSize(),
+        )
+        if base_size <= 0:
+            base_size = 10
+        fitted_size = base_size
+        min_size = 7
+        available_text_width = max(
+            96,
+            self.btn_delete.width() - self.btn_delete.iconSize().width() - 54,
+        )
+        button_text = self.btn_delete.text()
+
+        while fitted_size > min_size:
+            fitted_font = QFont(self.btn_delete.font())
+            fitted_font.setPixelSize(fitted_size)
+            if QFontMetrics(fitted_font).horizontalAdvance(button_text) <= available_text_width:
+                break
+            fitted_size -= 1
+
+        final_font = QFont(self.btn_delete.font())
+        final_font.setPixelSize(fitted_size)
+        self.btn_delete.setFont(final_font)
+
+    def _update_delete_button_copy(self, total=0, all_pages=False):
+        self.btn_delete.setText("Delete Selected")
+        total = max(0, int(total or 0))
+        if total <= 0:
+            tooltip = "Select items to move to the Recycle Bin"
+        elif all_pages:
+            tooltip = (
+                f"Move {total:,} matching items across all pages "
+                "to the Recycle Bin"
+            )
+        else:
+            tooltip = (
+                f"Move {total:,} selected item"
+                f"{'s' if total != 1 else ''} to the Recycle Bin"
+            )
+        self.btn_delete.setToolTip(tooltip)
+        self.btn_delete.setAccessibleDescription(tooltip)
+        self._update_delete_button_layout()
 
     def _fit_tree_columns_to_viewport(self):
         if not hasattr(self, 'tree') or self.tree.model() is None:
@@ -6704,8 +7742,51 @@ class MainWindow(QMainWindow):
         is_visible = self.fp.isVisible()
         if is_visible:
             self.fp.close_popovers()
-        self.fp.setVisible(not is_visible)
+            self._filter_panel_width = max(
+                self.fp.minimumWidth(),
+                min(self.fp.width(), self.fp.maximumWidth()),
+            )
+            sizes = self.main_splitter.sizes()
+            if len(sizes) >= 3:
+                self.fp.setVisible(False)
+                self.main_splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
+        else:
+            self.fp.setVisible(True)
+            self._show_filter_panel()
         self.btn_filter.setChecked(not is_visible)
+
+    def _toggle_exclusions_popup(self, _checked=False):
+        should_close = (
+            self.exclusions_popup.isVisible()
+            or self.exclusions_popup.recently_hidden()
+        )
+        if should_close:
+            self.exclusions_popup.hide()
+            self.btn_exclusions.setChecked(False)
+            return
+        self.fp.exclusions_box.setVisible(True)
+        self.exclusions_popup.show_below(self.btn_exclusions)
+        self.btn_exclusions.setChecked(True)
+
+    def _show_filter_panel(self):
+        filter_width = max(
+            self.fp.minimumWidth(),
+            min(self._filter_panel_width, self.fp.maximumWidth()),
+        )
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 3:
+            return
+        available_right = max(420, sizes[1] + sizes[2])
+        filter_width = min(filter_width, max(self.fp.minimumWidth(), available_right - 420))
+        content_width = max(420, available_right - filter_width)
+        self.main_splitter.setSizes([sizes[0], content_width, filter_width])
+
+    def _remember_filter_panel_width(self, *_args):
+        if self.fp.isVisible() and self.fp.width() > 0:
+            self._filter_panel_width = max(
+                self.fp.minimumWidth(),
+                min(self.fp.width(), self.fp.maximumWidth()),
+            )
 
     def _apply_filters(self):
         # 1. Update proxy model so it can format the Status column correctly
@@ -6855,6 +7936,7 @@ class MainWindow(QMainWindow):
         self.search_debounce_timer.stop()
         self.applied_name_filter = ""
         self.active_extension_filter = None
+        self._update_type_filter_ui()
         blocker = QSignalBlocker(self.fp.txt_search)
         self.fp.txt_search.clear()
         del blocker
@@ -6862,8 +7944,7 @@ class MainWindow(QMainWindow):
         self._apply_default_browse_preset()
 
     def _on_scan_exclusions_changed(self):
-        if self._has_completed_scan_context():
-            self.fp.show_exclusions_rescan_hint(True)
+        self._update_exclusions_indicator()
 
     def _rescan_from_exclusions(self):
         self.fp._normalize_and_save_scan_exclusions()
@@ -6872,6 +7953,57 @@ class MainWindow(QMainWindow):
 
     def _on_scan_exclusions_summary(self, excluded_count):
         self.last_scan_excluded_count = excluded_count or 0
+
+    def _update_exclusions_indicator(self):
+        if not hasattr(self, 'btn_exclusions') or not hasattr(self, 'fp'):
+            return
+
+        current = self.fp.get_scan_exclusions().to_dict()
+        default = ScanExclusions().to_dict()
+        applied = (
+            self.scan_exclusions_in_progress
+            if self.is_scanning and self.scan_exclusions_in_progress is not None
+            else self.applied_scan_exclusions
+        )
+        rule_count = (
+            len(current["folder_names"])
+            + len(current["extensions"])
+            + int(current["min_file_size_bytes"] > 0)
+        )
+
+        if current == default and applied in (None, default):
+            state = "default"
+            text = "Exclusions: Default"
+            tooltip = "Default exclusion rules are active"
+        elif applied is not None and current == applied:
+            state = "active"
+            text = f"Exclusions: {rule_count} active"
+            tooltip = (
+                f"{rule_count} exclusion rule"
+                f"{'s are' if rule_count != 1 else ' is'} active"
+            )
+        else:
+            state = "pending"
+            text = "Exclusions: Pending"
+            tooltip = "Exclusion changes are waiting for a re-scan"
+
+        if hasattr(self, "lbl_exclusions_rule_count"):
+            self.lbl_exclusions_rule_count.setText(
+                f"{rule_count} active rule"
+                f"{'s' if rule_count != 1 else ''}"
+            )
+        if hasattr(self, "lbl_exclusions_pending"):
+            self.lbl_exclusions_pending.setVisible(state == "pending")
+
+        self.btn_exclusions.setText(text)
+        self.btn_exclusions.setToolTip(tooltip)
+        self.btn_exclusions.setProperty("exclusionState", state)
+        self.btn_exclusions.setMinimumWidth(
+            max(118, self.btn_exclusions.sizeHint().width() + SPACE_XS)
+        )
+        self.btn_exclusions.style().unpolish(self.btn_exclusions)
+        self.btn_exclusions.style().polish(self.btn_exclusions)
+        self.btn_exclusions.update()
 
     def _has_completed_scan_context(self):
         return bool(getattr(self, 'current_scan_root', None)) and not self.is_scanning
@@ -6884,6 +8016,7 @@ class MainWindow(QMainWindow):
         if not self._has_completed_scan_context():
             return
 
+        self._update_type_filter_ui()
         self.file_type_request_id += 1
         request_id = self.file_type_request_id
 
@@ -6895,7 +8028,7 @@ class MainWindow(QMainWindow):
         self.file_types_dialog.set_loading()
         self.file_types_dialog.show()
 
-        self.file_type_thread = FileTypeBreakdownThread(request_id, limit=20, parent=self)
+        self.file_type_thread = FileTypeBreakdownThread(request_id, parent=self)
         self.file_type_thread.breakdown_ready.connect(self._on_file_types_ready)
         self.file_type_thread.breakdown_failed.connect(self._on_file_types_failed)
         self.file_type_thread.finished.connect(self._cleanup_file_type_thread)
@@ -6917,6 +8050,7 @@ class MainWindow(QMainWindow):
 
     def _drill_down_file_type(self, extension):
         self.active_extension_filter = extension
+        self._update_type_filter_ui()
         self.search_debounce_timer.stop()
         self.applied_name_filter = ""
         self._cancel_running_bulk_select_thread()
@@ -6948,6 +8082,44 @@ class MainWindow(QMainWindow):
         self.sort_order = Qt.SortOrder.DescendingOrder
         self._apply_sort_indicator()
         self._apply_filters()
+
+    def _update_type_filter_ui(self):
+        if not hasattr(self, 'btn_file_types'):
+            return
+
+        is_active = self.active_extension_filter is not None
+        extension = self.active_extension_filter or "(no extension)"
+        has_extension = extension.startswith(".")
+        display_extension = extension.upper() if has_extension else extension
+        value_label = (
+            f"{display_extension} files"
+            if has_extension
+            else "Files with no extension"
+        )
+        meta_label = (
+            f"Showing {display_extension} files in Files view."
+            if has_extension
+            else "Showing files without an extension in Files view."
+        )
+        self.btn_file_types.setChecked(is_active)
+        self.btn_file_types.setText(
+            f"Extension: {display_extension}" if is_active else "File Extensions"
+        )
+        self.btn_file_types.setToolTip(
+            f"File type filter active: {extension}. Click to choose another type."
+            if is_active
+            else "Show disk usage by file extension"
+        )
+
+        if hasattr(self, 'type_filter_banner'):
+            self.lbl_active_type_filter.setText(value_label)
+            self.lbl_active_type_filter_meta.setText(meta_label)
+            self.type_filter_banner.setVisible(is_active)
+
+    def _clear_type_filter(self):
+        if self.active_extension_filter is None:
+            return
+        self._on_filter_changed(clear_extension=True)
 
     def _toggle_expand(self, checked):
         if (
@@ -7275,7 +8447,7 @@ class MainWindow(QMainWindow):
         self.excluded_paths.clear()
         self.page_only_selection_page = None
         self.cached_selected_total = None
-        self.btn_delete.setText("Delete Selected")
+        self._update_delete_button_copy()
         self._set_delete_armed(False)
         self.btn_delete.setEnabled(False)
 
@@ -7283,6 +8455,7 @@ class MainWindow(QMainWindow):
         # User manually changed a filter control - clear selections and apply
         if clear_extension:
             self.active_extension_filter = None
+            self._update_type_filter_ui()
         self._discard_current_page_selection()
         self._apply_filters()
 
@@ -8266,6 +9439,9 @@ class MainWindow(QMainWindow):
         self.folder_cache = None
         self.current_scan_root = None
         self.active_extension_filter = None
+        self.applied_scan_exclusions = None
+        self.scan_exclusions_in_progress = None
+        self._update_type_filter_ui()
         self._reset_folder_browser(None)
 
         # Reset pagination state
@@ -8292,6 +9468,7 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentIndex(0)
         self.lbl_status.setText("Ready - select a folder and click Re-scan")
         self._update_file_types_enabled()
+        self._update_exclusions_indicator()
 
     def _browse(self):
         # Use native Windows Explorer dialog
@@ -8357,6 +9534,7 @@ class MainWindow(QMainWindow):
         self.scan_progress_was_determinate = False
         self.is_scanning = True
         self.active_extension_filter = None
+        self._update_type_filter_ui()
         self.current_scan_root = os.path.normcase(os.path.normpath(path))
         self.cached_folder_total = None
         self.cached_folder_total_root = self.current_scan_root
@@ -8364,11 +9542,7 @@ class MainWindow(QMainWindow):
         self._cancel_running_totals_thread()
 
         self.lbl_status.setText("Scanning...")
-        self.btn_rescan.setText("Stop")
-        palette = current_palette()
-        self.btn_rescan.setStyleSheet(
-            f"background-color: {palette['status_danger']}; border-color: {palette['status_danger']};"
-        )
+        self._set_rescan_stop_ui()
         self._set_size_totals_pending(browse=True, page=True, selected=True)
         self.content_stack.setCurrentIndex(3)
         self._update_file_types_enabled()
@@ -8381,6 +9555,9 @@ class MainWindow(QMainWindow):
         self._set_scan_stats(None)
 
         self.fp.show_exclusions_rescan_hint(False)
+        scan_exclusions = self.fp.get_scan_exclusions()
+        self.scan_exclusions_in_progress = scan_exclusions.to_dict()
+        self._update_exclusions_indicator()
         history = get_scan_history(self.current_scan_root)
         estimated_total_items = None
         if history:
@@ -8388,7 +9565,7 @@ class MainWindow(QMainWindow):
         self.scanner_thread = ScannerThread(
             path,
             stale_months=self.fp.get_stale_months_for_scan(),
-            exclusions=self.fp.get_scan_exclusions(),
+            exclusions=scan_exclusions,
             estimated_total_items=estimated_total_items,
         )
         self.folder_cache = self.scanner_thread.cache
@@ -8567,12 +9744,27 @@ class MainWindow(QMainWindow):
                 getattr(finished_thread, "scan_indexed_count", 0)
                 or getattr(finished_thread, "scan_scanned_count", 0)
                 or 0
-            )
+        )
         self.btn_rescan.setEnabled(True)
-        self.btn_rescan.setText("Re-scan")
-        self.btn_rescan.setStyleSheet("") # reset style
+        MainWindow._set_rescan_idle_ui(self)
         self.is_scanning = False
         scan_cancelled = bool(finished_thread and finished_thread.is_cancelled)
+        if scan_cancelled:
+            self.applied_scan_exclusions = None
+        else:
+            self.applied_scan_exclusions = getattr(
+                self,
+                'scan_exclusions_in_progress',
+                None,
+            )
+        self.scan_exclusions_in_progress = None
+        update_exclusions_indicator = getattr(
+            self,
+            '_update_exclusions_indicator',
+            None,
+        )
+        if callable(update_exclusions_indicator):
+            update_exclusions_indicator()
         self.hide_partial_scan_results = False
         if not scan_cancelled:
             self.has_completed_scan = True
@@ -8625,7 +9817,23 @@ class MainWindow(QMainWindow):
                 self.scan_refresh_timer.start()
             self._update_chips_sql()
         if self.folder_cache is not None:
-            self._set_total_summary_chip(getattr(self.folder_cache, "running_total_size", 0) or 0)
+            cached_scope_lookup = getattr(
+                self,
+                '_cached_scoped_folder_total',
+                None,
+            )
+            completed_total = (
+                cached_scope_lookup(self.current_scan_root)
+                if callable(cached_scope_lookup)
+                else None
+            )
+            if completed_total is None:
+                completed_total = (
+                    getattr(self.folder_cache, "running_total_size", 0) or 0
+                )
+            self.cached_folder_total = completed_total
+            self.cached_folder_total_root = _path_key(self.current_scan_root)
+            self._set_total_summary_chip(completed_total)
         self._set_selected_summary_chip("0 B", 0, 0)
             
     def _prev_page(self):
@@ -9390,7 +10598,6 @@ class MainWindow(QMainWindow):
         self._update_status_column_visibility()
         self._update_status_metrics_visibility()
         self._set_match_status(total_matches)
-        self._update_chips_sql()
         self._do_recount()
         self.tree_model.dataChanged.connect(self._on_checked)
         self.tree_model.layoutChanged.connect(self._on_checked)
@@ -9505,7 +10712,24 @@ class MainWindow(QMainWindow):
         if self.is_scanning:
             self._set_scanning_total_chip()
         else:
-            self._set_total_summary_chip("--")
+            known_total = self._known_browse_total()
+            self._set_total_summary_chip(
+                "--" if known_total is None else known_total
+            )
+            if self.folder_browser_scope:
+                cached_scoped_total = self._cached_scoped_folder_total()
+                if cached_scoped_total is not None:
+                    self._set_chip_text(
+                        self.chip_folder_size,
+                        "Folder Size "
+                        f"{self._format_chip_size(cached_scoped_total)}",
+                    )
+                else:
+                    self._set_chip_text(
+                        self.chip_folder_size,
+                        "Folder Size unavailable",
+                    )
+                self.chip_folder_size.setVisible(True)
 
     # -------------------------------------------------------------------------
     # Selection count (debounced)
@@ -9522,7 +10746,7 @@ class MainWindow(QMainWindow):
     def _do_recount(self):
         started_at = time.perf_counter() if PERF_DEBUG else None
         if not self.tree_model:
-            self.btn_delete.setText("Delete Selected")
+            self._update_delete_button_copy()
             self._set_delete_armed(False)
             self.btn_delete.setEnabled(False)
             self._refresh_selection_buttons()
@@ -9531,9 +10755,7 @@ class MainWindow(QMainWindow):
         if self.bulk_delete_scope:
             scope = self.bulk_delete_scope
             armed = scope['total'] > 0
-            self.btn_delete.setText(
-                f"Delete Selected (All pages: {scope['total']} items)"
-            )
+            self._update_delete_button_copy(scope['total'], all_pages=True)
             self._set_delete_armed(armed)
             self.btn_delete.setEnabled(armed)
             self._refresh_selection_buttons()
@@ -9542,10 +10764,7 @@ class MainWindow(QMainWindow):
             return
         selected_paths = self._selected_roots_for_delete()
         total = len(selected_paths)
-        if total:
-            self.btn_delete.setText(f"Delete Selected ({total} item{'s' if total != 1 else ''})")
-        else:
-            self.btn_delete.setText("Delete Selected")
+        self._update_delete_button_copy(total)
         armed = total > 0
         self._set_delete_armed(armed)
         self.btn_delete.setEnabled(armed)
@@ -9556,6 +10775,9 @@ class MainWindow(QMainWindow):
 
     def _set_delete_armed(self, armed):
         self.btn_delete.setProperty("armed", bool(armed))
+        icon_path = self._delete_icon_active_path if armed else self._delete_icon_path
+        self.btn_delete.setIcon(QIcon(icon_path))
+        self._update_delete_button_layout()
         self.btn_delete.style().unpolish(self.btn_delete)
         self.btn_delete.style().polish(self.btn_delete)
         self.btn_delete.update()

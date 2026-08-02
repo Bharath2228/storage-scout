@@ -577,7 +577,7 @@ class FileIndexTool:
         cursor.execute("SELECT path FROM exclusion_hidden_folders")
         cache.mark_exclusion_hidden(path for (path,) in cursor.fetchall())
 
-    def extension_breakdown(self, limit: int = 20) -> list[tuple[str, int, int]]:
+    def extension_breakdown(self) -> list[tuple[str, int, int]]:
         cursor = self.conn.cursor()
         # Global over the current indexed scan: best answers "where did my disk space go?"
         cursor.execute(
@@ -592,20 +592,11 @@ class FileIndexTool:
         rows = cursor.fetchall()
 
         results = []
-        other_size = 0
-        other_count = 0
-        for index, (extension, total_size, file_count) in enumerate(rows):
+        for extension, total_size, file_count in rows:
             label = extension or "(no extension)"
             total_size = total_size or 0
             file_count = file_count or 0
-            if index < limit:
-                results.append((label, total_size, file_count))
-            else:
-                other_size += total_size
-                other_count += file_count
-
-        if other_count:
-            results.append(("Other", other_size, other_count))
+            results.append((label, total_size, file_count))
         return results
 
     def children_of_folder(self, folder_path: str, limit: int = 500, offset: int = 0) -> list[tuple]:

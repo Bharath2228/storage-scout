@@ -184,6 +184,20 @@ def apply_theme(app, theme_name="light"):
             border: 1px solid {border};
             border-radius: 8px;
         }}
+        QScrollArea#exportOptionsScroll,
+        QWidget#exportOptionsContent {{
+            background-color: transparent;
+            border: none;
+        }}
+        QLabel#exportOptionHelp {{
+            background-color: {accent_tint};
+            color: {text_muted};
+            border: 1px solid {border};
+            border-radius: 5px;
+            padding: {SPACE_SM}px {SPACE_MD}px;
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+        }}
         QFrame#modalSection {{
             background-color: {bg};
             border: 1px solid {border};
@@ -218,6 +232,60 @@ def apply_theme(app, theme_name="light"):
             padding: {SPACE_XS}px 0;
             font-size: {muted_size}px;
             font-weight: {muted_weight};
+        }}
+        QFrame#fileTypesSummary {{
+            background-color: {bg};
+            border: 1px solid {border};
+            border-radius: 6px;
+        }}
+        QFrame#fileTypesSummary QLabel {{
+            background-color: transparent;
+            border: none;
+        }}
+        QLabel#fileTypesMetricValue {{
+            color: {text};
+            font-size: {header_size}px;
+            font-weight: {header_weight};
+        }}
+        QLabel#fileTypesMetricLabel {{
+            color: {text_muted};
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+        }}
+        QFrame#fileTypesSummaryDivider {{
+            background-color: {border};
+            border: none;
+        }}
+        QTableWidget#fileTypesTable {{
+            background-color: {surface};
+            alternate-background-color: {surface};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 6px;
+            selection-background-color: {accent_tint};
+            selection-color: {text};
+            outline: none;
+        }}
+        QTableWidget#fileTypesTable::item {{
+            background-color: {surface};
+            color: {text};
+            border: none;
+            border-bottom: 1px solid {border};
+            padding: 0 {SPACE_SM}px;
+        }}
+        QTableWidget#fileTypesTable::item:hover {{
+            background-color: {surface_hover};
+        }}
+        QTableWidget#fileTypesTable::item:selected {{
+            background-color: {accent_tint};
+            color: {text};
+        }}
+        QTableWidget#fileTypesTable QHeaderView::section {{
+            background-color: {bg};
+            color: {text_muted};
+            border: none;
+            border-bottom: 1px solid {border};
+            padding: {SPACE_SM}px {SPACE_MD}px;
         }}
         QProgressBar#deleteProgressBar {{
             background-color: {border};
@@ -260,8 +328,152 @@ def apply_theme(app, theme_name="light"):
         QMainWindow {{ background-color: {bg}; }}
         QLabel {{ color: {text}; }}
         QWidget#topbar {{
-            background-color: {bg};
+            background-color: {surface};
             border-bottom: 1px solid {border};
+        }}
+        QFrame#brandBlock {{
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+        }}
+        QFrame#brandBlock QLabel#appTitle {{
+            background-color: transparent;
+            color: {text};
+            border: none;
+            font-weight: 700;
+        }}
+        QFrame#appMenu {{
+            background-color: {surface};
+            border-bottom: none;
+        }}
+        QLabel#workspaceTitle {{
+            color: {text};
+            font-size: {title_size}px;
+            font-weight: {title_weight};
+            padding-right: {SPACE_MD}px;
+        }}
+        QLabel#menuSectionLabel {{
+            color: {text_muted};
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            padding: {SPACE_XS}px {SPACE_SM}px;
+        }}
+        QFrame#appMenu QPushButton[menuItem="true"] {{
+            background-color: transparent;
+            color: {text_muted};
+            border: 1px solid {border};
+            border-radius: 10px;
+            min-height: 38px;
+            padding: 0 {SPACE_LG}px;
+            text-align: center;
+            font-weight: {body_weight};
+        }}
+        QFrame#appMenu QPushButton[menuItem="true"]:hover {{
+            background-color: {surface_hover};
+            border-color: {accent};
+            color: {text};
+        }}
+        QFrame#appMenu QPushButton[menuItem="true"]:checked {{
+            background-color: {accent_tint};
+            border-color: {accent};
+            color: {accent};
+            font-weight: {header_weight};
+        }}
+        QFrame#appMenu QPushButton[menuItem="true"]:disabled {{
+            background-color: transparent;
+            color: {text_muted};
+            border-color: {border};
+        }}
+        QFrame#appMenu QPushButton[menuAction="true"] {{
+            background-color: transparent;
+            color: {text_muted};
+            border: 1px solid {border};
+            border-radius: 10px;
+            min-height: 38px;
+            padding: 0 {SPACE_LG}px;
+            text-align: center;
+            font-weight: {body_weight};
+        }}
+        QFrame#appMenu QPushButton[menuAction="true"]:hover {{
+            background-color: {surface_hover};
+            border-color: {accent};
+            color: {text};
+        }}
+        QFrame#appMenu QPushButton[menuAction="true"]:pressed {{
+            background-color: {accent_tint};
+            border-color: {accent};
+            color: {text};
+        }}
+        QFrame#appMenu QPushButton#deleteBtn[menuAction="true"] {{
+            color: {status_danger};
+            border-color: {status_danger_bg};
+        }}
+        QFrame#appMenu QPushButton#deleteBtn[menuAction="true"]:hover {{
+            background-color: {status_danger_bg};
+            border-color: {status_danger};
+            color: {status_danger};
+        }}
+        QFrame#appMenu QPushButton#deleteBtn[menuAction="true"]:disabled {{
+            background-color: transparent;
+            color: {status_danger};
+            border: 1px solid {status_danger_bg};
+        }}
+        QFrame#appMenu QPushButton#deleteBtn[menuAction="true"][armed="true"] {{
+            background-color: {status_danger};
+            color: white;
+            border: 1px solid {status_danger};
+        }}
+        QFrame#appMenu QPushButton#deleteBtn[menuAction="true"][armed="true"]:hover {{
+            background-color: {status_danger};
+            border-color: {status_danger};
+            color: white;
+        }}
+        QFrame#browsePathShell {{
+            background-color: {surface};
+            border: 1px solid {border};
+            border-radius: 22px;
+        }}
+        QFrame#browsePathShell:hover {{
+            background-color: {surface_hover};
+            border-color: {border};
+        }}
+        QFrame#browsePathShell[focused="true"] {{
+            border-color: {accent};
+            background-color: {surface};
+        }}
+        QLineEdit#browsePathInput {{
+            background-color: transparent;
+            border: none;
+            color: {text};
+            padding: 0;
+            selection-background-color: {accent_tint};
+        }}
+        QLineEdit#browsePathInput:focus {{
+            border: none;
+        }}
+        QPushButton#browsePathBtn {{
+            background-color: {accent};
+            border: none;
+            border-radius: 16px;
+            min-width: 74px;
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 {SPACE_MD}px;
+            color: {on_accent};
+            font-size: {muted_size}px;
+            font-weight: {header_weight};
+        }}
+        QPushButton#browsePathBtn:hover {{
+            background-color: {accent_hover};
+        }}
+        QPushButton#browsePathBtn:pressed {{
+            background-color: {accent_pressed};
+        }}
+        QPushButton#browsePathBtn:disabled {{
+            background-color: {border};
+            border: none;
+            color: {text_muted};
         }}
         QPushButton#toolbarStyleBtn {{
             background-color: transparent;
@@ -278,6 +490,103 @@ def apply_theme(app, theme_name="light"):
             background-color: {surface};
             border-right: none;
         }}
+        QWidget#sidebar QLabel#filterDrawerTitle {{
+            font-size: {title_size}px;
+            font-weight: {title_weight};
+        }}
+        QWidget#sidebar QTreeView#folderBrowserTree {{
+            font-size: {body_size}px;
+            font-weight: {body_weight};
+        }}
+        QWidget#sidebar QLabel#modalSecondary,
+        QWidget#sidebar QPushButton#closeSidebar {{
+            font-size: {body_size}px;
+            font-weight: {body_weight};
+        }}
+        QFrame#filterDrawer {{
+            background-color: {surface};
+            border-left: 1px solid {border};
+        }}
+        QFrame#filterDrawerHeader {{
+            background-color: {surface};
+            border: none;
+        }}
+        QScrollArea#filterDrawerScroll {{
+            background-color: {surface};
+            border: none;
+        }}
+        QScrollArea#filterDrawerScroll > QWidget > QWidget,
+        QScrollArea#filterDrawerScroll QWidget#filterStagingContent {{
+            background-color: {surface};
+        }}
+        QScrollArea#filterDrawerScroll QScrollBar:vertical {{
+            background-color: {surface};
+            border: none;
+            width: 8px;
+            margin: 0;
+        }}
+        QScrollArea#filterDrawerScroll QScrollBar::handle:vertical {{
+            background-color: {border};
+            border-radius: 4px;
+            min-height: 28px;
+        }}
+        QScrollArea#filterDrawerScroll QScrollBar::handle:vertical:hover {{
+            background-color: {text_muted};
+        }}
+        QScrollArea#filterDrawerScroll QScrollBar::add-line:vertical,
+        QScrollArea#filterDrawerScroll QScrollBar::sub-line:vertical,
+        QScrollArea#filterDrawerScroll QScrollBar::add-page:vertical,
+        QScrollArea#filterDrawerScroll QScrollBar::sub-page:vertical {{
+            background: transparent;
+            border: none;
+            height: 0;
+        }}
+        QLabel#filterDrawerTitle {{
+            color: {text};
+            font-size: {title_size}px;
+            font-weight: {title_weight};
+        }}
+        QLabel#filterDrawerSubtitle {{
+            color: {text_muted};
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+        }}
+        QLabel#exclusionsRuleCount {{
+            background-color: {accent_tint};
+            color: {accent};
+            border: 1px solid {border};
+            border-radius: 9px;
+            padding: 2px {SPACE_SM}px;
+            font-size: {muted_size}px;
+            font-weight: {body_weight};
+        }}
+        QLabel#exclusionsPendingBadge {{
+            background-color: {status_warning_bg};
+            color: {status_warning};
+            border: 1px solid {status_warning_border};
+            border-radius: 9px;
+            padding: 2px {SPACE_SM}px;
+            font-size: {muted_size}px;
+            font-weight: {body_weight};
+        }}
+        QPushButton#closeFilterDrawer {{
+            background-color: transparent;
+            color: {text_muted};
+            border: 1px solid transparent;
+            border-radius: 8px;
+            padding: 0;
+            font-size: 20px;
+            font-weight: 400;
+        }}
+        QPushButton#closeFilterDrawer:hover {{
+            background-color: {surface_hover};
+            color: {text};
+            border-color: {border};
+        }}
+        QPushButton#closeFilterDrawer:pressed {{
+            background-color: {bg};
+            border-color: {accent};
+        }}
         QFrame#filterBar,
         QWidget#filterBarMain {{
             background-color: {surface};
@@ -293,12 +602,43 @@ def apply_theme(app, theme_name="light"):
         QFrame#filterBar QFrame#accordionHeader {{
             background-color: {bg};
             border: 1px solid {border};
-            border-radius: 6px;
-            padding: 0 {SPACE_SM}px;
+            border-radius: 10px;
+            padding: {SPACE_SM}px {SPACE_SM}px;
         }}
         QFrame#filterBar QFrame#accordionHeader:hover {{
             background-color: {surface_hover};
             border-color: {accent};
+        }}
+        QFrame#activeTypeFilter {{
+            background-color: {accent_tint};
+            border: 1px solid {accent};
+            border-radius: 6px;
+        }}
+        QLabel#activeTypeFilterLabel {{
+            color: {text_muted};
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+        }}
+        QLabel#activeTypeFilterValue {{
+            color: {text};
+            font-size: {body_size}px;
+            font-weight: {header_weight};
+        }}
+        QLabel#activeTypeFilterMeta {{
+            color: {text_muted};
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+        }}
+        QPushButton#activeTypeFilterClear {{
+            background-color: transparent;
+            color: {accent};
+            border: none;
+            padding: {SPACE_XS}px {SPACE_SM}px;
+            font-weight: {body_weight};
+        }}
+        QPushButton#activeTypeFilterClear:hover {{
+            background-color: {surface_hover};
+            border-radius: 4px;
         }}
         QWidget#filterPopover {{
             background-color: transparent;
@@ -306,7 +646,7 @@ def apply_theme(app, theme_name="light"):
         QFrame#filterPopoverCard {{
             background-color: {surface};
             border: 1px solid {border};
-            border-radius: 8px;
+            border-radius: 12px;
         }}
         QFrame#filterPopoverCard QFrame#ageControl,
         QFrame#filterPopoverCard QWidget#exclusionsControl {{
@@ -352,7 +692,7 @@ def apply_theme(app, theme_name="light"):
             font-weight: {header_weight};
             font-size: {header_size}px;
             letter-spacing: 0.4px;
-            color: {text_muted};
+            color: {text};
             margin-bottom: {SPACE_SM}px;
         }}
 
@@ -419,24 +759,33 @@ def apply_theme(app, theme_name="light"):
             background-color: {surface};
             image: none;
         }}
-        QRadioButton[segment="true"] {{
+        QRadioButton[exportScope="true"]:disabled {{
             background-color: {bg};
-            border: 1px solid {border};
-            border-radius: 6px;
             color: {text_muted};
+            border: 1px dashed {border};
+        }}
+        QRadioButton[exportScope="true"]::indicator:disabled {{
+            background-color: {bg};
+            border: 2px solid {border};
+        }}
+        QRadioButton[segment="true"] {{
+            background: transparent;
+            border: none;
+            color: transparent;
             font-size: {muted_size}px;
             font-weight: {muted_weight};
-            padding: 6px {SPACE_XS}px;
+            padding: 0;
             spacing: 0;
         }}
         QRadioButton[segment="true"]:hover {{
-            background-color: {surface_hover};
-            color: {text};
+            background: transparent;
+            border: none;
+            color: transparent;
         }}
         QRadioButton[segment="true"]:checked {{
-            background-color: {accent};
-            border-color: {accent};
-            color: {on_accent};
+            background: transparent;
+            border: none;
+            color: transparent;
         }}
         QRadioButton[segment="true"]::indicator {{
             width: 0;
@@ -455,7 +804,7 @@ def apply_theme(app, theme_name="light"):
         QSplitter#mainSplitter::handle {{
             background-color: {border};
             width: 1px;
-            margin: 0 2px;
+            margin: 0 1px;
         }}
         QSplitter#mainSplitter::handle:hover,
         QSplitter#mainSplitter::handle:pressed {{
@@ -463,8 +812,9 @@ def apply_theme(app, theme_name="light"):
         }}
 
         QFrame#ageControl {{
-            background-color: {bg};
-            border-radius: 8px;
+            background-color: transparent;
+            border: 1px solid {border};
+            border-radius: 12px;
         }}
         QLabel#statusMessage {{
             color: {text_muted};
@@ -475,7 +825,7 @@ def apply_theme(app, theme_name="light"):
         QLabel#statusSeparator {{
             color: {border};
             font-size: {muted_size}px;
-            padding: 0 {SPACE_SM}px;
+            padding: {SPACE_SM}px {SPACE_SM}px;
         }}
 
         
@@ -485,7 +835,7 @@ def apply_theme(app, theme_name="light"):
             border: none;
             border-radius: 0;
             padding: {SPACE_XS}px {SPACE_SM}px;
-            font-size: {muted_size}px;
+            font-size: {body_size}px;
             font-weight: {muted_weight};
         }}
         QTreeView {{
@@ -495,6 +845,13 @@ def apply_theme(app, theme_name="light"):
             outline: none;
             color: {text};
             font-weight: {body_weight};
+        }}
+        QTreeView#folderBrowserTree {{
+            font-size: {body_size}px;
+            font-weight: {body_weight};
+        }}
+        QTreeView#folderBrowserTree::item {{
+            padding: {SPACE_SM}px {SPACE_SM}px;
         }}
         QTreeView::viewport,
         QAbstractScrollArea::viewport {{
@@ -535,6 +892,44 @@ def apply_theme(app, theme_name="light"):
 
         QTreeView::branch {{
             border: none;
+        }}
+        QTreeView#folderBrowserTree::branch {{
+            background: transparent;
+            border: none;
+            border-image: none;
+            image: none;
+        }}
+        QTreeView#folderBrowserTree::branch:has-siblings:!adjoins-item,
+        QTreeView#folderBrowserTree::branch:has-siblings:adjoins-item,
+        QTreeView#folderBrowserTree::branch:!has-children:!has-siblings:adjoins-item,
+        QTreeView#folderBrowserTree::branch:!has-children:has-siblings:adjoins-item,
+        QTreeView#folderBrowserTree::branch:!has-children:has-siblings:!adjoins-item {{
+            image: none;
+            border-image: none;
+        }}
+        QTreeView#folderBrowserTree::branch:has-children:closed,
+        QTreeView#folderBrowserTree::branch:closed:has-children:has-siblings,
+        QTreeView#folderBrowserTree::branch:closed:has-children:!has-siblings {{
+            border-image: none;
+            image: url("{base_dir}/assets/{tree_right_arrow}");
+        }}
+        QTreeView#folderBrowserTree::branch:has-children:open,
+        QTreeView#folderBrowserTree::branch:open:has-children:has-siblings,
+        QTreeView#folderBrowserTree::branch:open:has-children:!has-siblings {{
+            border-image: none;
+            image: url("{base_dir}/assets/{tree_down_arrow}");
+        }}
+        QTreeView#folderBrowserTree::branch:has-children:hover:closed,
+        QTreeView#folderBrowserTree::branch:hover:closed:has-children:has-siblings,
+        QTreeView#folderBrowserTree::branch:hover:closed:has-children:!has-siblings {{
+            border-image: none;
+            image: url("{base_dir}/assets/{tree_right_hover}");
+        }}
+        QTreeView#folderBrowserTree::branch:has-children:hover:open,
+        QTreeView#folderBrowserTree::branch:hover:open:has-children:has-siblings,
+        QTreeView#folderBrowserTree::branch:hover:open:has-children:!has-siblings {{
+            border-image: none;
+            image: url("{base_dir}/assets/{tree_down_hover}");
         }}
         QTreeView::branch:has-children:closed,
         QTreeView::branch:closed:has-children:has-siblings,
@@ -637,11 +1032,48 @@ def apply_theme(app, theme_name="light"):
             letter-spacing: 0.4px;
         }}
 
+        QFrame#searchFieldShell {{
+            background-color: transparent;
+            border: 1px solid {border};
+            border-radius: 20px;
+        }}
+        QFrame#searchFieldShell:hover {{
+            background-color: transparent;
+            border-color: {border};
+        }}
+        QLabel#searchFieldIcon {{
+            background-color: transparent;
+            color: {text_muted};
+        }}
+        QLineEdit#searchFieldInput {{
+            background-color: transparent;
+            border: none;
+            color: {text};
+            placeholder-text-color: {text};
+            padding: 0;
+            selection-background-color: {accent_tint};
+            selection-color: {text};
+        }}
+        QLineEdit#searchFieldInput:focus {{
+            border: none;
+        }}
+        QPushButton#searchFieldAction {{
+            background-color: {accent};
+            border: none;
+            border-radius: 16px;
+            padding: 0;
+        }}
+        QPushButton#searchFieldAction:hover {{
+            background-color: {accent_hover};
+        }}
+        QPushButton#searchFieldAction:pressed {{
+            background-color: {accent_pressed};
+        }}
         QLineEdit#filterSearch {{
             padding: {SPACE_XS}px {SPACE_SM}px;
         }}
         QLineEdit#scanExclusionInput {{
-            background-color: {surface};
+            background-color: transparent;
             border: 1px solid {border};
             border-radius: 6px;
             color: {text};
@@ -732,9 +1164,63 @@ def apply_theme(app, theme_name="light"):
         QComboBox:focus {{
             border-color: {accent};
         }}
-        QComboBox#themeSelector {{
-            min-width: 84px;
-            padding: {SPACE_SM}px {SPACE_XL}px {SPACE_SM}px {SPACE_MD}px;
+        QPushButton#themeToggleBtn {{
+            background-color: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+            padding: 0;
+        }}
+        QPushButton#themeToggleBtn:hover {{
+            background-color: {surface_hover};
+            border-color: {border};
+        }}
+        QPushButton#themeToggleBtn:pressed {{
+            background-color: {bg};
+            border-color: {accent};
+        }}
+        QPushButton#rescanBtn {{
+            background-color: transparent;
+            color: {status_success};
+            border: none;
+            border-radius: 8px;
+            padding: 0 {SPACE_SM}px;
+            font-weight: {header_weight};
+            text-align: center;
+        }}
+        QPushButton#rescanBtn:hover {{
+            background-color: {status_success_bg};
+            color: {status_success};
+        }}
+        QPushButton#rescanBtn:pressed {{
+            background-color: {status_success_border};
+            color: {status_success};
+        }}
+        QPushButton#rescanBtn:disabled {{
+            background-color: transparent;
+            color: {text_muted};
+            border: none;
+        }}
+        QPushButton#stopScanBtn {{
+            background-color: transparent;
+            color: {status_danger};
+            border: none;
+            border-radius: 8px;
+            padding: 0 {SPACE_SM}px;
+            font-weight: {header_weight};
+            text-align: center;
+        }}
+        QPushButton#stopScanBtn:hover {{
+            background-color: {status_danger_bg};
+            color: {status_danger};
+        }}
+        QPushButton#stopScanBtn:pressed {{
+            background-color: {status_danger_border};
+            color: {status_danger};
+        }}
+        QPushButton#stopScanBtn:disabled {{
+            background-color: transparent;
+            color: {text_muted};
+            border: none;
         }}
         QComboBox::drop-down {{
             border: none;
@@ -751,16 +1237,14 @@ def apply_theme(app, theme_name="light"):
             border-color: {accent};
         }}
         QSpinBox#scanExclusionSize {{
-            min-height: 30px;
-            max-height: 30px;
+            padding: 0 {SPACE_SM}px;
         }}
         QComboBox#scanExclusionUnit {{
             background-color: {surface};
             border: 1px solid {border};
             border-radius: 6px;
             color: {text};
-            padding: {SPACE_XS}px {SPACE_SM}px;
-            min-height: 22px;
+            padding: 0 {SPACE_XL}px 0 {SPACE_SM}px;
         }}
         QComboBox#scanExclusionUnit:focus {{
             border-color: {accent};
@@ -784,6 +1268,18 @@ def apply_theme(app, theme_name="light"):
         QSpinBox::down-arrow {{
             width: 10px; height: 6px;
             image: url("{base_dir}/assets/down_arrow.svg");
+        }}
+
+        QFrame#filterDrawer QSpinBox,
+        QFrame#filterPopoverCard QSpinBox,
+        QFrame#filterPopoverCard QComboBox#scanExclusionUnit {{
+            background-color: transparent;
+        }}
+        QFrame#filterDrawer QSpinBox::up-button,
+        QFrame#filterDrawer QSpinBox::down-button,
+        QFrame#filterPopoverCard QSpinBox::up-button,
+        QFrame#filterPopoverCard QSpinBox::down-button {{
+            background-color: transparent;
         }}
 
         /* ── Base button — tactile feedback ─────────────────────────────── */
@@ -818,11 +1314,44 @@ def apply_theme(app, theme_name="light"):
             padding: {SPACE_MD}px {SPACE_LG}px;
             font-weight: {body_weight};
         }}
+        QPushButton#selectionControlBtn {{
+            background-color: transparent;
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 7px;
+            padding: 0 {SPACE_SM}px;
+            font-weight: {body_weight};
+        }}
+        QPushButton#selectionControlBtn:hover {{
+            background-color: {surface_hover};
+            border-color: {border};
+            color: {text};
+        }}
+        QPushButton#selectionControlBtn:pressed {{
+            background-color: {bg};
+            color: {text};
+        }}
+        QPushButton#emptyBrowseBtn {{
+            background-color: {accent};
+            color: {on_accent};
+            border: 1px solid {accent};
+            border-radius: 6px;
+            padding: {SPACE_MD}px {SPACE_LG}px;
+            font-weight: {header_weight};
+        }}
         QPushButton#primaryBtn:hover {{
             background-color: {accent_hover};
             border-color: {accent_hover};
         }}
+        QPushButton#emptyBrowseBtn:hover {{
+            background-color: {accent_hover};
+            border-color: {accent_hover};
+        }}
         QPushButton#primaryBtn:pressed {{
+            background-color: {accent_pressed};
+            border-color: {accent_pressed};
+        }}
+        QPushButton#emptyBrowseBtn:pressed {{
             background-color: {accent_pressed};
             border-color: {accent_pressed};
         }}
@@ -860,9 +1389,12 @@ def apply_theme(app, theme_name="light"):
             background-color: transparent;
             color: {text_muted};
             border: 1px solid {border};
-            border-radius: 6px;
+            border-radius: 8px;
             padding: {SPACE_MD}px {SPACE_LG}px;
             font-weight: {body_weight};
+        }}
+        QFrame#filterDrawer QPushButton#resetFilters {{
+            color: {text};
         }}
         QPushButton#ghostBtn:hover,
         QPushButton#collapseAll:hover,
@@ -884,6 +1416,12 @@ def apply_theme(app, theme_name="light"):
         QPushButton#deleteBtn:pressed {{
             background-color: {bg};
             color: {text};
+        }}
+        QPushButton#closeSidebar {{
+            padding: 0 {SPACE_MD}px;
+            font-size: {muted_size}px;
+            font-weight: {muted_weight};
+            text-align: center;
         }}
 
 
@@ -910,6 +1448,28 @@ def apply_theme(app, theme_name="light"):
             background-color: {accent_pressed};
             border-color: {accent_pressed};
             color: white;
+        }}
+        QPushButton#filterBtn[exclusionState="active"] {{
+            background-color: {accent_tint};
+            border-color: {accent};
+            color: {accent};
+            font-weight: {header_weight};
+        }}
+        QPushButton#filterBtn[exclusionState="active"]:hover {{
+            background-color: {surface_hover};
+            border-color: {accent_hover};
+            color: {accent_hover};
+        }}
+        QPushButton#filterBtn[exclusionState="pending"] {{
+            background-color: {status_warning_bg};
+            border-color: {status_warning_border};
+            color: {status_warning};
+            font-weight: {header_weight};
+        }}
+        QPushButton#filterBtn[exclusionState="pending"]:hover {{
+            background-color: {status_warning_bg};
+            border-color: {status_warning};
+            color: {status_warning};
         }}
 
         QPushButton#deleteBtn:disabled {{
@@ -940,26 +1500,29 @@ def apply_theme(app, theme_name="light"):
 
         /* ── Sidebar actions ─────────────────────────────────────────────── */
         QPushButton#resetExclusions {{
-            background-color: transparent;
+            background-color: {surface};
             color: {accent};
-            border: none;
-            padding: {SPACE_XS}px 0;
-            font-size: {muted_size}px;
-            font-weight: {muted_weight};
-            text-align: left;
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 0 {SPACE_MD}px;
+            font-size: {body_size}px;
+            font-weight: {body_weight};
+            text-align: center;
         }}
         QPushButton#resetExclusions:hover {{
+            background-color: {surface_hover};
+            border-color: {accent};
             color: {accent_hover};
-            text-decoration: underline;
         }}
         QFrame#accordionHeader {{
             background-color: transparent;
-            border: none;
-            border-radius: 6px;
-            padding: {SPACE_SM}px 0;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            padding: {SPACE_SM}px {SPACE_SM}px;
         }}
         QFrame#accordionHeader:hover {{
             background-color: {surface_hover};
+            border-color: {border};
         }}
         QLabel#accordionChevron {{
             background-color: transparent;
@@ -974,6 +1537,14 @@ def apply_theme(app, theme_name="light"):
             font-weight: {header_weight};
             letter-spacing: 0.4px;
         }}
+        QLabel#ageSectionHeading {{
+            background-color: transparent;
+            border: none;
+            color: {text};
+            font-size: {header_size}px;
+            font-weight: {header_weight};
+            padding: 0;
+        }}
         QFrame#accordionHeader:hover QLabel#accordionChevron,
         QFrame#accordionHeader:hover QLabel#accordionTitle {{
             color: {text};
@@ -983,6 +1554,11 @@ def apply_theme(app, theme_name="light"):
             color: {text_muted};
             font-size: {muted_size}px;
             font-weight: {muted_weight};
+        }}
+        QLabel#ageManualHint {{
+            color: {text};
+            font-size: {muted_size}px;
+            font-weight: {body_weight};
         }}
 
         /* ── Delete button ───────────────────────────────────────────────── */
@@ -1022,6 +1598,10 @@ def apply_theme(app, theme_name="light"):
             color: {text};
             background-color: {surface_hover};
             border-radius: 4px;
+        }}
+        QFrame#filterDrawer QLabel#manualLabel,
+        QFrame#filterPopoverCard QLabel#manualLabel {{
+            color: {text};
         }}
 
         QLabel#appTitle {{
