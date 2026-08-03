@@ -678,57 +678,137 @@ class DeleteProgressDialog(QDialog):
     def __init__(self, total, parent=None):
         super().__init__(parent)
         self._allow_close = False
+        self.total = int(total or 0)
+        self.done = 0
+        self.current_path = ""
+        self.started_at = time.time()
+        self.current_started_at = self.started_at
+        self.cancel_requested_flag = False
         self.setWindowTitle("Deleting items")
         self.setModal(True)
-        self.setFixedSize(520, 190)
+        self.setFixedSize(620, 310)
         self.setObjectName("modalDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_XL, SPACE_XL, SPACE_XL, SPACE_XL)
         layout.setSpacing(SPACE_MD)
 
-        self.title_label = QLabel("Moving items to the Recycle Bin")
+        item_word = "item" if self.total == 1 else "items"
+        self.title_label = QLabel(f"Moving {self.total:,} {item_word} to the Recycle Bin")
         self.title_label.setObjectName("modalTitle")
         layout.addWidget(self.title_label)
 
-        self.count_label = QLabel(f"Deleting 0 of {total}")
+        self.count_label = QLabel(f"Moved 0 of {self.total:,} {item_word}")
         self.count_label.setObjectName("modalDetail")
         layout.addWidget(self.count_label)
 
+        self.remaining_label = QLabel(f"Remaining: {self.total:,} {item_word}")
+        self.remaining_label.setObjectName("modalSecondary")
+        layout.addWidget(self.remaining_label)
+
         self.progress = QProgressBar()
-        self.progress.setRange(0, total)
+        self.progress.setRange(0, self.total)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         self.progress.setObjectName("deleteProgressBar")
         layout.addWidget(self.progress)
 
-        self.path_label = QLabel("Preparing deletion...")
-        self.path_label.setObjectName("modalSecondary")
-        self.path_label.setWordWrap(True)
-        self.path_label.setMinimumHeight(36)
-        layout.addWidget(self.path_label)
+        details = QFrame()
+        details.setObjectName("modalSection")
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        details_layout.setSpacing(SPACE_XS)
+
+        self.current_item_label = QLabel("Current item: Preparing deletion...")
+        self.current_item_label.setObjectName("modalDetail")
+        self.current_item_label.setWordWrap(True)
+        details_layout.addWidget(self.current_item_label)
+
+        self.location_label = QLabel("Location: --")
+        self.location_label.setObjectName("modalSecondary")
+        self.location_label.setWordWrap(True)
+        details_layout.addWidget(self.location_label)
+
+        self.elapsed_label = QLabel("Elapsed: 00:00")
+        self.elapsed_label.setObjectName("modalSecondary")
+        details_layout.addWidget(self.elapsed_label)
+
+        self.working_label = QLabel("Working: preparing current item...")
+        self.working_label.setObjectName("modalSecondary")
+        details_layout.addWidget(self.working_label)
+
+        layout.addWidget(details)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel after current item")
         self.cancel_button.setObjectName("modalCancel")
+        self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_button.clicked.connect(self._cancel)
         btn_row.addWidget(self.cancel_button)
         layout.addLayout(btn_row)
 
+        self.status_timer = QTimer(self)
+        self.status_timer.setInterval(1000)
+        self.status_timer.timeout.connect(self._refresh_live_status)
+        self.status_timer.start()
+
+    def _format_elapsed(self, seconds):
+        seconds = max(0, int(seconds or 0))
+        minutes, secs = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _refresh_live_status(self):
+        elapsed = self._format_elapsed(time.time() - self.started_at)
+        current_elapsed = self._format_elapsed(time.time() - self.current_started_at)
+        self.elapsed_label.setText(f"Elapsed: {elapsed}")
+        if self.done >= self.total and self.total:
+            self.working_label.setText("Working: finalizing...")
+        elif self.current_path:
+            self.working_label.setText(f"Working on current item: {current_elapsed}")
+        else:
+            self.working_label.setText(f"Working: preparing current item... {elapsed}")
+
     def _cancel(self):
+        self.cancel_requested_flag = True
         self.cancel_button.setEnabled(False)
-        self.cancel_button.setText("Stopping...")
-        self.count_label.setText(self.count_label.text() + "  - stopping")
+        self.cancel_button.setText("Cancel requested")
+        self.working_label.setText("Cancel requested - finishing current item...")
         self.cancel_requested.emit()
 
     def update_progress(self, done, total, path):
+        path = path or ""
+        if path != self.current_path:
+            self.current_path = path
+            self.current_started_at = time.time()
+        self.done = int(done or 0)
+        self.total = int(total or 0)
         self.progress.setMaximum(total)
         self.progress.setValue(done)
-        self.count_label.setText(f"Deleting {done} of {total}")
-        self.path_label.setText(path)
+        item_word = "item" if self.total == 1 else "items"
+        remaining = max(0, self.total - self.done)
+        remaining_word = "item" if remaining == 1 else "items"
+        self.count_label.setText(f"Moved {self.done:,} of {self.total:,} {item_word}")
+        self.remaining_label.setText(f"Remaining: {remaining:,} {remaining_word}")
+
+        normalized = os.path.normpath(path) if path else ""
+        item_name = os.path.basename(normalized) if normalized else "Preparing deletion..."
+        location = os.path.dirname(normalized) if normalized else "--"
+        self.current_item_label.setText(f"Current item: {item_name or normalized}")
+        self.current_item_label.setToolTip(path)
+        self.location_label.setText(f"Location: {location or '--'}")
+        self.location_label.setToolTip(path)
+        if self.cancel_requested_flag:
+            self.working_label.setText("Cancel requested - finishing current item...")
+        else:
+            self._refresh_live_status()
 
     def closeEvent(self, event):
+        if hasattr(self, 'status_timer'):
+            self.status_timer.stop()
         if self._allow_close:
             event.accept()
             return
@@ -6267,7 +6347,7 @@ class FilterPanel(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("IBMS Folder Watchdog - Exchange Drive Scanner")
+        self.setWindowTitle("Watchdog")
         self.resize(1200, 720)
 
         self.scanner_thread = None
@@ -11466,8 +11546,7 @@ class MainWindow(QMainWindow):
 
     def _on_delete_progress(self, done, total, path):
         if self.delete_progress:
-            current = self._short_path_for_progress(path)
-            self.delete_progress.update_progress(done, total, current)
+            self.delete_progress.update_progress(done, total, path)
         self.lbl_status.setText(f"Deleting {done} of {total}...")
 
     def _on_delete_finished(self, deleted_count, errors, cancelled, deleted_paths):

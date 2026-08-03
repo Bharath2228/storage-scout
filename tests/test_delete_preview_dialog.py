@@ -14,6 +14,7 @@ from src.main_window import (
     DeletePreviewDialog,
     DeletePreviewThread,
     DeleteAuthDialog,
+    DeleteProgressDialog,
     summarize_paths_batch,
 )
 
@@ -197,6 +198,53 @@ class DeleteAuthDialogTests(unittest.TestCase):
                 dialog.submit_button.cursor().shape(),
                 Qt.CursorShape.PointingHandCursor,
             )
+        finally:
+            dialog.close()
+
+
+class DeleteProgressDialogTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_progress_dialog_shows_counts_path_and_elapsed_status(self):
+        dialog = DeleteProgressDialog(6)
+        try:
+            dialog.update_progress(1, 6, r"C:\Users\Bharath\Desktop\Test\Main")
+
+            self.assertEqual(
+                dialog.title_label.text(),
+                "Moving 6 items to the Recycle Bin",
+            )
+            self.assertEqual(dialog.count_label.text(), "Moved 1 of 6 items")
+            self.assertEqual(dialog.remaining_label.text(), "Remaining: 5 items")
+            self.assertEqual(dialog.current_item_label.text(), "Current item: Main")
+            self.assertEqual(
+                dialog.location_label.text(),
+                r"Location: C:\Users\Bharath\Desktop\Test",
+            )
+            self.assertTrue(dialog.elapsed_label.text().startswith("Elapsed: "))
+            self.assertTrue(
+                dialog.working_label.text().startswith("Working on current item: ")
+            )
+        finally:
+            dialog.close()
+
+    def test_progress_cancel_shows_cancel_requested_state(self):
+        dialog = DeleteProgressDialog(2)
+        try:
+            emitted = []
+            dialog.cancel_requested.connect(lambda: emitted.append(True))
+
+            dialog._cancel()
+
+            self.assertEqual(dialog.cancel_button.text(), "Cancel requested")
+            self.assertFalse(dialog.cancel_button.isEnabled())
+            self.assertEqual(
+                dialog.working_label.text(),
+                "Cancel requested - finishing current item...",
+            )
+            self.assertEqual(emitted, [True])
         finally:
             dialog.close()
 
