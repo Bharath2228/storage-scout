@@ -110,8 +110,8 @@ class FilteredTotalsTests(unittest.TestCase):
                 7,
                 {
                     "empty_n": 0,
-                    "inactive_folders": 0,
-                    "inactive_files": 0,
+                    "inactive_folders": 5233,
+                    "inactive_files": 50118,
                     "folder_total": 150,
                     "folder_file_count": 2,
                     "filtered_total": 100,
@@ -121,7 +121,42 @@ class FilteredTotalsTests(unittest.TestCase):
 
             self.assertEqual(window.chip_browse_size.text(), "Total Size 150.0 B")
             self.assertEqual(window.chip_filtered_size.text(), "Search Size 100.0 B")
+            self.assertEqual(
+                window.chip_inactive_folders.text(),
+                "Inactive: 5,233 folders · 50,118 files",
+            )
+            window._set_selected_summary_chip("1.5 GB", 12, 3456)
+            self.assertEqual(
+                window.chip_selected_size.text(),
+                "Selected: 3,456 files, 12 folders · 1.5 GB",
+            )
             self.assertFalse(window.chip_filtered_size.isHidden())
+        finally:
+            window.close()
+
+    def test_empty_results_clear_stale_page_and_status_metrics(self):
+        window = MainWindow()
+        try:
+            window.is_scanning = False
+            window._set_total_summary_chip("1.1 GB")
+            window._set_chip_text(
+                window.chip_inactive_folders,
+                "Inactive: 0 folders · 11 files",
+            )
+            window._set_chip_text(window.chip_page_size, "Page calculating...")
+
+            window._set_empty_result_metrics()
+
+            self.assertEqual(
+                window.chip_inactive_folders.text(),
+                "Inactive: 0 folders · 0 files",
+            )
+            self.assertEqual(window.chip_page_size.text(), "Page 0 B")
+            self.assertEqual(
+                window.chip_selected_size.text(),
+                "Selected: 0 files, 0 folders · 0 B",
+            )
+            self.assertEqual(window.chip_browse_size.text(), "Total Size 1.1 GB")
         finally:
             window.close()
 

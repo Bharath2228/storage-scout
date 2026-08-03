@@ -7068,19 +7068,24 @@ class MainWindow(QMainWindow):
         sbl.addStretch()
         
         self.chip_empty = self._chip("Empty 0", "chipEmpty")
-        self.chip_inactive_folders = self._chip("Inactive 0 folders", "chipInactive")
-        self.chip_inactive_files = self._chip("0 files", "chipInactive")
+        self.chip_inactive_folders = self._chip(
+            "Inactive: 0 folders · 0 files",
+            "chipInactive",
+        )
+        self.chip_inactive_files = self.chip_inactive_folders
         self.chip_browse_size = self._chip("Total Size --", "chipSpace")
         self.chip_folder_size = self._chip("Folder Size --", "chipSpace")
         self.chip_folder_size.setVisible(False)
         self.chip_filtered_size = self._chip("Filtered Size --", "chipSpace")
         self.chip_filtered_size.setVisible(False)
         self.chip_page_size = self._chip("Page --", "chipSpace")
-        self.chip_selected_size = self._chip("0 B selected · 0 folders, 0 files", "chipSpace")
+        self.chip_selected_size = self._chip(
+            "Selected: 0 files, 0 folders · 0 B",
+            "chipSpace",
+        )
 
         sbl.addWidget(self.chip_empty)
         sbl.addWidget(self.chip_inactive_folders)
-        sbl.addWidget(self.chip_inactive_files)
         sbl.addWidget(self.chip_browse_size)
         sbl.addWidget(self.chip_folder_size)
         sbl.addWidget(self.chip_filtered_size)
@@ -7231,9 +7236,37 @@ class MainWindow(QMainWindow):
         size_part = "--" if size_text is None else size_text
         folders_part = "--" if folder_count is None else f"{folder_count:,}"
         files_part = "--" if file_count is None else f"{file_count:,}"
-        text = f"{size_part} selected · {folders_part} folders, {files_part} files"
+        text = (
+            f"Selected: {files_part} files, {folders_part} folders · {size_part}"
+        )
         self._set_chip_text(self.chip_selected_size, text)
         self.chip_selected_size.setVisible(True)
+
+    def _set_empty_result_metrics(self):
+        self.totals_request_id += 1
+        self._cancel_running_totals_thread()
+        self.totals_refresh_pending = False
+        self.totals_refresh_options = None
+        self._set_chip_text(self.chip_empty, "Empty 0")
+        self._set_chip_text(
+            self.chip_inactive_folders,
+            "Inactive: 0 folders · 0 files",
+        )
+        self._set_chip_text(self.chip_page_size, "Page 0 B")
+        self.cached_selected_total = 0
+        self._set_selected_summary_chip("0 B", 0, 0)
+        if self.active_extension_filter is not None:
+            extension = self.active_extension_filter or "(no extension)"
+            self._set_chip_text(
+                self.chip_filtered_size,
+                f"Type {extension} Size 0 B",
+            )
+            self.chip_filtered_size.setVisible(True)
+        elif self.applied_name_filter:
+            self._set_chip_text(self.chip_filtered_size, "Search Size 0 B")
+            self.chip_filtered_size.setVisible(True)
+        else:
+            self.chip_filtered_size.setVisible(False)
 
     def _scan_path_html(self, path):
         palette = current_palette()
@@ -7337,7 +7370,7 @@ class MainWindow(QMainWindow):
             if self.is_scanning:
                 self.chip_selected_size.setVisible(False)
             elif self._selected_roots_for_delete():
-                self._set_chip_text(self.chip_selected_size, "Selected calculating...")
+                self._set_chip_text(self.chip_selected_size, "Selected: calculating...")
             else:
                 self.cached_selected_total = 0
                 self._set_selected_summary_chip("0 B", 0, 0)
@@ -9646,8 +9679,7 @@ class MainWindow(QMainWindow):
 
         # Reset status chips
         self.chip_empty.setText("Empty 0")
-        self.chip_inactive_folders.setText("Inactive 0 folders")
-        self.chip_inactive_files.setText("0 files")
+        self.chip_inactive_folders.setText("Inactive: 0 folders · 0 files")
         self._set_total_summary_chip("--")
         self._set_chip_text(self.chip_page_size, "Page --")
         self._set_selected_summary_chip("0 B", 0, 0)
@@ -10755,6 +10787,7 @@ class MainWindow(QMainWindow):
                 self.content_stack.setCurrentIndex(2)
                 self.controls_bar.setVisible(False)
                 self._set_page_controls_visible(False)
+                self._set_empty_result_metrics()
                 debug_info = result.get('debug_info')
                 self.lbl_status.setText(
                     f"No matching items found ({debug_info})"
@@ -10828,8 +10861,11 @@ class MainWindow(QMainWindow):
             self.cached_folder_total_root = root_key
 
         self._set_chip_text(self.chip_empty, f"Empty {result['empty_n']}")
-        self._set_chip_text(self.chip_inactive_folders, f"Inactive {result['inactive_folders']} folders")
-        self._set_chip_text(self.chip_inactive_files, f"{result['inactive_files']} files")
+        self._set_chip_text(
+            self.chip_inactive_folders,
+            f"Inactive: {result['inactive_folders']:,} folders · "
+            f"{result['inactive_files']:,} files",
+        )
         if self.is_scanning:
             self._set_scanning_total_chip()
             return
