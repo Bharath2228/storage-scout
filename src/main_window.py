@@ -1638,7 +1638,7 @@ class DeletePreviewDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Delete preview")
         self.setModal(True)
-        self.setFixedSize(560, 350)
+        self.setFixedSize(600, 390)
         self.setObjectName("modalDialog")
         self.preview_paths = []
         self.preview_payload = {}
@@ -1655,15 +1655,21 @@ class DeletePreviewDialog(QDialog):
         self.detail_label.setObjectName("modalDetail")
         layout.addWidget(self.detail_label)
 
+        self.primary_count_label = QLabel("")
+        self.primary_count_label.setObjectName("fileTypesMetricValue")
+        self.primary_count_label.setVisible(False)
+        layout.addWidget(self.primary_count_label)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
         self.progress.setObjectName("deleteProgressBar")
         layout.addWidget(self.progress)
 
-        self.summary_widget = QWidget()
+        self.summary_widget = QFrame()
+        self.summary_widget.setObjectName("modalSection")
         summary_layout = QGridLayout(self.summary_widget)
-        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         summary_layout.setHorizontalSpacing(SPACE_XL)
         summary_layout.setVerticalSpacing(SPACE_SM)
         summary_layout.setColumnStretch(0, 1)
@@ -1731,25 +1737,64 @@ class DeletePreviewDialog(QDialog):
 
         layout.addStretch()
 
-        btn_row = QHBoxLayout()
+        note_row = QHBoxLayout()
+        note_row.setSpacing(SPACE_SM)
+        note_row.setContentsMargins(0, 0, 0, 0)
+        recycle_icon = QLabel()
+        recycle_icon.setPixmap(
+            QIcon(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "assets",
+                    "toolbar_trash.svg",
+                )
+            ).pixmap(QSize(18, 18))
+        )
+        recycle_icon.setFixedSize(22, 22)
+        recycle_icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        note_row.addWidget(recycle_icon)
         self.recycle_bin_note = QLabel(
             "Items will be moved to the Recycle Bin and can be restored."
         )
         self.recycle_bin_note.setObjectName("modalSecondary")
         self.recycle_bin_note.setWordWrap(True)
-        self.recycle_bin_note.setMaximumWidth(280)
-        btn_row.addWidget(self.recycle_bin_note)
+        note_row.addWidget(self.recycle_bin_note, 1)
+        layout.addLayout(note_row)
+
+        btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setObjectName("modalCancel")
+        self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_button.setAutoDefault(False)
+        self.cancel_button.setDefault(False)
         self.cancel_button.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_button)
         self.delete_button = QPushButton("Delete Selected")
         self.delete_button.setObjectName("destructiveBtn")
+        self.delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_button.setAutoDefault(False)
+        self.delete_button.setDefault(False)
+        self.delete_button.setIcon(
+            QIcon(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "assets",
+                    "toolbar_trash_white.svg",
+                )
+            )
+        )
+        self.delete_button.setIconSize(QSize(18, 18))
         self.delete_button.setEnabled(False)
         self.delete_button.clicked.connect(self.accept)
         btn_row.addWidget(self.delete_button)
         layout.addLayout(btn_row)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def apply_preview(self, payload):
         data = dict(payload or {})
@@ -1766,6 +1811,7 @@ class DeletePreviewDialog(QDialog):
         if size is None:
             self.title_label.setText("Preparing delete preview")
             self.detail_label.setText("Calculating selected items and size...")
+            self.primary_count_label.setVisible(False)
             self.summary_widget.setVisible(False)
             self.preview_note.setVisible(False)
             self.error_label.setVisible(False)
@@ -1776,6 +1822,9 @@ class DeletePreviewDialog(QDialog):
 
         self.title_label.setText("Review before deleting")
         self.detail_label.setText("Check the deletion summary before continuing.")
+        item_word = "item" if delete_operations == 1 else "items"
+        self.primary_count_label.setText(f"{delete_operations:,} {item_word} to delete")
+        self.primary_count_label.setVisible(True)
         self.matched_value.setText(f"{total:,}")
         self.recycle_count_value.setText(f"{delete_operations:,}")
         self.folders_value.setText(f"{folders:,}")
@@ -1797,6 +1846,7 @@ class DeletePreviewDialog(QDialog):
     def show_error(self, message):
         self.title_label.setText("Could not calculate preview")
         self.detail_label.setText("The delete summary could not be prepared.")
+        self.primary_count_label.setVisible(False)
         self.summary_widget.setVisible(False)
         self.preview_note.setVisible(False)
         self.error_label.setText(message)
@@ -1827,8 +1877,9 @@ class DeleteAuthDialog(QDialog):
 
         size_text = format_size(self.total_size) if self.total_size else "0 B"
         detail = QLabel(
-            f"Enter your credentials to permanently delete {self.item_count} "
-            f"item{'s' if self.item_count != 1 else ''} ({size_text})."
+            f"Enter your credentials to move {self.item_count} "
+            f"item{'s' if self.item_count != 1 else ''} ({size_text}) "
+            "to the Recycle Bin."
         )
         detail.setObjectName("modalDetail")
         detail.setWordWrap(True)
@@ -1856,21 +1907,29 @@ class DeleteAuthDialog(QDialog):
         btn_row.addStretch()
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setObjectName("modalCancel")
+        self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_button.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_button)
         self.submit_button = QPushButton("Authorize delete")
         self.submit_button.setObjectName("primaryBtn")
+        self.submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.submit_button.clicked.connect(self._submit)
         btn_row.addWidget(self.submit_button)
         layout.addLayout(btn_row)
 
         self.password_input.returnPressed.connect(self._submit)
-        self.username_input.returnPressed.connect(self.password_input.setFocus)
+        self.username_input.returnPressed.connect(self._username_return_pressed)
         self.username_input.textChanged.connect(self._update_lockout_state)
         self.cooldown_timer = QTimer(self)
         self.cooldown_timer.setInterval(1000)
         self.cooldown_timer.timeout.connect(self._update_lockout_state)
         self._update_lockout_state()
+
+    def _username_return_pressed(self):
+        if self.password_input.text():
+            self._submit()
+        else:
+            self.password_input.setFocus()
 
     def _update_lockout_state(self):
         remaining = self.store.lockout_remaining(self.username_input.text())
@@ -7067,18 +7126,18 @@ class MainWindow(QMainWindow):
         sbl.addWidget(self.lbl_status)
         sbl.addStretch()
         
-        self.chip_empty = self._chip("Empty 0", "chipEmpty")
+        self.chip_empty = self._chip("Empty: 0 items", "chipEmpty")
         self.chip_inactive_folders = self._chip(
             "Inactive: 0 folders · 0 files",
             "chipInactive",
         )
         self.chip_inactive_files = self.chip_inactive_folders
-        self.chip_browse_size = self._chip("Total Size --", "chipSpace")
+        self.chip_browse_size = self._chip("Total Size: --", "chipSpace")
         self.chip_folder_size = self._chip("Folder Size --", "chipSpace")
         self.chip_folder_size.setVisible(False)
         self.chip_filtered_size = self._chip("Filtered Size --", "chipSpace")
         self.chip_filtered_size.setVisible(False)
-        self.chip_page_size = self._chip("Page --", "chipSpace")
+        self.chip_page_size = self._chip("Current Page Size: --", "chipSpace")
         self.chip_selected_size = self._chip(
             "Selected: 0 files, 0 folders · 0 B",
             "chipSpace",
@@ -7193,11 +7252,11 @@ class MainWindow(QMainWindow):
 
     def _set_total_summary_chip(self, text):
         if text is None:
-            display_text = "Total Size --"
+            display_text = "Total Size: --"
         elif isinstance(text, (int, float)):
-            display_text = f"Total Size {self._format_chip_size(int(text))}"
+            display_text = f"Total Size: {self._format_chip_size(int(text))}"
         else:
-            display_text = text if str(text).startswith("Total Size ") else f"Total Size {text}"
+            display_text = text if str(text).startswith("Total Size: ") else f"Total Size: {text}"
         self._set_chip_text(self.chip_browse_size, display_text)
 
     def _known_browse_total(self):
@@ -7247,12 +7306,12 @@ class MainWindow(QMainWindow):
         self._cancel_running_totals_thread()
         self.totals_refresh_pending = False
         self.totals_refresh_options = None
-        self._set_chip_text(self.chip_empty, "Empty 0")
+        self._set_chip_text(self.chip_empty, "Empty: 0 items")
         self._set_chip_text(
             self.chip_inactive_folders,
             "Inactive: 0 folders · 0 files",
         )
-        self._set_chip_text(self.chip_page_size, "Page 0 B")
+        self._set_chip_text(self.chip_page_size, "Current Page Size: 0 B")
         self.cached_selected_total = 0
         self._set_selected_summary_chip("0 B", 0, 0)
         if self.active_extension_filter is not None:
@@ -7365,7 +7424,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.chip_filtered_size.setVisible(False)
         if page:
-            self._set_chip_text(self.chip_page_size, "Page calculating...")
+            self._set_chip_text(self.chip_page_size, "Current Page Size: calculating...")
         if selected:
             if self.is_scanning:
                 self.chip_selected_size.setVisible(False)
@@ -7941,7 +8000,14 @@ class MainWindow(QMainWindow):
         ):
             widget.setVisible(show_status)
         if hasattr(self, 'chip_page_size'):
-            self.chip_page_size.setVisible(not self.fp.rb_all.isChecked())
+            paginated_files_view = bool(
+                self.fp.get_view_mode() == "Files"
+                and self.current_total_matches > 2000
+                and not self.current_lazy_show_all_tree
+            )
+            self.chip_page_size.setVisible(
+                not self.fp.rb_all.isChecked() or paginated_files_view
+            )
         if hasattr(self, 'chip_selected_size'):
             self.chip_selected_size.setVisible((not self.is_scanning) and show_status)
 
@@ -9678,10 +9744,10 @@ class MainWindow(QMainWindow):
         self.totals_request_id += 1
 
         # Reset status chips
-        self.chip_empty.setText("Empty 0")
+        self.chip_empty.setText("Empty: 0 items")
         self.chip_inactive_folders.setText("Inactive: 0 folders · 0 files")
         self._set_total_summary_chip("--")
-        self._set_chip_text(self.chip_page_size, "Page --")
+        self._set_chip_text(self.chip_page_size, "Current Page Size: --")
         self._set_selected_summary_chip("0 B", 0, 0)
         self._update_status_metrics_visibility()
 
@@ -10668,7 +10734,7 @@ class MainWindow(QMainWindow):
     def _start_path_total_thread(self, request_id, kind, paths):
         if not paths:
             if kind == 'page':
-                self._set_chip_text(self.chip_page_size, "Page 0 B")
+                self._set_chip_text(self.chip_page_size, "Current Page Size: 0 B")
             else:
                 self.cached_selected_total = 0
                 self._set_selected_summary_chip("0 B", 0, 0)
@@ -10860,7 +10926,7 @@ class MainWindow(QMainWindow):
             self.cached_folder_total = result['folder_total']
             self.cached_folder_total_root = root_key
 
-        self._set_chip_text(self.chip_empty, f"Empty {result['empty_n']}")
+        self._set_chip_text(self.chip_empty, f"Empty: {result['empty_n']:,} items")
         self._set_chip_text(
             self.chip_inactive_folders,
             f"Inactive: {result['inactive_folders']:,} folders · "
@@ -10913,7 +10979,7 @@ class MainWindow(QMainWindow):
             files = 0
 
         if kind == 'page':
-            self._set_chip_text(self.chip_page_size, f"Page {format_size(size)}")
+            self._set_chip_text(self.chip_page_size, f"Current Page Size: {format_size(size)}")
             return
 
         self.cached_selected_total = size
@@ -10929,7 +10995,7 @@ class MainWindow(QMainWindow):
             return
 
         if kind == 'page':
-            self._set_chip_text(self.chip_page_size, "Page --")
+            self._set_chip_text(self.chip_page_size, "Current Page Size: --")
             return
 
         self.cached_selected_total = None

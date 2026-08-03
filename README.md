@@ -1,117 +1,160 @@
-# 📁 IBMS Watchdog — Exchange Drive Scanner
+# IBMS Watchdog
 
-A professional desktop application designed for **scanning, auditing, and safely managing** shared network drives, NAS, and local storage. It helps IT administrators and users identify stale data and reclaim storage space with confidence.
+IBMS Watchdog is a Windows desktop application for scanning, reviewing, exporting, and safely cleaning up local folders, mapped drives, and NAS shares. It builds a local SQLite index so large directory trees can be searched and filtered without repeatedly walking the storage device.
 
-Built with **Python 3.10+** and **PyQt6**, featuring a modern, responsive interface.
+## Features
 
----
+- Background scanning for local paths, mapped drives, and UNC network shares.
+- Folder browser panel for scoping results to a specific directory.
+- Tree, files-only, and folders-only result views.
+- Show All, Inactive, Empty, and Videos filters.
+- Configurable age threshold with explicit application.
+- Scan exclusions for folder names, file extensions, and minimum file size.
+- Search and file-extension analysis.
+- Paginated results with current-page and all-pages selection.
+- Persistent manual selection exclusions while moving between pages.
+- Folder, page, filtered-result, and selected-item size summaries.
+- CSV exports for listings, file types, folder summaries, delete audit records, and scan history.
+- Recoverable deletion through the Windows Recycle Bin.
+- Username and password authorization before deletion.
+- Light and dark themes.
+- Windows notifications after long scans or background completion.
 
-## ✨ Key Features
+## Requirements
 
-| Feature | Description |
-| :--- | :--- |
-| **🔍 Background Scanning** | High-performance recursive scanning that runs in a background thread to keep the UI responsive. |
-| **🚥 Smart Classification** | Automatically categorizes folders as **Active**, **Inactive**, or **Empty** based on usage. |
-| **🗓️ Flexible Filtering** | Filter results by status, specific date ranges, or a sliding "Age Threshold" (3–24 months). |
-| **🛡️ Safe Deletion** | Integrated with `send2trash` — all deletions move to the **Recycle Bin** for easy recovery. |
-| **📂 Explorer Integration** | Double-click any item or use the action button to open its location in Windows Explorer instantly. |
-| **📊 Audit Reports** | Export your filtered view to a **CSV report** for documentation or further analysis. |
-| **🎨 Premium UI** | A clean, professional light-themed interface with color-coded status badges and smooth interaction. |
+- Windows 10 or Windows 11
+- Python 3.10 or newer
+- Read access to folders being scanned
+- Delete permission for items that will be moved to the Recycle Bin
 
----
+Network-share behavior depends on the permissions and capabilities of the NAS or file server. A mapped drive such as `Z:\` and a UNC path such as `\\server\share` are both supported.
 
-## 🛠️ Project Structure
+## Installation
+
+Open PowerShell in the project directory and create a virtual environment:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+If PowerShell blocks environment activation, run this once for the current terminal:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+## Running the Application
+
+```powershell
+python main.py
+```
+
+Use **Browse** to choose a directory. Configure exclusions before scanning when necessary, then select **Re-scan** to rebuild the index with those rules.
+
+## Filters and Navigation
+
+The folder panel and result filters work together:
+
+- Selecting a folder scopes the result area to that folder.
+- Display filters limit results to inactive items, empty folders, videos, or all indexed items.
+- View modes control whether results appear as a tree, files only, or folders only.
+- The age threshold applies after pressing **Go**.
+- File Extensions opens a size and count breakdown; selecting an extension filters the result view.
+- Exclusions are scan-time rules. Changing them requires a re-scan.
+
+When results span multiple pages, page selection and all-pages selection are separate. Manual unchecks are retained when navigating away from a page and returning to it.
+
+## CSV Export
+
+The Export CSV dialog supports several report types and scopes. Available listing scopes include:
+
+- Current page
+- All items matching the current filters
+- Entire scan
+- Selected items
+- Current bulk-delete scope
+
+Columns can be enabled individually. CSV files use the Windows list separator when available so exported values open in separate Excel columns on systems that use either commas or semicolons.
+
+## Secured Data
+
+Default security data location:
+
+```text
+%APPDATA%\IBMS\Watchdog\
+|-- auth_store.json
+|-- auth_lockout.json
+`-- delete_audit.log
+```
+
+This local authorization is intended to prevent casual or accidental deletion on shared workstations. It is not a replacement for Windows, Active Directory, or NAS access controls.
+
+## Runtime Data
+
+The application creates runtime files under `data/`:
+
+```text
+data/
+|-- file_index.db
+|-- file_index.db-shm
+|-- file_index.db-wal
+`-- scan_history.json
+```
+
+These files are generated locally and should not be committed. The database can be rebuilt by running another scan.
+
+Application preferences such as theme and notification settings are stored through `QSettings("IBMS", "Watchdog")`.
+
+## Project Structure
 
 ```text
 Watchdog/
-|-- data/                # Runtime database, history, and legacy local data
-|-- tests/               # Automated regression tests
-|-- tools/               # Administrative utilities
-├── main.py              # Application entry point
-├── requirements.txt     # Python dependencies
-├── README.md            # Documentation
-└── src/
-    ├── scanner.py       # Multi-threaded scanning logic & classification engine
-    ├── models.py        # Custom TreeModel for high-performance data handling
-    ├── main_window.py   # Primary UI components and user interactions
-    ├── theme.py         # Professional QSS styling engine
-    └── assets/          # SVG iconography and visual resources
+|-- main.py                    Application entry point
+|-- requirements.txt           Runtime Python dependencies
+|-- src/
+|   |-- main_window.py         Main UI, filters, selection, export, and deletion flow
+|   |-- scanner.py             Background scan thread
+|   |-- file_index_tool.py     SQLite schema, indexing, and scan implementation
+|   |-- folder_cache.py        In-memory folder hierarchy and size cache
+|   |-- models.py              Qt tree and proxy models
+|   |-- scan_exclusions.py     Exclusion rule parsing and matching
+|   |-- scan_history.py        Scan-history persistence
+|   |-- auth.py                Delete authorization and audit logging
+|   |-- theme.py               Light and dark QSS themes
+|   `-- assets/                Application icons
+|-- tools/
+|   `-- setup_auth.py          Delete-user administration
+|-- tests/                     Automated regression tests
+`-- data/                      Generated local index and history
 ```
 
----
+## Running Tests
 
-## 🚀 Getting Started
-
-### Prerequisites
-- **Windows OS** (optimized for Explorer integration)
-- **Python 3.10+**
-
-### Installation
-
-1. **Clone the repository**
-   ```powershell
-   git clone https://github.com/IBMS-Offenburg/Watchdog.git
-   cd Watchdog
-   ```
-
-2. **Setup Virtual Environment**
-   ```powershell
-   python -m venv venv
-   .\venv\Scripts\Activate.ps1
-   ```
-
-3. **Install Dependencies**
-   ```powershell
-   pip install -r requirements.txt
-   ```
-
-4. **Run Application**
-   ```powershell
-   python main.py
-   ```
-
----
-
-## 🧠 Classification Logic
-
-The "Watchdog" uses a sophisticated approach to identify stale data:
-
-- **🟢 Active**: Folders or files modified within the user-defined **Age Threshold**.
-- **🟠 Inactive**: Items that haven't been touched since the threshold date.
-- **🔴 Empty**: Folders that contain no files, even if they have sub-folders (which are also checked).
-- **🔵 Pending**: Items currently being analyzed by the background scanner.
-
----
-
-## 🛡️ Safety First
-
-- **No Permanent Deletion**: The "Delete Selected" action never bypasses the Recycle Bin.
-- **Double Confirmation**: Users must confirm any bulk deletion through a native system dialog.
-- **Delete Authorization**: Deletion requires a pre-configured username and password every time.
-- **Scan Interruption**: You can stop a running scan at any time without losing the data already collected.
-
-### Delete authorization setup
-
-Authorized delete users are managed outside the running app:
+The test suite uses Python's standard `unittest` framework:
 
 ```powershell
-python tools/setup_auth.py --add-user jsmith
-python tools/setup_auth.py --remove-user jsmith
-python tools/setup_auth.py --list-users
+python -m unittest discover -s tests -v
 ```
 
-Passwords are stored as salted PBKDF2 hashes in `%APPDATA%\IBMS\Watchdog\auth_store.json`, never plaintext. Delete authorization and completion events are appended to `%APPDATA%\IBMS\Watchdog\delete_audit.log`. Existing files in the project's `data` directory are copied there once when needed.
+Tests use Qt's offscreen platform and do not require the application window to remain visible.
 
-This local authorization is deterrence-grade protection for shared workstations. It is not a substitute for enterprise identity controls. On Windows, the app restricts the credential, lockout, and audit files to the current Windows account.
+## Troubleshooting
 
----
+### A NAS path scans slowly
 
-## 📈 Development & Contributions
+Confirm that the share is reachable in Windows Explorer and that the current Windows account has permission to enumerate it. NAS performance depends on latency, server load, and the number of directory entries.
 
-The application is modularized for easy maintenance:
-- To modify **UI layout**, look into `main_window.py`.
-- To adjust **Visual Styles**, edit `theme.py`.
-- To update **Scanning Rules**, see `scanner.py`.
+### A mapped drive is missing
 
----
-*Created for IBMS Offenburg — Reclaiming storage, one folder at a time.*
+Mapped drives can differ between elevated and non-elevated Windows sessions. Run Watchdog under the same Windows account and privilege level used to map the drive, or browse to the UNC path directly.
+
+### Deletion fails
+
+Verify that an authorized user is configured, the current account has delete permission, and the target storage supports the Windows Recycle Bin operation used by `Send2Trash`.
+
+### Notifications do not appear
+
+Windows system-tray support and notification permissions must be enabled. Status messages inside the application continue to work when system notifications are unavailable.

@@ -50,10 +50,10 @@
   },
   "c:\\users\\bharath\\desktop\\ibms\\watchdog": {
     "item_count": 86,
-    "last_scan_duration_secs": 0.16607110000040848,
-    "last_scanned_at": 1785772810.303748,
+    "last_scan_duration_secs": 0.1879348999937065,
+    "last_scanned_at": 1785787622.767327,
     "root": "c:\\users\\bharath\\desktop\\ibms\\watchdog",
-    "total_size": 1141718690
+    "total_size": 1141658906
   },
   "c:\\users\\bharath\\desktop\\main": {
     "item_count": 9324,
@@ -63,11 +63,11 @@
     "total_size": 30024427085
   },
   "c:\\users\\bharath\\desktop\\test": {
-    "item_count": 20815,
-    "last_scan_duration_secs": 3.1737759000097867,
-    "last_scanned_at": 1785786142.8893125,
+    "item_count": 16849,
+    "last_scan_duration_secs": 2.6529851999948733,
+    "last_scanned_at": 1785788283.1644714,
     "root": "c:\\users\\bharath\\desktop\\test",
-    "total_size": 31226164216
+    "total_size": 13102012762
   },
   "c:\\users\\bharath\\documents": {
     "item_count": 81,

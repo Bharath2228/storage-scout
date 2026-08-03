@@ -119,7 +119,7 @@ class FilteredTotalsTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(window.chip_browse_size.text(), "Total Size 150.0 B")
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 150.0 B")
             self.assertEqual(window.chip_filtered_size.text(), "Search Size 100.0 B")
             self.assertEqual(
                 window.chip_inactive_folders.text(),
@@ -143,7 +143,7 @@ class FilteredTotalsTests(unittest.TestCase):
                 window.chip_inactive_folders,
                 "Inactive: 0 folders · 11 files",
             )
-            window._set_chip_text(window.chip_page_size, "Page calculating...")
+            window._set_chip_text(window.chip_page_size, "Current Page Size: calculating...")
 
             window._set_empty_result_metrics()
 
@@ -151,12 +151,29 @@ class FilteredTotalsTests(unittest.TestCase):
                 window.chip_inactive_folders.text(),
                 "Inactive: 0 folders · 0 files",
             )
-            self.assertEqual(window.chip_page_size.text(), "Page 0 B")
+            self.assertEqual(window.chip_page_size.text(), "Current Page Size: 0 B")
             self.assertEqual(
                 window.chip_selected_size.text(),
                 "Selected: 0 files, 0 folders · 0 B",
             )
-            self.assertEqual(window.chip_browse_size.text(), "Total Size 1.1 GB")
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 1.1 GB")
+        finally:
+            window.close()
+
+    def test_show_all_files_view_shows_page_size_only_when_paginated(self):
+        window = MainWindow()
+        try:
+            window.fp.rb_all.setChecked(True)
+            window.fp.rb_view_files.setChecked(True)
+            window.current_lazy_show_all_tree = False
+
+            window.current_total_matches = 4001
+            window._update_status_metrics_visibility()
+            self.assertFalse(window.chip_page_size.isHidden())
+
+            window.current_total_matches = 2000
+            window._update_status_metrics_visibility()
+            self.assertTrue(window.chip_page_size.isHidden())
         finally:
             window.close()
 
@@ -215,7 +232,7 @@ class FilteredTotalsTests(unittest.TestCase):
 
             window._set_size_totals_pending(browse=True)
 
-            self.assertEqual(window.chip_browse_size.text(), "Total Size 12.0 KB")
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 12.0 KB")
             self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
         finally:
             window.close()
@@ -243,7 +260,7 @@ class FilteredTotalsTests(unittest.TestCase):
 
             window._on_totals_failed(9, "temporary read error")
 
-            self.assertEqual(window.chip_browse_size.text(), "Total Size 12.0 KB")
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 12.0 KB")
             self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
         finally:
             window.close()
