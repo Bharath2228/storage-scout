@@ -12,7 +12,7 @@ IBMS Watchdog is a Windows desktop application for scanning, reviewing, exportin
 - Shows total size, folder size, current page size, filtered size, and selected size.
 - Exports CSV reports for listings, file types, folder summaries, delete audit records, and scan history.
 - Moves deleted items to the Windows Recycle Bin.
-- Requires a Watchdog username/password before deletion.
+- Requires a username/password before deletion.
 - Supports light/dark theme and Windows notifications.
 
 ## Requirements
@@ -33,7 +33,7 @@ PowerShell:
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip [if required]
 python -m pip install -r requirements.txt
 ```
 
@@ -48,12 +48,13 @@ Windows Command Prompt:
 ```bat
 python -m venv venv
 venv\Scripts\activate.bat
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip [if required]
 python -m pip install -r requirements.txt
 ```
 
 ## Run
 
+Try to run the application inside the virtual environment (venv).
 PowerShell or Command Prompt:
 
 ```bat
@@ -94,7 +95,7 @@ data\auth_store.json
 
 This file stores usernames, salts, and password hashes. It does **not** store plain-text passwords.
 
-Because `data\auth_store.json` is inside the project, it can be committed to GitHub so every cloned copy uses the same Watchdog delete authorization users. Anyone with the correct Watchdog username/password can authorize deletes in the app, but Windows/NAS permissions still decide whether the actual file operation succeeds.
+Because `data\auth_store.json` is inside the project, it can be committed to GitHub so every cloned copy uses the same delete authorization users. Anyone with the correct username/password can authorize deletes in the app, but Windows/NAS permissions still decide whether the actual file operation succeeds.
 
 ## Important Files
 
