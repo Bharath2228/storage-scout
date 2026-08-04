@@ -1,7 +1,19 @@
+import os
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSortFilterProxyModel
 from PyQt6.QtGui import QFont, QIcon
+from .theme import FONT_FAMILY, TYPE_SCALE, safe_point_size
+
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+FOLDER_ICON = QIcon(os.path.join(ASSETS_DIR, "folder_blue.svg"))
+FILE_ICON = QIcon(os.path.join(ASSETS_DIR, "file_blue.svg"))
+
+VIDEO_EXTENSIONS = (
+    ".3g2", ".3gp", ".avi", ".divx", ".flv", ".m2ts", ".m4v",
+    ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".ogv",
+    ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
+)
 
 
 def format_size(size_bytes):
@@ -32,6 +44,8 @@ class TreeItem:
         self.childItems = []
         self.checkState = Qt.CheckState.Unchecked
         self.explicitlyChecked = False
+        self.children_loaded = False
+        self.children_loading = False
 
     def appendChild(self, item):
         self.childItems.append(item)
@@ -45,7 +59,7 @@ class TreeItem:
         return len(self.childItems)
 
     def columnCount(self):
-        return 7  # Name, Type, Last Modified, Age, Size, Status, Action
+        return 6  # Name, Type, Last Modified, Age, Size, Status
 
     def data(self, column):
         if column == 0:
@@ -66,8 +80,6 @@ class TreeItem:
             return format_size(self.itemData.get('size', 0))
         if column == 5:
             return self.itemData.get('status', '')
-        if column == 6:
-            return "queued" if self.checkState == Qt.CheckState.Checked else "Open"
         return None
 
     def row(self):
@@ -79,8 +91,16 @@ class TreeItem:
 class WatchdogTreeModel(QAbstractItemModel):
     def __init__(self, root_data, parent=None):
         super().__init__(parent)
+        self.view_mode = 'Tree'
+        self.sort_column = 3
+        self.sort_order = Qt.SortOrder.DescendingOrder
         self.rootItem = TreeItem({'name': 'Root'})
         self._setupModelData(root_data, self.rootItem)
+
+    def set_sort_header_state(self, column, order):
+        self.sort_column = column
+        self.sort_order = order
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self.columnCount() - 1)
 
     def _setupModelData(self, root_data, root_item):
         if not root_data:
@@ -92,9 +112,34 @@ class WatchdogTreeModel(QAbstractItemModel):
             for child_data in data_node.get('children', []):
                 child_item = TreeItem(child_data, parent_item)
                 parent_item.appendChild(child_item)
-                if child_data.get('children'):
-                    stack.append((child_data, child_item))
+                child_item.children_loaded = bool(child_data.get('_children_loaded', False))
+                if child_data.get('is_dir', False):
+                    if not child_data.get('children') and not child_item.children_loaded:
+                        dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+                        child_item.appendChild(TreeItem(dummy_data, child_item))
+                    else:
+                        stack.append((child_data, child_item))
 
+    def update_sizes_from_cache(self, cache):
+        if cache is None:
+            return
+
+        changed_indexes = []
+        stack = [self.rootItem]
+        while stack:
+            item = stack.pop()
+            item_data = item.itemData
+            if item_data.get('is_dir') and item_data.get('path'):
+                key = cache._key(item_data.get('path'))
+                if key in cache.folder_sizes:
+                    new_size = cache.folder_sizes.get(key, 0) or 0
+                    if item_data.get('size', 0) != new_size:
+                        item_data['size'] = new_size
+                        changed_indexes.append(self.createIndex(item.row(), 4, item))
+            stack.extend(item.childItems)
+
+        for index in changed_indexes:
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole])
 
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
@@ -110,41 +155,251 @@ class WatchdogTreeModel(QAbstractItemModel):
             parentItem = parent.internalPointer()
         return parentItem.childCount()
 
+    def hasChildren(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return self.rootItem.childCount() > 0
+        item = parent.internalPointer()
+        if not item.itemData.get('is_dir'):
+            return False
+        # If already loaded and empty, hide the expand chevron
+        if getattr(item, 'children_loaded', False) and item.childCount() == 0:
+            return False
+        return True
+
+    def load_children(self, parent_index):
+        if not parent_index.isValid():
+            return
+        
+        item = parent_index.internalPointer()
+        if getattr(item, 'children_loaded', False):
+            return
+            
+        item.children_loaded = True
+        path = item.itemData.get('path')
+        if not path:
+            return
+
+        # Remove dummy child if present
+        if item.childCount() == 1 and item.child(0).itemData.get('_is_dummy'):
+            self.beginRemoveRows(parent_index, 0, 0)
+            item.childItems.pop(0)
+            self.endRemoveRows()
+            
+        from .file_index_tool import FileIndexTool
+        tool = FileIndexTool()
+        cursor = tool.conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT f.path, f.name, f.is_folder, f.size, f.modified_time, f.parent_path, "
+                "(SELECT 1 FROM file_index child WHERE child.parent_path = f.path LIMIT 1) "
+                "FROM file_index f WHERE f.parent_path = ? "
+                "ORDER BY f.is_folder DESC, f.name ASC",
+                (path,)
+            )
+            rows = cursor.fetchall()
+        except Exception:
+            rows = []
+        finally:
+            tool.close()
+            
+        if not rows:
+            # Emit layoutChanged to tell QTreeView that chevron should be hidden
+            self.layoutChanged.emit()
+            return
+            
+        options = getattr(self, 'options', {})
+        age_cutoff = options.get('age_cutoff')
+        status_filter = options.get('status_filter')
+        videos_only = options.get('videos_only', False)
+        
+        new_items = []
+        for c_path, c_name, c_is_folder, c_size, c_modified_time, c_parent_path, c_has_child in rows:
+            # Video filter
+            if videos_only and not c_is_folder:
+                ext = os.path.splitext(c_name)[1].lower()
+                if ext not in VIDEO_EXTENSIONS:
+                    continue
+            
+            # Age filter
+            is_stale = (c_modified_time <= age_cutoff) if age_cutoff else True
+            status = 'Inactive' if is_stale else 'Active'
+            
+            # Empty folder check using subquery result
+            if c_is_folder:
+                if c_has_child is None:
+                    status = 'Empty'
+            
+            # Status filter
+            if status_filter == 'Inactive' and status == 'Active':
+                continue
+            if status_filter == 'Empty' and status != 'Empty':
+                continue
+            if status_filter == 'Active' and status != 'Active':
+                continue
+                
+            child_data = {
+                'name': c_name,
+                'path': c_path,
+                'is_dir': bool(c_is_folder),
+                'size': c_size or 0,
+                'last_modified': c_modified_time,
+                'status': status,
+                'children': [],
+                '_is_page_result': True,
+                'location': c_parent_path,
+                'display_location': c_parent_path,
+            }
+            new_items.append(child_data)
+            
+        if not new_items:
+            # Emit layoutChanged to tell QTreeView that chevron should be hidden
+            self.layoutChanged.emit()
+            return
+            
+        self.beginInsertRows(parent_index, item.childCount(), item.childCount() + len(new_items) - 1)
+        for child_data in new_items:
+            child_item = TreeItem(child_data, item)
+            # Inherit parent checkstate
+            child_item.checkState = item.checkState
+            if child_data.get('is_dir'):
+                dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+                child_item.appendChild(TreeItem(dummy_data, child_item))
+            item.appendChild(child_item)
+        self.endInsertRows()
+
+    def begin_async_child_load(self, parent_index):
+        if not parent_index.isValid():
+            return None
+
+        item = parent_index.internalPointer()
+        if (
+            not item.itemData.get('is_dir')
+            or item.children_loaded
+            or item.children_loading
+        ):
+            return None
+
+        item.children_loading = True
+        path = item.itemData.get('path')
+
+        if path:
+            return path
+
+        item.children_loading = False
+        item.children_loaded = True
+        return None
+
+    def finish_async_child_load(self, parent_index, child_nodes):
+        if not parent_index.isValid():
+            return
+
+        item = parent_index.internalPointer()
+
+        if item.childCount() == 1 and item.child(0).itemData.get('_is_dummy'):
+            self.beginRemoveRows(parent_index, 0, 0)
+            item.childItems.pop(0)
+            self.endRemoveRows()
+
+        item.children_loading = False
+        item.children_loaded = True
+
+        if not child_nodes:
+            self.layoutChanged.emit()
+            return
+
+        self.beginInsertRows(parent_index, item.childCount(), item.childCount() + len(child_nodes) - 1)
+        for child_data in child_nodes:
+            child_item = TreeItem(child_data, item)
+            child_item.checkState = item.checkState
+            child_item.children_loaded = bool(child_data.get('_children_loaded', False))
+            if child_data.get('is_dir') and not child_item.children_loaded:
+                dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+                child_item.appendChild(TreeItem(dummy_data, child_item))
+            item.appendChild(child_item)
+        self.endInsertRows()
+
+    def fail_async_child_load(self, parent_index):
+        if not parent_index.isValid():
+            return
+
+        item = parent_index.internalPointer()
+        item.children_loading = False
+
+        if item.childCount() == 0:
+            dummy_data = {'name': 'Loading...', 'is_dir': False, '_is_dummy': True}
+            self.beginInsertRows(parent_index, 0, 0)
+            item.appendChild(TreeItem(dummy_data, item))
+            self.endInsertRows()
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
 
         item = index.internalPointer()
+        if item.itemData.get('_is_dummy'):
+            if role == Qt.ItemDataRole.DisplayRole and index.column() == 0:
+                return "Loading..."
+            return None
+
+        col = index.column()
+        is_tree = self.view_mode == 'Tree'
 
         if role == Qt.ItemDataRole.DisplayRole:
-            return item.data(index.column())
+            if col == 0:
+                name = item.itemData.get('name', '')
+                if item.itemData.get('is_hidden'): return f"[Hidden] {name}"
+                return name
+            
+            if is_tree:
+                if col == 1: return "Folder" if item.itemData.get('is_dir') else "File"
+            else:
+                if col == 1: return item.itemData.get('display_location') or item.itemData.get('location', '')
 
-        if role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
+            # Common columns shifted by 0
+            if col == 2:
+                ts = item.itemData.get('last_modified', 0)
+                return datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else ""
+            if col == 3: return format_age(item.itemData.get('last_modified', 0))
+            if col == 4: return format_size(item.itemData.get('size', 0))
+            if col == 5: return item.itemData.get('status', '')
+            return None
+
+        if role == Qt.ItemDataRole.CheckStateRole and col == 0:
             return item.checkState
+
 
         if role == Qt.ItemDataRole.UserRole:
             return item.itemData
 
-        if role == Qt.ItemDataRole.TextAlignmentRole:
-            col = index.column()
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if not is_tree and col == 1:
+                return item.itemData.get('location', '')
             if col == 0:
+                return item.itemData.get('path', '')
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == 0 or (not is_tree and col == 1):
                 return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            if col in (1, 2, 5, 6):
-                return Qt.AlignmentFlag.AlignCenter
-            if col in (3, 4):
-                return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            if col in (1, 2, 5): return Qt.AlignmentFlag.AlignCenter
+            if col in (3, 4): return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
 
         if role == Qt.ItemDataRole.FontRole:
-            if item.itemData.get('is_dir', False) and index.column() == 0:
-                font = QFont()
-                font.setBold(True)
+            font = QFont(FONT_FAMILY)
+            font.setPointSize(safe_point_size(TYPE_SCALE["body"]["point_size"], 9))
+            if col == 4:
+                font.setWeight(QFont.Weight(TYPE_SCALE["muted"]["weight"]))
                 return font
+            if item.itemData.get('is_dir', False) and col == 0:
+                font.setWeight(QFont.Weight(TYPE_SCALE["header"]["weight"]))
+                return font
+            font.setWeight(QFont.Weight(TYPE_SCALE["body"]["weight"]))
+            return font
 
-        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
+        if role == Qt.ItemDataRole.DecorationRole and col == 0:
             is_dir = item.itemData.get('is_dir', False)
             if is_dir:
-                return QIcon.fromTheme("folder", QIcon.fromTheme("folder-open"))
-            return QIcon.fromTheme("text-x-generic", QIcon.fromTheme("document-new"))
+                return FOLDER_ICON
+            return FILE_ICON
 
         return None
 
@@ -172,6 +427,47 @@ class WatchdogTreeModel(QAbstractItemModel):
                 self._update_ancestor_states(index.parent())
         finally:
             self.layoutChanged.emit()
+
+    def set_indices_check_state_direct(self, indices, state, explicit=False):
+        if not indices:
+            return
+        state = Qt.CheckState(state)
+
+        self.layoutAboutToBeChanged.emit()
+        try:
+            ancestors = {}
+            for index in indices:
+                if not index.isValid():
+                    continue
+
+                item = index.internalPointer()
+                explicit_checked = bool(explicit) and state == Qt.CheckState.Checked
+                item.checkState = state
+                item.explicitlyChecked = explicit_checked
+
+                parent = index.parent()
+                while parent.isValid():
+                    ancestors[id(parent.internalPointer())] = parent
+                    parent = parent.parent()
+
+            for index in ancestors.values():
+                self._update_ancestor_states_for_direct_bulk(index)
+        finally:
+            self.layoutChanged.emit()
+
+    def _update_ancestor_states_for_direct_bulk(self, index):
+        while index.isValid():
+            item = index.internalPointer()
+            child_states = [item.child(row).checkState for row in range(item.childCount())]
+            if item.explicitlyChecked:
+                state = Qt.CheckState.Checked
+            elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
+                state = Qt.CheckState.Unchecked
+            else:
+                state = Qt.CheckState.PartiallyChecked
+
+            self._update_item_check_state(index, state, explicit=item.explicitlyChecked)
+            index = index.parent()
 
     def _set_check_state_recursive(self, start_index, state, explicit=False):
         # Iterative implementation to avoid recursion and signal storms
@@ -204,9 +500,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         while index.isValid():
             item = index.internalPointer()
             child_states = [item.child(row).checkState for row in range(item.childCount())]
-            if child_states and all(state == Qt.CheckState.Checked for state in child_states):
-                state = Qt.CheckState.Checked
-            elif child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
+            if child_states and all(state == Qt.CheckState.Unchecked for state in child_states):
                 state = Qt.CheckState.Unchecked
             else:
                 state = Qt.CheckState.PartiallyChecked
@@ -221,9 +515,17 @@ class WatchdogTreeModel(QAbstractItemModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            headers = ["Folder / File path", "Type", "Last modified", "Age ↑", "Size", "Status", "Action"]
+            if self.view_mode == 'Tree':
+                headers = ["Folder / File path", "Type", "Last modified", "Age", "Size", "Status"]
+            else:
+                headers = ["Name", "Location", "Last modified", "Age", "Size", "Status"]
             if section < len(headers):
-                return headers[section]
+                if self.view_mode != 'Tree' and section == 1:
+                    return headers[section]
+                if section == self.sort_column:
+                    arrow = "▲" if self.sort_order == Qt.SortOrder.AscendingOrder else "▼"
+                    return f"{headers[section]}  {arrow}"
+                return f"{headers[section]}  ↕"
         return None
 
     def index(self, row, column, parent=QModelIndex()):
@@ -270,54 +572,79 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._reset()
 
+    def _sort_key(self, item_data, column):
+        if column == 4:
+            return item_data.get('size', 0) or 0
+        if column == 2:
+            return item_data.get('last_modified', 0) or 0
+        if column == 3:
+            ts = item_data.get('last_modified', 0) or 0
+            if not ts:
+                return float('inf')
+            return max(0.0, datetime.now().timestamp() - ts)
+        return None
+
     def lessThan(self, left, right):
         left_data = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
         right_data = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
         
         col = left.column()
-        # Sort by Size (column 4)
-        if col == 4:
-            return left_data.get('size', 0) < right_data.get('size', 0)
-        # Sort by Age / Last Modified (column 3 or 2)
-        if col in (2, 3):
-            return left_data.get('last_modified', 0) < right_data.get('last_modified', 0)
+        left_key = self._sort_key(left_data, col)
+        right_key = self._sort_key(right_data, col)
+        if left_key is not None and right_key is not None:
+            if left_key == right_key:
+                return (left_data.get('name', '') or '').lower() < (right_data.get('name', '') or '').lower()
+            return left_key < right_key
             
         return super().lessThan(left, right)
 
     def _reset(self):
         self.empty_only = False
         self.status_filter = None   # None = all, 'Active', 'Inactive', 'Empty'
-        self.date_from_ts = None
-        self.date_to_ts = None
         self.older_than_secs = None
         self.older_than_cutoff_ts = None
+        self.view_mode = 'Tree'
+        self.name_filter = ""
+        self._accepts_cache = {}
 
-    def set_filters(self, empty_only,
-                    date_from_ts=None, date_to_ts=None,
-                    older_than_secs=None,
-                    status_filter=None):
-        if date_from_ts is not None and date_to_ts is not None and date_from_ts > date_to_ts:
-            date_from_ts, date_to_ts = date_to_ts, date_from_ts
-
+    def set_filters(
+        self,
+        empty_only,
+        older_than_secs=None,
+        status_filter=None,
+        view_mode='Tree',
+        name_filter="",
+    ):
         self.empty_only = empty_only
         self.status_filter = status_filter
-        self.date_from_ts = date_from_ts
-        self.date_to_ts = date_to_ts
+        self.view_mode = view_mode
+        self.name_filter = (name_filter or "").lower()
         self.older_than_secs = older_than_secs
         self.older_than_cutoff_ts = (
             datetime.now().timestamp() - older_than_secs
             if older_than_secs is not None else None
         )
+        self._accepts_cache.clear()
         self.invalidateFilter()
 
     def has_active_filters(self):
         return any((
             self.empty_only,
             self.status_filter is not None,
-            self.date_from_ts is not None,
-            self.date_to_ts is not None,
             self.older_than_cutoff_ts is not None,
+            self.name_filter,
         ))
+
+    def hasChildren(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return super().hasChildren(parent)
+        source_parent = self.mapToSource(parent)
+        if not source_parent.isValid():
+            return False
+        source_model = self.sourceModel()
+        if source_model is None:
+            return False
+        return source_model.hasChildren(source_parent)
 
     def matches_source_index(self, source_index):
         source_model = self.sourceModel()
@@ -327,13 +654,37 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         return bool(item_data) and self._matches(item_data)
 
     def is_context_only(self, source_index):
-        return self.has_active_filters() and not self.matches_source_index(source_index)
+        if not self.has_active_filters():
+            return False
+
+        source_model = self.sourceModel()
+        if source_model is None or not source_index.isValid():
+            return True
+
+        item_data = source_model.data(source_index, Qt.ItemDataRole.UserRole)
+        if not item_data:
+            return True
+
+        item = source_index.internalPointer()
+        inside_matching_folder = (
+            bool(self.name_filter)
+            and self._has_name_matching_ancestor(item)
+        )
+        return not self._matches(
+            item_data,
+            ignore_name_filter=inside_matching_folder,
+        )
 
     def filterAcceptsRow(self, source_row, source_parent):
         return self._accepts(source_row, source_parent)
 
     def flags(self, index):
-        return super().flags(index)
+        flags = super().flags(index)
+        if index.isValid() and index.column() == 0:
+            source_index = self.mapToSource(index)
+            if self.is_context_only(source_index):
+                flags &= ~Qt.ItemFlag.ItemIsUserCheckable
+        return flags
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -341,6 +692,8 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
 
         source_index = self.mapToSource(index)
         if self.is_context_only(source_index):
+            if role == Qt.ItemDataRole.CheckStateRole and index.column() == 0:
+                return None
             if role == Qt.ItemDataRole.DisplayRole and index.column() == 5:
                 return "Context"
             if role == Qt.ItemDataRole.ToolTipRole:
@@ -367,25 +720,78 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         source_model = self.sourceModel()
         if source_model is None:
             return False
-        
+            
         start_idx = source_model.index(source_row, 0, source_parent)
-        # Iterative search for matching child to avoid deep recursion
+        
+        # Check cache (we can use internalPointer to identify the item uniquely)
+        item = start_idx.internalPointer()
+        if item in self._accepts_cache:
+            return self._accepts_cache[item]
+            
+        # If it doesn't match immediately, we must check descendants
+        # To avoid O(N^2) redundant scanning, we can do a post-order traversal
+        # But since PyQt calls this dynamically, caching the result of the subtree search is enough.
+        
+        visited_items = []
         stack = [start_idx]
         while stack:
             idx = stack.pop()
+            current_item = idx.internalPointer()
+            if current_item in self._accepts_cache:
+                if self._accepts_cache[current_item]:
+                    self._accepts_cache[item] = True
+                    return True
+                continue
+                
+            visited_items.append(current_item)
             item_data = source_model.data(idx, Qt.ItemDataRole.UserRole)
-            if not item_data: continue
+            if not item_data and current_item is not None:
+                item_data = getattr(current_item, 'itemData', None)
+            if not item_data:
+                continue
             
-            if self._matches(item_data):
+            ignore_name_filter = (
+                bool(self.name_filter)
+                and self._has_name_matching_ancestor(current_item)
+            )
+            if self._matches(item_data, ignore_name_filter=ignore_name_filter):
+                self._accepts_cache[item] = True
+                self._accepts_cache[current_item] = True
                 return True
                 
             if item_data.get('is_dir'):
                 for row in range(source_model.rowCount(idx)):
                     stack.append(source_model.index(row, 0, idx))
+                    
+        for v in visited_items:
+            self._accepts_cache[v] = False
         return False
 
+    def _has_name_matching_ancestor(self, item):
+        parent = getattr(item, 'parentItem', None)
+        while parent is not None and getattr(parent, 'parentItem', None) is not None:
+            parent_data = getattr(parent, 'itemData', None) or {}
+            parent_name = (parent_data.get('name', '') or '').lower()
+            if self.name_filter in parent_name:
+                return True
+            parent = getattr(parent, 'parentItem', None)
+        return False
 
-    def _matches(self, item_data):
+    def _matches(self, item_data, ignore_name_filter=False):
+        if item_data.get('_is_dummy'):
+            return True
+        if (
+            self.name_filter
+            and not ignore_name_filter
+            and self.name_filter not in (item_data.get('name', '') or '').lower()
+        ):
+            return False
+        if (
+            self.view_mode == 'Tree'
+            and self.status_filter == 'Inactive'
+            and item_data.get('is_dir', False)
+        ):
+            return False
         status = item_data.get('status', '')
         ts = item_data.get('last_modified', 0)
 
@@ -402,20 +808,6 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
             return status == 'Empty' and item_data.get('is_dir', False)
 
         if self.status_filter is not None and status != self.status_filter:
-            return False
-
-        has_time_filter = any(value is not None for value in (
-            self.date_from_ts,
-            self.date_to_ts,
-        ))
-        
-        # Note: older_than_cutoff_ts is now handled by the dynamic status above
-        if has_time_filter and not ts:
-            return False
-
-        if self.date_from_ts is not None and ts < self.date_from_ts:
-            return False
-        if self.date_to_ts is not None and ts > self.date_to_ts:
             return False
 
         return True

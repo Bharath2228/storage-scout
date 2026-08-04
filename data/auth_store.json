@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "kdf": "pbkdf2_hmac_sha256",
+  "iterations": 200000,
+  "users": [
+    {
+      "username": "Bharath",
+      "salt": "QD2AcuoMM4n2zXTiDf6UBw==",
+      "password_hash": "zh1KfQLdxsS95JeSnb7aMZi/OFo9GjChAmwqQR6jngw="
+    }
+  ]
+}
