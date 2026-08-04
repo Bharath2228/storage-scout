@@ -110,8 +110,8 @@ class FilteredTotalsTests(unittest.TestCase):
                 7,
                 {
                     "empty_n": 0,
-                    "inactive_folders": 0,
-                    "inactive_files": 0,
+                    "inactive_folders": 5233,
+                    "inactive_files": 50118,
                     "folder_total": 150,
                     "folder_file_count": 2,
                     "filtered_total": 100,
@@ -119,9 +119,61 @@ class FilteredTotalsTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(window.chip_browse_size.text(), "Total Size 150.0 B")
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 150.0 B")
             self.assertEqual(window.chip_filtered_size.text(), "Search Size 100.0 B")
+            self.assertEqual(
+                window.chip_inactive_folders.text(),
+                "Inactive: 5,233 folders · 50,118 files",
+            )
+            window._set_selected_summary_chip("1.5 GB", 12, 3456)
+            self.assertEqual(
+                window.chip_selected_size.text(),
+                "Selected: 3,456 files, 12 folders · 1.5 GB",
+            )
             self.assertFalse(window.chip_filtered_size.isHidden())
+        finally:
+            window.close()
+
+    def test_empty_results_clear_stale_page_and_status_metrics(self):
+        window = MainWindow()
+        try:
+            window.is_scanning = False
+            window._set_total_summary_chip("1.1 GB")
+            window._set_chip_text(
+                window.chip_inactive_folders,
+                "Inactive: 0 folders · 11 files",
+            )
+            window._set_chip_text(window.chip_page_size, "Current Page Size: calculating...")
+
+            window._set_empty_result_metrics()
+
+            self.assertEqual(
+                window.chip_inactive_folders.text(),
+                "Inactive: 0 folders · 0 files",
+            )
+            self.assertEqual(window.chip_page_size.text(), "Current Page Size: 0 B")
+            self.assertEqual(
+                window.chip_selected_size.text(),
+                "Selected: 0 files, 0 folders · 0 B",
+            )
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 1.1 GB")
+        finally:
+            window.close()
+
+    def test_show_all_files_view_shows_page_size_only_when_paginated(self):
+        window = MainWindow()
+        try:
+            window.fp.rb_all.setChecked(True)
+            window.fp.rb_view_files.setChecked(True)
+            window.current_lazy_show_all_tree = False
+
+            window.current_total_matches = 4001
+            window._update_status_metrics_visibility()
+            self.assertFalse(window.chip_page_size.isHidden())
+
+            window.current_total_matches = 2000
+            window._update_status_metrics_visibility()
+            self.assertTrue(window.chip_page_size.isHidden())
         finally:
             window.close()
 
@@ -158,6 +210,58 @@ class FilteredTotalsTests(unittest.TestCase):
 
             self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
             self.assertFalse(window.chip_folder_size.isHidden())
+        finally:
+            window.close()
+
+    def test_pending_refresh_keeps_completed_cache_totals_visible(self):
+        root = os.path.normpath(r"Z:\scan")
+        scope = os.path.join(root, "Projects")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Projects", True, 0, 1, root)
+        cache.set_folder_summary(root, 12 * 1024, 3, 2, 1, 1)
+        cache.set_folder_summary(scope, 5 * 1024, 2, 1, 2, 2)
+        window = MainWindow()
+        try:
+            window.is_scanning = False
+            window.current_scan_root = root
+            window.folder_browser_scope = scope
+            window.folder_cache = cache
+            window.cached_folder_total = None
+            window.cached_folder_total_root = None
+
+            window._set_size_totals_pending(browse=True)
+
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 12.0 KB")
+            self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
+        finally:
+            window.close()
+
+    def test_latest_totals_failure_restores_known_values(self):
+        root = os.path.normpath(r"Z:\scan")
+        scope = os.path.join(root, "Projects")
+        cache = FolderCache()
+        cache.add_item(root, "scan", True, 0, 1, None)
+        cache.add_item(scope, "Projects", True, 0, 1, root)
+        cache.set_folder_summary(root, 12 * 1024, 3, 2, 1, 1)
+        cache.set_folder_summary(scope, 5 * 1024, 2, 1, 2, 2)
+        window = MainWindow()
+        try:
+            window.is_scanning = False
+            window.current_scan_root = root
+            window.folder_browser_scope = scope
+            window.folder_cache = cache
+            window.totals_request_id = 9
+            window._set_total_summary_chip("--")
+            window._set_chip_text(
+                window.chip_folder_size,
+                "Folder Size calculating...",
+            )
+
+            window._on_totals_failed(9, "temporary read error")
+
+            self.assertEqual(window.chip_browse_size.text(), "Total Size: 12.0 KB")
+            self.assertEqual(window.chip_folder_size.text(), "Folder Size 5.0 KB")
         finally:
             window.close()
 

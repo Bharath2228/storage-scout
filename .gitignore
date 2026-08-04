@@ -1,65 +1,71 @@
-# Byte-compiled / optimized / DLL files
+# Python bytecode and caches
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
 
-# C extensions
-*.so
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
-# Distribution / packaging
-bin/
-build/
-develop-eggs/
-dist/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environments
+# Virtual environments
+.venv/
 venv/
 env/
 ENV/
 venv.bak/
 env.bak/
 
-# IDEs and Editors
-.vscode/
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+
+# IDE and editor settings
 .idea/
+.vscode/
+.settings/
+.project
+.pydevproject
 *.swp
 *.swo
 *~
-.project
-.pydevproject
-.settings/
 
-# OS generated files
+# Operating-system files
 .DS_Store
-.DS_Store?
 ._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
+ehthumbs.db
 Desktop.ini
-file_index.db
-*.db
-*.sqlite
-*.sqlite3
-*.db-shm
-*.db-wal
 
-# Log Files
+# Generated Watchdog runtime data
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite3
+data/auth_lockout.json
+data/delete_audit.log
+data/scan_history.json
+
+# Logs and temporary files
 *.log
+*.tmp
 run_log.txt
+scan_history.json
 
-# Application specific
-*.csv
+# Generated exports
+exports/
+watchdog_export_*.csv
+
+# Local assistant/tool state
+.codex/
 .gemini/

@@ -654,7 +654,26 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
         return bool(item_data) and self._matches(item_data)
 
     def is_context_only(self, source_index):
-        return self.has_active_filters() and not self.matches_source_index(source_index)
+        if not self.has_active_filters():
+            return False
+
+        source_model = self.sourceModel()
+        if source_model is None or not source_index.isValid():
+            return True
+
+        item_data = source_model.data(source_index, Qt.ItemDataRole.UserRole)
+        if not item_data:
+            return True
+
+        item = source_index.internalPointer()
+        inside_matching_folder = (
+            bool(self.name_filter)
+            and self._has_name_matching_ancestor(item)
+        )
+        return not self._matches(
+            item_data,
+            ignore_name_filter=inside_matching_folder,
+        )
 
     def filterAcceptsRow(self, source_row, source_parent):
         return self._accepts(source_row, source_parent)

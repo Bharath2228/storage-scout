@@ -61,6 +61,32 @@ class FileIndexSchemaTests(unittest.TestCase):
             connection.close()
             self.assertEqual(columns.count("physical_child_count"), 1)
 
+    def test_extension_breakdown_returns_every_extension(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tool = FileIndexTool(str(Path(temp_dir) / "index.db"))
+            try:
+                rows = [
+                    ("root", f"file-{index}", f"file-{index}", "root", 0, index + 1, 0, extension, 0)
+                    for index, extension in enumerate(
+                        [f".type{number}" for number in range(25)] + [""]
+                    )
+                ]
+                tool.conn.executemany(
+                    "INSERT INTO file_index "
+                    "(root, path, name, parent_path, is_folder, size, modified_time, extension, inactive) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                tool.conn.commit()
+
+                breakdown = tool.extension_breakdown()
+
+                self.assertEqual(len(breakdown), 26)
+                self.assertNotIn("Other", [label for label, _size, _count in breakdown])
+                self.assertIn("(no extension)", [label for label, _size, _count in breakdown])
+            finally:
+                tool.close()
+
 
 if __name__ == "__main__":
     unittest.main()

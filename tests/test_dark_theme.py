@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from src.theme import DARK_PALETTE, apply_theme
+from src.theme import DARK_PALETTE, LIGHT_PALETTE, apply_theme
 
 
 class DarkThemeTests(unittest.TestCase):
@@ -27,6 +27,21 @@ class DarkThemeTests(unittest.TestCase):
         self.assertIn("up_arrow_dark.svg", stylesheet)
         self.assertIn("QComboBox QAbstractItemView", stylesheet)
         self.assertEqual(DARK_PALETTE["on_accent"], "#07111f")
+
+    def test_light_theme_uses_soft_layered_surfaces(self):
+        apply_theme(self.app, "light")
+        stylesheet = self.app.styleSheet()
+
+        self.assertNotEqual(LIGHT_PALETTE["surface"], "#ffffff")
+        self.assertNotEqual(LIGHT_PALETTE["bg"], LIGHT_PALETTE["surface"])
+        self.assertNotEqual(
+            LIGHT_PALETTE["surface_hover"],
+            LIGHT_PALETTE["surface"],
+        )
+        self.assertIn(
+            f"background-color: {LIGHT_PALETTE['surface']}",
+            stylesheet,
+        )
 
 
 if __name__ == "__main__":
