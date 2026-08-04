@@ -1,24 +1,19 @@
 # IBMS Watchdog
 
-IBMS Watchdog is a Windows desktop application for scanning, reviewing, exporting, and safely cleaning up local folders, mapped drives, and NAS shares. It builds a local SQLite index so large directory trees can be searched and filtered without repeatedly walking the storage device.
+IBMS Watchdog is a Windows desktop application for scanning, reviewing, exporting, and safely cleaning up local folders, mapped drives, and NAS shares. It builds a local SQLite index so large directory trees can be searched, filtered, and exported without repeatedly walking the storage device.
 
-## Features
+## What It Does
 
-- Background scanning for local paths, mapped drives, and UNC network shares.
-- Folder browser panel for scoping results to a specific directory.
-- Tree, files-only, and folders-only result views.
-- Show All, Inactive, Empty, and Videos filters.
-- Configurable age threshold with explicit application.
-- Scan exclusions for folder names, file extensions, and minimum file size.
-- Search and file-extension analysis.
-- Paginated results with current-page and all-pages selection.
-- Persistent manual selection exclusions while moving between pages.
-- Folder, page, filtered-result, and selected-item size summaries.
-- CSV exports for listings, file types, folder summaries, delete audit records, and scan history.
-- Recoverable deletion through the Windows Recycle Bin.
-- Username and password authorization before deletion.
-- Light and dark themes.
-- Windows notifications after long scans or background completion.
+- Scans local folders, mapped drives, and UNC/NAS shares.
+- Shows results in tree view, files-only view, or folders-only view.
+- Filters by Show all, Inactive, Empty, Videos, age threshold, search text, and file extension.
+- Supports folder scoping through the left folder panel.
+- Supports scan exclusions for folder names, extensions, and minimum file size.
+- Shows total size, folder size, current page size, filtered size, and selected size.
+- Exports CSV reports for listings, file types, folder summaries, delete audit records, and scan history.
+- Moves deleted items to the Windows Recycle Bin.
+- Requires a Watchdog username/password before deletion.
+- Supports light/dark theme and Windows notifications.
 
 ## Requirements
 
@@ -27,11 +22,13 @@ IBMS Watchdog is a Windows desktop application for scanning, reviewing, exportin
 - Read access to folders being scanned
 - Delete permission for items that will be moved to the Recycle Bin
 
-Network-share behavior depends on the permissions and capabilities of the NAS or file server. A mapped drive such as `Z:\` and a UNC path such as `\\server\share` are both supported.
+NAS behavior depends on the permissions and capabilities of the NAS/file server. A mapped drive such as `Z:\` and a UNC path such as `\\server\share` are both supported.
 
-## Installation
+## Install
 
-Open PowerShell in the project directory and create a virtual environment:
+Open the project folder in a terminal.
+
+PowerShell:
 
 ```powershell
 python -m venv venv
@@ -40,81 +37,81 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-If PowerShell blocks environment activation, run this once for the current terminal:
+If PowerShell blocks activation, run this in the same terminal:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-## Running the Application
+Windows Command Prompt:
 
-```powershell
+```bat
+python -m venv venv
+venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+## Run
+
+PowerShell or Command Prompt:
+
+```bat
 python main.py
 ```
 
-Use **Browse** to choose a directory. Configure exclusions before scanning when necessary, then select **Re-scan** to rebuild the index with those rules.
+Use **Browse** to choose a folder. Configure exclusions before scanning when needed, then use **Rescan** to rebuild the index with those rules.
 
-## Filters and Navigation
+## Delete Authorization
 
-The folder panel and result filters work together:
+Before using **Delete Selected**, create at least one authorized delete user.
 
-- Selecting a folder scopes the result area to that folder.
-- Display filters limit results to inactive items, empty folders, videos, or all indexed items.
-- View modes control whether results appear as a tree, files only, or folders only.
-- The age threshold applies after pressing **Go**.
-- File Extensions opens a size and count breakdown; selecting an extension filters the result view.
-- Exclusions are scan-time rules. Changing them requires a re-scan.
+PowerShell or Command Prompt:
 
-When results span multiple pages, page selection and all-pages selection are separate. Manual unchecks are retained when navigating away from a page and returning to it.
-
-## CSV Export
-
-The Export CSV dialog supports several report types and scopes. Available listing scopes include:
-
-- Current page
-- All items matching the current filters
-- Entire scan
-- Selected items
-- Current bulk-delete scope
-
-Columns can be enabled individually. CSV files use the Windows list separator when available so exported values open in separate Excel columns on systems that use either commas or semicolons.
-
-## Secured Data
-
-Default security data location:
-
-```text
-%APPDATA%\IBMS\Watchdog\
-|-- auth_store.json
-|-- auth_lockout.json
-`-- delete_audit.log
+```bat
+python tools\setup_auth.py --add-user Admin
 ```
 
-This local authorization is intended to prevent casual or accidental deletion on shared workstations. It is not a replacement for Windows, Active Directory, or NAS access controls.
+The script asks for the password twice. Password text is hidden while typing.
 
-## Runtime Data
+List authorized users:
 
-The application creates runtime files under `data/`:
-
-```text
-data/
-|-- file_index.db
-|-- file_index.db-shm
-|-- file_index.db-wal
-`-- scan_history.json
+```bat
+python tools\setup_auth.py --list-users
 ```
 
-These files are generated locally and should not be committed. The database can be rebuilt by running another scan.
+Remove an authorized user:
 
-Application preferences such as theme and notification settings are stored through `QSettings("IBMS", "Watchdog")`.
+```bat
+python tools\setup_auth.py --remove-user Admin
+```
 
-## Project Structure
+The app stores authorized delete users here:
 
 ```text
-Watchdog/
-|-- main.py                    Application entry point
-|-- requirements.txt           Runtime Python dependencies
-|-- src/
+data\auth_store.json
+```
+
+This file stores usernames, salts, and password hashes. It does **not** store plain-text passwords.
+
+Because `data\auth_store.json` is inside the project, it can be committed to GitHub so every cloned copy uses the same Watchdog delete authorization users. Anyone with the correct Watchdog username/password can authorize deletes in the app, but Windows/NAS permissions still decide whether the actual file operation succeeds.
+
+## Important Files
+
+```text
+Watchdog\
+|-- main.py
+|-- requirements.txt
+|-- README.md
+|-- data\
+|   |-- auth_store.json        Shared delete authorization users; can be committed
+|   |-- auth_lockout.json      Runtime failed-login lockout state; ignored
+|   |-- delete_audit.log       Runtime delete audit log; ignored
+|   |-- file_index.db          Runtime scan index; ignored
+|   |-- file_index.db-shm      SQLite runtime file; ignored
+|   |-- file_index.db-wal      SQLite runtime file; ignored
+|   `-- scan_history.json      Runtime scan history; ignored
+|-- src\
 |   |-- main_window.py         Main UI, filters, selection, export, and deletion flow
 |   |-- scanner.py             Background scan thread
 |   |-- file_index_tool.py     SQLite schema, indexing, and scan implementation
@@ -124,37 +121,110 @@ Watchdog/
 |   |-- scan_history.py        Scan-history persistence
 |   |-- auth.py                Delete authorization and audit logging
 |   |-- theme.py               Light and dark QSS themes
-|   `-- assets/                Application icons
-|-- tools/
-|   `-- setup_auth.py          Delete-user administration
-|-- tests/                     Automated regression tests
-`-- data/                      Generated local index and history
+|   `-- assets\                Application icons
+|-- tools\
+|   `-- setup_auth.py          Add/list/remove delete authorization users
+`-- tests\                     Automated regression tests
 ```
 
-## Running Tests
+## Data and GitHub Behavior
 
-The test suite uses Python's standard `unittest` framework:
+The repository is configured so these generated files are ignored:
 
-```powershell
+```text
+data\file_index.db
+data\file_index.db-shm
+data\file_index.db-wal
+data\auth_lockout.json
+data\delete_audit.log
+data\scan_history.json
+```
+
+These files are created while using the app and should stay local to each machine.
+
+This file is not ignored:
+
+```text
+data\auth_store.json
+```
+
+Commit `data\auth_store.json` only when you want the same delete authorization users to be available after cloning the repository.
+
+Application preferences such as theme and notification settings are stored through Windows settings using:
+
+```text
+QSettings("IBMS", "Watchdog")
+```
+
+## Filters and Navigation
+
+- Selecting a folder in the folder panel scopes the result area to that folder.
+- Display filters limit results to all indexed items, inactive items, empty folders, or videos.
+- View mode controls whether results appear as a tree, files only, or folders only.
+- The age threshold applies after pressing **Go**.
+- File Extensions opens a size/count breakdown; selecting an extension filters the result view.
+- Exclusions are scan-time rules. Changing exclusions requires a rescan.
+- Page selection and all-pages selection are separate.
+- Manual unchecks are retained when navigating between pages.
+
+## CSV Export
+
+The Export CSV dialog supports:
+
+- Current page
+- All items matching current filters
+- Entire scan
+- Selected/checkmarked items
+- Current bulk-delete scope
+- File type breakdown
+- Folder summary
+- Delete audit log
+- Scan history
+
+CSV files use the Windows list separator when available, so exports open in separate Excel columns on systems that use commas or semicolons.
+
+## Run Tests
+
+```bat
+python -m pytest
+```
+
+Or with unittest:
+
+```bat
 python -m unittest discover -s tests -v
 ```
 
-Tests use Qt's offscreen platform and do not require the application window to remain visible.
+Tests use Qt's offscreen platform and do not require the app window to stay visible.
 
 ## Troubleshooting
 
 ### A NAS path scans slowly
 
-Confirm that the share is reachable in Windows Explorer and that the current Windows account has permission to enumerate it. NAS performance depends on latency, server load, and the number of directory entries.
+Confirm the share is reachable in Windows Explorer and the current Windows account has permission to enumerate it. NAS performance depends on latency, server load, and the number of directory entries.
 
 ### A mapped drive is missing
 
 Mapped drives can differ between elevated and non-elevated Windows sessions. Run Watchdog under the same Windows account and privilege level used to map the drive, or browse to the UNC path directly.
 
-### Deletion fails
+### Delete authorization fails
 
-Verify that an authorized user is configured, the current account has delete permission, and the target storage supports the Windows Recycle Bin operation used by `Send2Trash`.
+Check that `data\auth_store.json` exists and contains at least one user:
+
+```bat
+python tools\setup_auth.py --list-users
+```
+
+If there are too many failed attempts, the temporary lockout state is stored in:
+
+```text
+data\auth_lockout.json
+```
+
+### Deletion fails after authorization
+
+Watchdog authorization only allows the app to start deletion. The current Windows/NAS user still needs delete permission, and the target storage must support the Recycle Bin operation used by `Send2Trash`.
 
 ### Notifications do not appear
 
-Windows system-tray support and notification permissions must be enabled. Status messages inside the application continue to work when system notifications are unavailable.
+Windows system-tray support and notification permissions must be enabled. Status messages inside the application continue to work even when system notifications are unavailable.

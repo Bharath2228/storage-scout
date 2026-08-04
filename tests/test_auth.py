@@ -84,6 +84,8 @@ class AuthStoreTests(unittest.TestCase):
 
     def test_default_paths_are_absolute_and_share_app_data_directory(self):
         self.assertTrue(os.path.isabs(auth.AUTH_STORE_PATH))
+        self.assertEqual(Path(auth.AUTH_STORE_PATH).name, "auth_store.json")
+        self.assertEqual(Path(auth.AUTH_STORE_PATH).parent.name, "data")
         self.assertEqual(
             Path(auth.AUTH_STORE_PATH).parent,
             Path(auth.DELETE_AUDIT_LOG_PATH).parent,

@@ -110,6 +110,15 @@ class HorizontalFilterBarTests(unittest.TestCase):
             QBoxLayout.Direction.TopToBottom,
         )
 
+    def test_age_filter_card_stays_compact_on_tall_screens(self):
+        self.panel.resize(self.panel.minimumWidth(), 1200)
+        self.app.processEvents()
+
+        natural_height = self.panel.age_box.sizeHint().height()
+        self.assertLessEqual(self.panel.age_box.maximumHeight(), natural_height + 4)
+        self.assertLessEqual(self.panel.age_box.height(), natural_height + 4)
+        self.assertLess(self.panel.age_box.maximumHeight(), 180)
+
         self.panel._exclusions_section_expanded = True
         self.panel._sync_collapsible_sections()
         self.app.processEvents()

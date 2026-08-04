@@ -5415,6 +5415,10 @@ class FilterPanel(QFrame):
 
         self.age_box = QFrame()
         self.age_box.setObjectName("ageControl")
+        self.age_box.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Maximum,
+        )
         age_layout = QVBoxLayout(self.age_box)
         self.age_layout = age_layout
         age_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
@@ -5474,6 +5478,7 @@ class FilterPanel(QFrame):
         bot_row.addStretch()
         age_layout.addWidget(lbl_manual)
         age_layout.addLayout(bot_row)
+        self.age_box.setMaximumHeight(self.age_box.sizeHint().height())
         age_outer_layout.addWidget(self.age_box)
 
         self.slider.valueChanged.connect(self._update_age_apply_state)
@@ -5840,6 +5845,7 @@ class FilterPanel(QFrame):
         manual_row.addWidget(self.age_input, 1)
         manual_row.addWidget(self.btn_apply_age)
         age_layout.addLayout(manual_row)
+        self.age_box.setMaximumHeight(self.age_box.sizeHint().height())
 
         exclusions_layout = self.exclusions_box.layout()
         while exclusions_layout.count():

@@ -52,7 +52,6 @@ data/*.db-shm
 data/*.db-wal
 data/*.sqlite
 data/*.sqlite3
-data/auth_store.json
 data/auth_lockout.json
 data/delete_audit.log
 data/scan_history.json
@@ -61,6 +60,7 @@ data/scan_history.json
 *.log
 *.tmp
 run_log.txt
+scan_history.json
 
 # Generated exports
 exports/

@@ -23,11 +23,15 @@ def _app_data_dir() -> Path:
     return base / "IBMS" / "Watchdog"
 
 
-APP_DATA_DIR = _app_data_dir()
+def _project_data_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "data"
+
+
+APP_DATA_DIR = _project_data_dir()
 AUTH_STORE_PATH = str(APP_DATA_DIR / "auth_store.json")
 AUTH_LOCKOUT_PATH = str(APP_DATA_DIR / "auth_lockout.json")
 DELETE_AUDIT_LOG_PATH = str(APP_DATA_DIR / "delete_audit.log")
-LEGACY_APP_DIR = Path(__file__).resolve().parent.parent / "data"
+LEGACY_APP_DIR = _app_data_dir()
 LEGACY_AUTH_STORE_PATH = str(LEGACY_APP_DIR / "auth_store.json")
 LEGACY_DELETE_AUDIT_LOG_PATH = str(LEGACY_APP_DIR / "delete_audit.log")
 PBKDF2_ITERATIONS = 200_000
