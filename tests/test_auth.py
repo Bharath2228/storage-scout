@@ -71,7 +71,7 @@ class AuthStoreTests(unittest.TestCase):
 
         password_hash.assert_called_once_with("wrong", auth._DUMMY_SALT)
 
-    def test_lockout_state_uses_raw_attempted_username_as_key(self):
+    def test_lockout_state_uses_normalized_username_as_key(self):
         store = self.make_store()
         store.add_user("Alice", "pass")
         self.assertFalse(store.verify(" Alice ", "wrong"))
@@ -79,8 +79,22 @@ class AuthStoreTests(unittest.TestCase):
         with self.lockout_path.open("r", encoding="utf-8") as handle:
             attempts = json.load(handle)["attempts"]
 
-        self.assertIn(" Alice ", attempts)
+        self.assertIn("alice", attempts)
+        self.assertNotIn(" Alice ", attempts)
         self.assertNotIn("Alice", attempts)
+
+    def test_lockout_cannot_be_bypassed_with_username_case_or_whitespace(self):
+        store = self.make_store()
+        store.add_user("Alice", "pass")
+        for _ in range(3):
+            self.assertFalse(store.verify("Alice", "wrong"))
+
+        # Locked out under the canonical spelling...
+        self.assertFalse(store.verify("Alice", "pass"))
+        # ...and resubmitting with different case/whitespace must not grant a
+        # fresh set of attempts against the same account.
+        self.assertFalse(store.verify(" alice ", "pass"))
+        self.assertFalse(store.verify("ALICE", "pass"))
 
     def test_default_paths_are_absolute_and_share_app_data_directory(self):
         self.assertTrue(os.path.isabs(auth.AUTH_STORE_PATH))

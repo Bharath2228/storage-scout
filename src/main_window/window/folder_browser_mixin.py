@@ -85,6 +85,12 @@ class _FolderBrowserMixin:
                 self.folder_browser.apply_children(folder_path, children)
                 if self.is_scanning:
                     return
+                # When not scanning, still fall through to kick off a
+                # filesystem reconciliation pass below: the cache may be a
+                # partial/stale view (e.g. from a prior scan or exclusions),
+                # so the cached children are shown immediately for
+                # responsiveness while force_filesystem confirms/corrects
+                # them from disk in the background.
             if self.is_scanning:
                 # Keep the node retryable while the background loader falls back
                 # to enumerating folders directly from the selected location.

@@ -18,10 +18,8 @@ from ...models import StorageScoutTreeModel
 from ...scan_exclusions import ScanExclusions
 from ...scan_history import get_scan_history, record_scan_history
 from ...scanner import ScannerThread
-from ..constants import EMPTY_FOLDER_SQL, VIDEO_EXTENSIONS
 from ..dialogs.loading import LoadingDialog
 from ..path_utils import _path_key
-from ..sql_utils import descendant_like_sql
 from ..workers.page_load import PageLoadThread
 from ..workers.selection import PathSizeThread
 from ..workers.totals import TotalsThread
@@ -307,64 +305,11 @@ class _ScanMixin:
         tool = FileIndexTool()
         try:
             cursor = tool.conn.cursor()
-
-            # We need the same WHERE clause as _load_page
-            where_clauses = []
-            params = []
-            # Determine status filter (simplified mirror of _load_page logic)
-            if hasattr(self.fp, 'rb_all') and self.fp.rb_all.isChecked(): status_filter = None
-            elif self.fp.rb_empty.isChecked(): status_filter = 'Empty'
-            elif self.fp.rb_videos.isChecked(): status_filter = None
-            else: status_filter = 'Inactive'
-
-            view_mode = self.fp.get_view_mode()
-            age_secs = self.fp.get_older_than_secs()
-            age_cutoff = (datetime.now().timestamp() - age_secs) if age_secs is not None else None
-
-            if status_filter == 'Inactive':
-                if view_mode == 'Tree':
-                    where_clauses.append("is_folder = 0")
-                if age_cutoff is not None:
-                    where_clauses.append("modified_time <= ?")
-                    params.append(age_cutoff)
-                else: where_clauses.append("1=1")
-            elif status_filter == 'Empty':
-                if age_cutoff is not None:
-                    where_clauses.append("modified_time <= ?")
-                    params.append(age_cutoff)
-            elif status_filter == 'Active':
-                if age_cutoff is not None:
-                    where_clauses.append("modified_time > ?")
-                    params.append(age_cutoff)
-                else: where_clauses.append("1=0")
-
-            if status_filter == 'Empty': where_clauses.append(EMPTY_FOLDER_SQL)
-
-            if self.fp.rb_videos.isChecked():
-                placeholders = ','.join('?' * len(VIDEO_EXTENSIONS))
-                where_clauses.append("is_folder = 0")
-                where_clauses.append(f"extension IN ({placeholders})")
-                params.extend(VIDEO_EXTENSIONS)
-                if age_cutoff is not None:
-                    where_clauses.append("modified_time <= ?")
-                    params.append(age_cutoff)
-
-            if view_mode == 'Files':
-                where_clauses.append("is_folder = 0")
-            elif view_mode == 'Folders':
-                where_clauses.append("is_folder = 1")
-
-            if self.folder_browser_scope:
-                scope_sql, scope_params = descendant_like_sql(self.folder_browser_scope)
-                where_clauses.append(f"({scope_sql})")
-                params.extend(scope_params)
-
-            scan_root = getattr(self, 'current_scan_root', None) or os.path.normpath(self.txt_path.text().strip() or "")
-            if scan_root:
-                where_clauses.append("path != ? COLLATE NOCASE")
-                params.append(scan_root)
-
-            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            # Reuse the real filter-building logic (status/age/view-mode, name
+            # search, extension filter, folder scope, scan-root exclusion) so
+            # this stays in sync with _load_page instead of drifting from a
+            # separately hand-rolled copy of the WHERE clause.
+            where_sql, params = self._build_bulk_where()
             cursor.execute("SELECT COUNT(*) FROM file_index" + where_sql, params)
             total_matches = cursor.fetchone()[0]
         finally:

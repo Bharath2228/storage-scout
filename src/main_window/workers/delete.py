@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import send2trash
 
 from PyQt6.QtCore import (

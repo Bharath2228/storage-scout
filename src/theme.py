@@ -1267,7 +1267,7 @@ def apply_theme(app, theme_name="light"):
         }}
         QSpinBox::down-arrow {{
             width: 10px; height: 6px;
-            image: url("{base_dir}/assets/down_arrow.svg");
+            image: url("{base_dir}/assets/{combo_arrow}");
         }}
 
         QFrame#filterDrawer QSpinBox,
