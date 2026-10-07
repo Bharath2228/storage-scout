@@ -186,8 +186,8 @@ class DeleteCompletionCacheTests(unittest.TestCase):
         deleted_paths = [r"C:\scan\one.txt", r"C:\scan\folder"]
 
         with (
-            mock.patch("src.main_window.append_delete_audit"),
-            mock.patch("src.main_window.QMessageBox.information"),
+            mock.patch("src.main_window.window.delete_mixin.append_delete_audit"),
+            mock.patch("src.main_window.window.delete_mixin.QMessageBox.information"),
         ):
             MainWindow._on_delete_finished(
                 window,

@@ -88,7 +88,7 @@ class TreeItem:
         return 0
 
 
-class WatchdogTreeModel(QAbstractItemModel):
+class StorageScoutTreeModel(QAbstractItemModel):
     def __init__(self, root_data, parent=None):
         super().__init__(parent)
         self.view_mode = 'Tree'
@@ -564,7 +564,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         return flags
 
 
-class WatchdogFilterProxyModel(QSortFilterProxyModel):
+class StorageScoutFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setRecursiveFilteringEnabled(True)

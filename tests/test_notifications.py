@@ -184,7 +184,7 @@ class CompletionNotificationTests(unittest.TestCase):
             _set_selected_summary_chip=mock.Mock(),
         )
 
-        with mock.patch("src.main_window.record_scan_history"):
+        with mock.patch("src.main_window.window.scan_mixin.record_scan_history"):
             MainWindow._on_scan_done(window)
 
         window.lbl_status.setText.assert_called_once_with(completion_message)

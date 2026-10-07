@@ -89,7 +89,7 @@ def apply_theme(app, theme_name="light"):
     base_style = ""
     palette = DARK_PALETTE if resolve_theme_name(theme_name) == "dark" else LIGHT_PALETTE
     _CURRENT_PALETTE = palette
-    app.setProperty("watchdog_theme", palette["name"])
+    app.setProperty("storage_scout_theme", palette["name"])
 
     bg = palette["bg"]
     surface = palette["surface"]

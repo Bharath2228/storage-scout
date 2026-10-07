@@ -234,7 +234,7 @@ class ExportTests(unittest.TestCase):
 
         with (
             mock.patch("src.file_index_tool.FileIndexTool", return_value=tool),
-            mock.patch("src.main_window._preferred_csv_delimiter", return_value=","),
+            mock.patch("src.main_window.workers.export._preferred_csv_delimiter", return_value=","),
         ):
             thread.run()
 
@@ -272,7 +272,7 @@ class ExportTests(unittest.TestCase):
 
         with (
             mock.patch("src.file_index_tool.FileIndexTool", return_value=tool),
-            mock.patch("src.main_window._preferred_csv_delimiter", return_value=","),
+            mock.patch("src.main_window.workers.export._preferred_csv_delimiter", return_value=","),
         ):
             thread.run()
 

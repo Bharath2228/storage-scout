@@ -1,6 +1,6 @@
-# IBMS Watchdog
+# Storage Scout
 
-IBMS Watchdog is a Windows desktop application for scanning, reviewing, exporting, and safely cleaning up local folders, mapped drives, and NAS shares. It builds a local SQLite index so large directory trees can be searched, filtered, and exported without repeatedly walking the storage device.
+Storage Scout is a Windows desktop application for scanning, reviewing, exporting, and safely cleaning up local folders, mapped drives, and NAS shares. It builds a local SQLite index so large directory trees can be searched, filtered, and exported without repeatedly walking the storage device.
 
 ## What It Does
 
@@ -100,7 +100,7 @@ Because `data\auth_store.json` is inside the project, it can be committed to Git
 ## Important Files
 
 ```text
-Watchdog\
+Storage Scout\
 |-- main.py
 |-- requirements.txt
 |-- README.md
@@ -154,7 +154,7 @@ Commit `data\auth_store.json` only when you want the same delete authorization u
 Application preferences such as theme and notification settings are stored through Windows settings using:
 
 ```text
-QSettings("IBMS", "Watchdog")
+QSettings("StorageScout", "StorageScout")
 ```
 
 ## Filters and Navigation
@@ -206,7 +206,7 @@ Confirm the share is reachable in Windows Explorer and the current Windows accou
 
 ### A mapped drive is missing
 
-Mapped drives can differ between elevated and non-elevated Windows sessions. Run Watchdog under the same Windows account and privilege level used to map the drive, or browse to the UNC path directly.
+Mapped drives can differ between elevated and non-elevated Windows sessions. Run Storage Scout under the same Windows account and privilege level used to map the drive, or browse to the UNC path directly.
 
 ### Delete authorization fails
 
@@ -224,7 +224,7 @@ data\auth_lockout.json
 
 ### Deletion fails after authorization
 
-Watchdog authorization only allows the app to start deletion. The current Windows/NAS user still needs delete permission, and the target storage must support the Recycle Bin operation used by `Send2Trash`.
+Storage Scout authorization only allows the app to start deletion. The current Windows/NAS user still needs delete permission, and the target storage must support the Recycle Bin operation used by `Send2Trash`.
 
 ### Notifications do not appear
 
