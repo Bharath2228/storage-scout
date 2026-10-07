@@ -19,7 +19,7 @@ from src.main_window import (
     LazyChildrenLoadThread,
     MainWindow,
     PageLoadThread,
-    WatchdogTreeModel,
+    StorageScoutTreeModel,
 )
 from src.scan_exclusions import ScanExclusions
 
@@ -72,7 +72,7 @@ class FolderBrowserModelTests(unittest.TestCase):
         cache.add_item(root, "scan", True, 0, 1, None)
         cache.add_item(folder, "Folder A", True, 0, 1, root)
         cache.add_item(file_path, "cached.txt", False, 12, 1, folder)
-        model = WatchdogTreeModel({
+        model = StorageScoutTreeModel({
             "name": "root",
             "path": root,
             "is_dir": True,
@@ -97,7 +97,7 @@ class FolderBrowserModelTests(unittest.TestCase):
         )
 
         with mock.patch(
-            "src.main_window.LazyChildrenLoadThread",
+            "src.main_window.window.tree_interactions_mixin.LazyChildrenLoadThread",
             side_effect=AssertionError("cached expansion must not start a thread"),
         ):
             MainWindow._start_lazy_child_load(window, source_index)
@@ -239,7 +239,7 @@ class FolderBrowserModelTests(unittest.TestCase):
             start=mock.Mock(),
         )
         with mock.patch(
-            "src.main_window.LazyChildrenLoadThread",
+            "src.main_window.window.folder_browser_mixin.LazyChildrenLoadThread",
             return_value=fake_thread,
         ) as thread_class:
             MainWindow._load_folder_browser_children(window, root)
@@ -278,7 +278,7 @@ class FolderBrowserModelTests(unittest.TestCase):
         )
 
         with mock.patch(
-            "src.main_window.LazyChildrenLoadThread",
+            "src.main_window.window.folder_browser_mixin.LazyChildrenLoadThread",
             return_value=fake_thread,
         ) as thread_class:
             MainWindow._load_folder_browser_children(window, root)
@@ -552,7 +552,7 @@ class FolderScopeQueryTests(unittest.TestCase):
         with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
             result = PageLoadThread(1, options)._load()
 
-        model = WatchdogTreeModel(result["root_node"])
+        model = StorageScoutTreeModel(result["root_node"])
         empty_index = next(
             model.index(row, 0)
             for row in range(model.rowCount())
@@ -907,7 +907,7 @@ class FolderScopeQueryTests(unittest.TestCase):
             with (
                 mock.patch.object(file_index_tool, "FileIndexTool", FakeTool),
                 mock.patch(
-                    "src.main_window.filesystem_folder_has_visible_entries",
+                    "src.main_window.workers.page_load.filesystem_folder_has_visible_entries",
                     side_effect=AssertionError("child subtrees must not be scanned"),
                 ),
                 mock.patch.object(
@@ -1059,7 +1059,7 @@ class FolderScopeQueryTests(unittest.TestCase):
             with mock.patch.object(file_index_tool, "FileIndexTool", FakeTool):
                 result = PageLoadThread(1, options)._load()
 
-        model = WatchdogTreeModel(result["root_node"])
+        model = StorageScoutTreeModel(result["root_node"])
         parent_index = model.index(0, 0)
         child_index = model.index(0, 0, parent_index)
         file_index = model.index(0, 0, child_index)
@@ -1131,7 +1131,7 @@ class FolderScopeQueryTests(unittest.TestCase):
         with (
             mock.patch.object(file_index_tool, "FileIndexTool", FakeTool),
             mock.patch(
-                "src.main_window.os.scandir",
+                "src.main_window.workers.page_load.os.scandir",
                 side_effect=AssertionError("filesystem should not be walked"),
             ),
             mock.patch.object(
@@ -1312,7 +1312,7 @@ class FolderScopeQueryTests(unittest.TestCase):
                 "src.file_index_tool.FileIndexTool",
                 side_effect=AssertionError("database should be skipped"),
             ), mock.patch(
-                "src.main_window.filesystem_folder_has_visible_entries",
+                "src.main_window.workers.page_load.filesystem_folder_has_visible_entries",
                 side_effect=AssertionError("subtrees should not be walked"),
             ), mock.patch.object(
                 LazyChildrenLoadThread,

@@ -13,7 +13,7 @@ def main():
     if sys.platform == "win32":
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "IBMS.Watchdog"
+                "StorageScout.StorageScout"
             )
         except (AttributeError, OSError):
             pass
@@ -29,7 +29,7 @@ def main():
     app.setWindowIcon(app_icon)
     
     from src.theme import apply_theme, resolve_theme_name
-    saved_theme = QSettings("IBMS", "Watchdog").value("theme", "light")
+    saved_theme = QSettings("StorageScout", "StorageScout").value("theme", "light")
     apply_theme(app, resolve_theme_name(saved_theme))
 
     window = MainWindow()

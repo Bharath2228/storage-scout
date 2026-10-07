@@ -88,7 +88,7 @@ class TreeItem:
         return 0
 
 
-class WatchdogTreeModel(QAbstractItemModel):
+class StorageScoutTreeModel(QAbstractItemModel):
     def __init__(self, root_data, parent=None):
         super().__init__(parent)
         self.view_mode = 'Tree'
@@ -564,7 +564,7 @@ class WatchdogTreeModel(QAbstractItemModel):
         return flags
 
 
-class WatchdogFilterProxyModel(QSortFilterProxyModel):
+class StorageScoutFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setRecursiveFilteringEnabled(True)
@@ -755,6 +755,15 @@ class WatchdogFilterProxyModel(QSortFilterProxyModel):
                 and self._has_name_matching_ancestor(current_item)
             )
             if self._matches(item_data, ignore_name_filter=ignore_name_filter):
+                if item_data.get('_is_dummy'):
+                    # The dummy "Loading..." placeholder always matches so a
+                    # collapsed, not-yet-loaded folder stays visible/expandable
+                    # under an active filter. That's provisional, not a real
+                    # match - don't cache it, or the folder would keep showing
+                    # forever even after its real children load and turn out
+                    # not to match (finish_async_child_load never invalidates
+                    # this cache since it doesn't know about the proxy).
+                    return True
                 self._accepts_cache[item] = True
                 self._accepts_cache[current_item] = True
                 return True

@@ -285,7 +285,11 @@ class AuthStore:
         return entry
 
     def lockout_remaining(self, username: str) -> int:
-        attempted_username = str(username or "")
+        # Keyed by the normalized (stripped/casefolded) username, same as the
+        # account lookup itself - otherwise resubmitting a locked-out username
+        # with different case/whitespace ("Bharath" vs "bharath" vs " Bharath")
+        # would be tracked as a separate, never-locked-out attempt entry.
+        attempted_username = self._key(username)
         now = time.time()
         with _FILE_LOCK:
             attempts = self._load_attempt_state()
@@ -316,7 +320,9 @@ class AuthStore:
         self._save()
 
     def verify(self, username: str, password: str) -> bool:
-        attempted_username = str(username or "")
+        # See lockout_remaining: attempt tracking must use the same normalized
+        # key as the account lookup, or the lockout is trivially bypassable.
+        attempted_username = self._key(username)
         now = time.time()
         with _FILE_LOCK:
             attempts = self._load_attempt_state()

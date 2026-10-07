@@ -15,7 +15,7 @@ from src.main_window import (
     PathKeyIndex,
     prune_contained_paths,
 )
-from src.models import WatchdogFilterProxyModel, WatchdogTreeModel
+from src.models import StorageScoutFilterProxyModel, StorageScoutTreeModel
 
 
 class PathKeyIndexTests(unittest.TestCase):
@@ -113,8 +113,8 @@ class CombinedPageSelectionTests(unittest.TestCase):
                 },
             ],
         }
-        tree_model = WatchdogTreeModel(root)
-        proxy_model = WatchdogFilterProxyModel()
+        tree_model = StorageScoutTreeModel(root)
+        proxy_model = StorageScoutFilterProxyModel()
         proxy_model.setSourceModel(tree_model)
         selected_key = os.path.normcase(os.path.normpath(r"C:\data\selected"))
         excluded_key = os.path.normcase(
@@ -287,7 +287,7 @@ class CombinedPageSelectionTests(unittest.TestCase):
                 "children": [],
             }],
         }
-        window.tree_model = WatchdogTreeModel(later_root)
+        window.tree_model = StorageScoutTreeModel(later_root)
         window.proxy_model.setSourceModel(window.tree_model)
         window._selection_button_targets_cache = None
         window._rebuild_and_restore_page_selection()

@@ -46,7 +46,7 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Generated Watchdog runtime data
+# Generated Storage Scout runtime data
 data/*.db
 data/*.db-shm
 data/*.db-wal
@@ -64,7 +64,7 @@ scan_history.json
 
 # Generated exports
 exports/
-watchdog_export_*.csv
+storage_scout_export_*.csv
 
 # Local assistant/tool state
 .codex/

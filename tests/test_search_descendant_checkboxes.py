@@ -5,13 +5,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QModelIndex, Qt
 
-from src.models import WatchdogFilterProxyModel, WatchdogTreeModel
+from src.models import StorageScoutFilterProxyModel, StorageScoutTreeModel
 
 
 class SearchDescendantCheckboxTests(unittest.TestCase):
     def _proxy_for(self, root_data, search_text):
-        source = WatchdogTreeModel(root_data)
-        proxy = WatchdogFilterProxyModel()
+        source = StorageScoutTreeModel(root_data)
+        proxy = StorageScoutFilterProxyModel()
         proxy.setSourceModel(source)
         proxy.set_filters(
             empty_only=False,

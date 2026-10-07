@@ -47,7 +47,7 @@ def list_users(store: AuthStore) -> int:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Manage IBMS Watchdog delete authorization users.")
+    parser = argparse.ArgumentParser(description="Manage Storage Scout delete authorization users.")
     parser.add_argument(
         "--store",
         default=None,

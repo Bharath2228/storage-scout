@@ -54,7 +54,7 @@ class DeleteEmptyFolderRefreshTests(unittest.TestCase):
                 side_effect=lambda: real_tool(db_path),
             ),
             mock.patch(
-                "src.main_window.send2trash.send2trash",
+                "src.main_window.workers.delete.send2trash.send2trash",
                 side_effect=remove_from_disk,
             ),
         ):

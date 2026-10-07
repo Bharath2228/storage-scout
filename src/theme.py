@@ -89,7 +89,7 @@ def apply_theme(app, theme_name="light"):
     base_style = ""
     palette = DARK_PALETTE if resolve_theme_name(theme_name) == "dark" else LIGHT_PALETTE
     _CURRENT_PALETTE = palette
-    app.setProperty("watchdog_theme", palette["name"])
+    app.setProperty("storage_scout_theme", palette["name"])
 
     bg = palette["bg"]
     surface = palette["surface"]
@@ -1267,7 +1267,7 @@ def apply_theme(app, theme_name="light"):
         }}
         QSpinBox::down-arrow {{
             width: 10px; height: 6px;
-            image: url("{base_dir}/assets/down_arrow.svg");
+            image: url("{base_dir}/assets/{combo_arrow}");
         }}
 
         QFrame#filterDrawer QSpinBox,
